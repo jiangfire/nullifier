@@ -1,0 +1,65 @@
+package middleware
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"anonvote/internal/domain/repository"
+	"anonvote/internal/usecase"
+
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
+)
+
+func TestMapError(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{name: "invalid_request", err: usecase.ErrInvalidRequest, status: http.StatusBadRequest, code: "INVALID_REQUEST"},
+		{name: "double_voting", err: usecase.ErrDoubleVoting, status: http.StatusConflict, code: "DOUBLE_VOTING"},
+		{name: "credential_exists", err: usecase.ErrCredentialAlreadyIssued, status: http.StatusConflict, code: "CREDENTIAL_EXISTS"},
+		{name: "user_voted", err: usecase.ErrUserAlreadyVoted, status: http.StatusConflict, code: "USER_ALREADY_VOTED"},
+		{name: "invalid_credential", err: usecase.ErrInvalidCredential, status: http.StatusUnauthorized, code: "INVALID_CREDENTIAL"},
+		{name: "not_found", err: repository.ErrNotFound, status: http.StatusNotFound, code: "NOT_FOUND"},
+		{name: "unknown", err: errors.New("x"), status: http.StatusInternalServerError, code: "INTERNAL_ERROR"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, code := mapError(tc.err)
+			require.Equal(t, tc.status, status)
+			require.Equal(t, tc.code, code)
+		})
+	}
+}
+
+func TestErrorHandler(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(ErrorHandler(nil))
+	engine.GET("/bad", func(c *gin.Context) {
+		c.Error(usecase.ErrInvalidRequest)
+	})
+	engine.GET("/ok", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/bad", nil)
+	engine.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "INVALID_REQUEST", body["code"])
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/ok", nil)
+	engine.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+}

@@ -24,4 +24,9 @@ go.work.sum
 
 # env file
 .env
+issuer_keys.json
+
+# local build/module caches used in sandbox
+.gocache/
+.gomodcache/
 
