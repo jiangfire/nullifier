@@ -23,6 +23,7 @@ type ThresholdCrypto interface {
 	GenerateKeyPair() ([]byte, []byte, error)
 	SplitPrivateKey(privateKey []byte, threshold, trustees int) ([][]byte, error)
 	RecoverPrivateKey(shares [][]byte, threshold, trustees int) ([]byte, error)
+	Encrypt(publicKey []byte, plaintext []byte) ([]byte, error)
 	Decrypt(privateKey []byte, ciphertext []byte) ([]byte, error)
 }
 
@@ -290,6 +291,36 @@ func (uc *TallyUseCase) ListAuditAnchors(ctx context.Context, proposalID string)
 		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
 	}
 	return uc.anchorRepo.ListByProposal(ctx, proposalID)
+}
+
+func (uc *TallyUseCase) EncryptVoteOption(
+	ctx context.Context,
+	proposalID string,
+	option string,
+) ([]byte, error) {
+	if uc.sessionRepo == nil {
+		return nil, errors.New("decryption session repository is not configured")
+	}
+	if uc.crypto == nil {
+		return nil, errors.New("threshold crypto is not configured")
+	}
+	if proposalID == "" {
+		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
+	}
+	candidate := strings.TrimSpace(option)
+	if candidate == "" {
+		return nil, fmt.Errorf("%w: option is required", ErrInvalidRequest)
+	}
+
+	session, err := uc.sessionRepo.GetByProposal(ctx, proposalID)
+	if err != nil {
+		return nil, fmt.Errorf("load decryption session: %w", err)
+	}
+	cipher, err := uc.crypto.Encrypt(session.PublicKey, []byte(candidate))
+	if err != nil {
+		return nil, fmt.Errorf("encrypt vote option: %w", err)
+	}
+	return cipher, nil
 }
 
 func (uc *TallyUseCase) validateDeps() error {

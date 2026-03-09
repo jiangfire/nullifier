@@ -27,6 +27,7 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 
 	gin.SetMode(cfg.GinMode)
 	engine := gin.New()
+	engine.Use(middleware.CORS())
 	engine.Use(gin.Recovery())
 	engine.Use(middleware.ErrorHandler(logger))
 

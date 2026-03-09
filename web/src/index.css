@@ -1,0 +1,36 @@
+@import 'tailwindcss';
+
+:root {
+  --panel: rgba(255, 252, 244, 0.92);
+  --line: rgba(84, 108, 107, 0.24);
+  --line-strong: rgba(84, 108, 107, 0.42);
+  --text-main: #1f2f34;
+  --text-soft: #586c71;
+  --brand: #2f7f92;
+  --brand-deep: #235d72;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--text-main);
+  font-family: 'Avenir Next', 'PingFang SC', 'Noto Sans SC', 'Segoe UI', sans-serif;
+  background:
+    radial-gradient(circle at 10% 10%, rgba(64, 143, 153, 0.22) 0%, transparent 38%),
+    radial-gradient(circle at 88% 18%, rgba(115, 165, 124, 0.2) 0%, transparent 34%),
+    linear-gradient(152deg, #f2efe6 0%, #ebe8d8 100%);
+}
+
+a {
+  color: inherit;
+}

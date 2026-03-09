@@ -5,7 +5,7 @@
 ## 项目状态
 
 - 最新交接状态见：`docs/status.md`
-- 截止 2026-03-08，后端主流程已可验收，覆盖率 gate（80%）已启用并通过。
+- 截止 2026-03-09，后端主流程与前端用户门户已打通，覆盖率 gate（80%）已启用并通过。
 
 ## 快速开始
 
@@ -44,6 +44,7 @@ CRYPTO_VK_PATH=./keys/verifying.key
 - `GET /api/v1/proposals/open`：查询开放提案
 - `POST /api/v1/votes`：提交匿名投票（含 `user_id + user_pub_key + credential_signature`，服务端校验防冒充）
 - `GET /api/v1/proposals/:proposal_id/vote-status?user_id=...`：查询该用户是否已投票
+- `POST /api/v1/proposals/:proposal_id/ballot-draft`：按选项生成投票草稿（开发联调）
 - `POST /api/v1/proposals/:proposal_id/decryption/setup`：初始化阈值解密会话（threshold/trustees）
 - `POST /api/v1/proposals/:proposal_id/results/publish`：提交份额并发布计票结果
 - `GET /api/v1/proposals/:proposal_id/results`：查询已发布计票结果
@@ -53,6 +54,18 @@ CRYPTO_VK_PATH=./keys/verifying.key
 说明：
 - 票据表仅存匿名投票数据（不含用户标识）。
 - “已投票状态”单独存储为用户标识哈希，可用于“知道你是否投过票”，但不直接关联具体票内容。
+- 开发模式内置 CORS（支持 `http://localhost:3000` 本地前端跨域访问）。
+- `ballot-draft` 用于开发联调；生产模式应使用真实钱包/客户端生成 proof 与密文。
+
+## 前端门户（web）
+
+- 目录：`web/`
+- 定位：面向用户与运营的业务页面，不是 API 调试台
+- 已支持：
+  - 匿名凭证文件导入/导出
+  - 创建多选项提案
+  - 参与投票时按提案选项选择并一键生成投票草稿
+- 详细说明见：`web/README.md`
 
 ## 测试
 

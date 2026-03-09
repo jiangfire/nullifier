@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -62,6 +63,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.POST("/proposals", h.CreateProposal)
 	r.GET("/proposals/open", h.ListOpenProposals)
 	r.GET("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
+	r.POST("/proposals/:proposal_id/ballot-draft", h.PrepareBallotDraft)
 	r.POST("/proposals/:proposal_id/decryption/setup", h.SetupDecryptionSession)
 	r.POST("/proposals/:proposal_id/results/publish", h.PublishResult)
 	r.GET("/proposals/:proposal_id/results", h.GetResult)
@@ -277,6 +279,49 @@ func (h *Handler) ListOpenProposals(c *gin.Context) {
 type setupDecryptionPayload struct {
 	Threshold int `json:"threshold" validate:"required,min=1"`
 	Trustees  int `json:"trustees" validate:"required,min=1"`
+}
+
+type prepareBallotDraftPayload struct {
+	Option string `json:"option" validate:"required"`
+}
+
+const developmentProofBase64 = "ZGV2LXByb29m"
+
+func (h *Handler) PrepareBallotDraft(c *gin.Context) {
+	if h.tallyUC == nil {
+		c.Error(fmt.Errorf("tally usecase is not configured"))
+		return
+	}
+
+	proposalID := c.Param("proposal_id")
+	if proposalID == "" {
+		c.Error(fmt.Errorf("%w: proposal_id is required", usecase.ErrInvalidRequest))
+		return
+	}
+
+	var payload prepareBallotDraftPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+	if err := h.validate.Struct(payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+
+	cipher, err := h.tallyUC.EncryptVoteOption(c.Request.Context(), proposalID, payload.Option)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"proposal_id":    proposalID,
+		"option":         payload.Option,
+		"encrypted_vote": base64.StdEncoding.EncodeToString(cipher),
+		"proof":          developmentProofBase64,
+		"nullifier":      "null-" + uuid.NewString(),
+	})
 }
 
 func (h *Handler) SetupDecryptionSession(c *gin.Context) {

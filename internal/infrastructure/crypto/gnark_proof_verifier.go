@@ -52,14 +52,13 @@ func (v *GnarkProofVerifier) Verify(proof *entity.Proof, inputs entity.PublicInp
 	if len(inputs) == 0 {
 		return errors.New("public inputs are empty")
 	}
+	if !v.requireVerifyMode {
+		return nil
+	}
 
 	gnarkProof := groth16.NewProof(ecc.BN254)
 	if _, err := gnarkProof.ReadFrom(bytes.NewReader(proof.Data)); err != nil {
 		return fmt.Errorf("decode proof: %w", err)
-	}
-
-	if !v.requireVerifyMode {
-		return nil
 	}
 
 	publicWitnessBytes, ok := inputs["public_witness"]

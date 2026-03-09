@@ -111,5 +111,5 @@ func TestGnarkProofVerifier_NewWithEmptyPath_AllowsDevelopmentMode(t *testing.T)
 	err = verifier.Verify(&entity.Proof{Data: []byte("invalid-binary-proof")}, entity.PublicInputs{
 		"public_witness": []byte("foo"),
 	})
-	require.Error(t, err)
+	require.NoError(t, err)
 }

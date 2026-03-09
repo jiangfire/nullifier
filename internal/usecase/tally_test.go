@@ -369,6 +369,36 @@ func TestTallyUseCase_GetResult_Invalid(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidRequest)
 }
 
+func TestTallyUseCase_EncryptVoteOption(t *testing.T) {
+	sessionRepo := new(inMemoryDecryptionSessionRepo)
+	require.NoError(t, sessionRepo.Save(context.Background(), &entity.DecryptionSession{
+		ID:         "s1",
+		ProposalID: "proposal-1",
+		PublicKey:  []byte("public-key"),
+		Threshold:  2,
+		Trustees:   3,
+	}))
+
+	uc := NewTallyUseCase(
+		new(inMemoryVoteRepo),
+		new(inMemoryProposalRepo),
+		sessionRepo,
+		new(inMemoryTallyResultRepo),
+		new(inMemoryAuditAnchorRepo),
+		new(fakeThresholdCrypto),
+		new(fakeMerkleBuilder),
+		zap.NewNop(),
+	)
+
+	cipher, err := uc.EncryptVoteOption(context.Background(), "proposal-1", "candidate-A")
+	require.NoError(t, err)
+	require.NotEmpty(t, cipher)
+
+	plain, err := (&fakeThresholdCrypto{}).Decrypt([]byte("private-key"), cipher)
+	require.NoError(t, err)
+	assert.Equal(t, "candidate-A", string(plain))
+}
+
 // ---- in-memory fakes ----
 
 type inMemoryVoteRepo struct {
@@ -404,7 +434,9 @@ func (r *inMemoryProposalRepo) GetByID(ctx context.Context, id string) (*entity.
 	}
 	return item, nil
 }
-func (r *inMemoryProposalRepo) ListOpen(ctx context.Context) ([]*entity.Proposal, error) { return nil, nil }
+func (r *inMemoryProposalRepo) ListOpen(ctx context.Context) ([]*entity.Proposal, error) {
+	return nil, nil
+}
 
 type inMemoryDecryptionSessionRepo struct {
 	items map[string]*entity.DecryptionSession

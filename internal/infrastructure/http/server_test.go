@@ -68,6 +68,7 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/proposals", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/open"},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/vote-status?user_id=u1"},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", body: map[string]any{}},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/decryption/setup", body: map[string]any{}},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/results/publish", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/results"},
@@ -159,6 +160,13 @@ func TestHandler_InvalidPayload(t *testing.T) {
 		},
 		{
 			method: http.MethodPost,
+			path:   "/api/v1/proposals/p1/ballot-draft",
+			body: map[string]any{
+				"option": "",
+			},
+		},
+		{
+			method: http.MethodPost,
 			path:   "/api/v1/proposals/p1/results/publish",
 			body: map[string]any{
 				"shares": []string{},
@@ -196,6 +204,7 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/votes", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/credentials", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals", raw: "{"},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/decryption/setup", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/results/publish", raw: "{"},
 	}
@@ -292,7 +301,7 @@ func TestHandler_GetResult_NotFound(t *testing.T) {
 }
 
 func TestHandler_SuccessFlow(t *testing.T) {
-	engine, encrypter := buildFullStackEngine(t)
+	engine, _ := buildFullStackEngine(t)
 	ts := httptest.NewServer(engine)
 	defer ts.Close()
 
@@ -337,12 +346,21 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	_ = resp.Body.Close()
 	require.Len(t, setupResp.Shares, 3)
 
-	pubKeyBytes, err := base64.StdEncoding.DecodeString(setupResp.PublicKey)
-	require.NoError(t, err)
-	cipher, err := encrypter.Encrypt(pubKeyBytes, []byte("candidate-A"))
-	require.NoError(t, err)
-	proofBytes := buildProofBytes(t, 3, 35)
+	draftReq := map[string]any{"option": "candidate-A"}
+	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/ballot-draft", draftReq)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var draftResp struct {
+		EncryptedVote string `json:"encrypted_vote"`
+		Proof         string `json:"proof"`
+		Nullifier     string `json:"nullifier"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&draftResp))
+	_ = resp.Body.Close()
+	require.NotEmpty(t, draftResp.EncryptedVote)
+	require.NotEmpty(t, draftResp.Proof)
+	require.NotEmpty(t, draftResp.Nullifier)
 
+	var err error
 	resp, err = http.Get(ts.URL + "/api/v1/proposals/" + proposalResp.ID + "/vote-status?user_id=u-1")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -350,9 +368,9 @@ func TestHandler_SuccessFlow(t *testing.T) {
 
 	voteReq := map[string]any{
 		"proposal_id":          proposalResp.ID,
-		"encrypted_vote":       base64.StdEncoding.EncodeToString(cipher),
-		"proof":                base64.StdEncoding.EncodeToString(proofBytes),
-		"nullifier":            "null-http-1",
+		"encrypted_vote":       draftResp.EncryptedVote,
+		"proof":                draftResp.Proof,
+		"nullifier":            draftResp.Nullifier,
 		"user_id":              "u-1",
 		"user_pub_key":         credentialResp.UserPubKey,
 		"credential_signature": credentialResp.Signature,
