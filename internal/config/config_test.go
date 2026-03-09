@@ -21,6 +21,7 @@ func TestLoad_DefaultsAndEnv(t *testing.T) {
 
 	t.Setenv("GO_ENV", "test")
 	t.Setenv("SERVER_ADDRESS", ":9090")
+	t.Setenv("SERVER_MODE", "debug")
 	t.Setenv("CRYPTO_ISSUER_ROTATE_DAYS", "7")
 	t.Setenv("DB_DRIVER", "")
 	t.Setenv("DB_PATH", "ignored.db")
@@ -28,11 +29,29 @@ func TestLoad_DefaultsAndEnv(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	require.Equal(t, ":9090", cfg.ServerAddress)
-	require.Equal(t, "release", cfg.GinMode)
+	require.Equal(t, "debug", cfg.GinMode)
 	require.Equal(t, 7*24*time.Hour, cfg.CredentialIssuerRotateAfter)
 	require.NotNil(t, cfg.DB)
 	require.Equal(t, "sqlite", cfg.DB.Driver)
 	require.Equal(t, "ignored.db", cfg.DB.Database)
+}
+
+func TestLoad_RequiresVKInReleaseMode(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "release")
+	t.Setenv("CRYPTO_VK_PATH", "")
+
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "crypto.vk_path is required")
 }
 
 func TestLoad_FromConfigFile(t *testing.T) {

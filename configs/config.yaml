@@ -1,6 +1,6 @@
 server:
   address: ":8080"
-  mode: "release"
+  mode: "debug"
 
 crypto:
   vk_path: ""

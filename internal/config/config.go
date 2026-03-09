@@ -68,12 +68,26 @@ func Load() (*Config, error) {
 		dbCfg.SSLMode = ssl
 	}
 
-	return &Config{
+	cfg := &Config{
 		ServerAddress:               v.GetString("server.address"),
 		GinMode:                     v.GetString("server.mode"),
 		VerifyingKeyPath:            v.GetString("crypto.vk_path"),
 		CredentialIssuerKeyPath:     v.GetString("crypto.issuer_key_path"),
 		CredentialIssuerRotateAfter: time.Duration(v.GetInt("crypto.issuer_rotate_days")) * 24 * time.Hour,
 		DB:                          dbCfg,
-	}, nil
+	}
+	if requiresVerifyingKey(cfg.GinMode) && strings.TrimSpace(cfg.VerifyingKeyPath) == "" {
+		return nil, fmt.Errorf("crypto.vk_path is required when server.mode=%q", cfg.GinMode)
+	}
+
+	return cfg, nil
+}
+
+func requiresVerifyingKey(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "release", "prod", "production":
+		return true
+	default:
+		return false
+	}
 }

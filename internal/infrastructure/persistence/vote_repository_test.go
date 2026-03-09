@@ -2,13 +2,16 @@ package persistence
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"anonvote/internal/domain/entity"
+	"anonvote/internal/domain/repository"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestVoteRepository_SaveAndQuery(t *testing.T) {
@@ -37,4 +40,168 @@ func TestVoteRepository_SaveAndQuery(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	assert.Equal(t, "v-1", votes[0].ID)
+}
+
+func TestVoteRepository_SaveWithParticipation(t *testing.T) {
+	db, err := NewDB(&DBConfig{
+		Driver:   "sqlite",
+		Database: ":memory:",
+	})
+	require.NoError(t, err)
+	require.NoError(t, AutoMigrate(db))
+
+	repo := NewVoteRepository(db)
+	vote := &entity.Vote{
+		ID:         "v-atomic-1",
+		ProposalID: "p-atomic-1",
+		Nullifier:  "n-atomic-1",
+		Cipher:     []byte("cipher"),
+		CreatedAt:  time.Now().UTC(),
+	}
+	require.NoError(t, repo.SaveWithParticipation(context.Background(), vote, "user-hash-atomic", vote.CreatedAt))
+
+	exists, err := repo.ExistsByNullifier(context.Background(), "n-atomic-1")
+	require.NoError(t, err)
+	require.True(t, exists)
+
+	participationRepo := NewParticipationRepository(db)
+	hasVoted, err := participationRepo.HasVoted(context.Background(), "p-atomic-1", "user-hash-atomic")
+	require.NoError(t, err)
+	require.True(t, hasVoted)
+}
+
+func TestVoteRepository_SaveWithParticipation_DuplicateParticipation(t *testing.T) {
+	db, err := NewDB(&DBConfig{
+		Driver:   "sqlite",
+		Database: ":memory:",
+	})
+	require.NoError(t, err)
+	require.NoError(t, AutoMigrate(db))
+
+	repo := NewVoteRepository(db)
+	first := &entity.Vote{
+		ID:         "v-dupe-part-1",
+		ProposalID: "p-dupe-part",
+		Nullifier:  "n-dupe-part-1",
+		Cipher:     []byte("cipher"),
+		CreatedAt:  time.Now().UTC(),
+	}
+	second := &entity.Vote{
+		ID:         "v-dupe-part-2",
+		ProposalID: "p-dupe-part",
+		Nullifier:  "n-dupe-part-2",
+		Cipher:     []byte("cipher"),
+		CreatedAt:  time.Now().UTC(),
+	}
+
+	err = repo.SaveWithParticipation(context.Background(), first, "user-hash-dupe", first.CreatedAt)
+	require.NoError(t, err)
+	err = repo.SaveWithParticipation(context.Background(), second, "user-hash-dupe", second.CreatedAt)
+	require.ErrorIs(t, err, repository.ErrDuplicateParticipation)
+
+	exists, err := repo.ExistsByNullifier(context.Background(), "n-dupe-part-2")
+	require.NoError(t, err)
+	require.False(t, exists)
+}
+
+func TestVoteRepository_Save_DuplicateNullifier(t *testing.T) {
+	db, err := NewDB(&DBConfig{
+		Driver:   "sqlite",
+		Database: ":memory:",
+	})
+	require.NoError(t, err)
+	require.NoError(t, AutoMigrate(db))
+
+	repo := NewVoteRepository(db)
+	first := &entity.Vote{
+		ID:         "v-dupe-null-1",
+		ProposalID: "p-dupe-null",
+		Nullifier:  "n-dupe-null",
+		Cipher:     []byte("cipher"),
+		CreatedAt:  time.Now().UTC(),
+	}
+	second := &entity.Vote{
+		ID:         "v-dupe-null-2",
+		ProposalID: "p-dupe-null",
+		Nullifier:  "n-dupe-null",
+		Cipher:     []byte("cipher"),
+		CreatedAt:  time.Now().UTC(),
+	}
+	require.NoError(t, repo.Save(context.Background(), first))
+	require.ErrorIs(t, repo.Save(context.Background(), second), repository.ErrDuplicateVote)
+}
+
+func TestVoteRepository_SaveWithParticipation_DuplicateNullifierRollsBackParticipation(t *testing.T) {
+	db, err := NewDB(&DBConfig{
+		Driver:   "sqlite",
+		Database: ":memory:",
+	})
+	require.NoError(t, err)
+	require.NoError(t, AutoMigrate(db))
+
+	repo := NewVoteRepository(db)
+	participationRepo := NewParticipationRepository(db)
+	now := time.Now().UTC()
+
+	first := &entity.Vote{
+		ID:         "v-dupe-null-part-1",
+		ProposalID: "p-dupe-null-part",
+		Nullifier:  "n-dupe-null-part",
+		Cipher:     []byte("cipher"),
+		CreatedAt:  now,
+	}
+	second := &entity.Vote{
+		ID:         "v-dupe-null-part-2",
+		ProposalID: "p-dupe-null-part",
+		Nullifier:  "n-dupe-null-part",
+		Cipher:     []byte("cipher"),
+		CreatedAt:  now,
+	}
+
+	require.NoError(t, repo.SaveWithParticipation(context.Background(), first, "user-hash-a", now))
+	err = repo.SaveWithParticipation(context.Background(), second, "user-hash-b", now)
+	require.ErrorIs(t, err, repository.ErrDuplicateVote)
+
+	hasVoted, err := participationRepo.HasVoted(context.Background(), "p-dupe-null-part", "user-hash-b")
+	require.NoError(t, err)
+	require.False(t, hasVoted)
+}
+
+func TestVoteRepository_SaveWithParticipation_RollsBackOnParticipationError(t *testing.T) {
+	db, err := NewDB(&DBConfig{
+		Driver:   "sqlite",
+		Database: ":memory:",
+	})
+	require.NoError(t, err)
+	require.NoError(t, AutoMigrate(db))
+
+	injectedErr := errors.New("injected participation insert failure")
+	require.NoError(t, db.Callback().Create().Before("gorm:create").Register(
+		"fail_vote_participation_insert",
+		func(tx *gorm.DB) {
+			if tx.Statement != nil && tx.Statement.Schema != nil && tx.Statement.Schema.Table == "vote_participations" {
+				tx.AddError(injectedErr)
+			}
+		},
+	))
+	t.Cleanup(func() {
+		db.Callback().Create().Remove("fail_vote_participation_insert")
+	})
+
+	repo := NewVoteRepository(db)
+	vote := &entity.Vote{
+		ID:         "v-atomic-rollback",
+		ProposalID: "p-atomic-rollback",
+		Nullifier:  "n-atomic-rollback",
+		Cipher:     []byte("cipher"),
+		CreatedAt:  time.Now().UTC(),
+	}
+
+	err = repo.SaveWithParticipation(context.Background(), vote, "user-hash-rollback", vote.CreatedAt)
+	require.Error(t, err)
+	require.ErrorContains(t, err, injectedErr.Error())
+
+	exists, err := repo.ExistsByNullifier(context.Background(), "n-atomic-rollback")
+	require.NoError(t, err)
+	require.False(t, exists)
 }

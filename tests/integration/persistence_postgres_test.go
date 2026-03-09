@@ -2,17 +2,21 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"anonvote/internal/domain/entity"
+	"anonvote/internal/domain/repository"
 	"anonvote/internal/infrastructure/persistence"
 
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"gorm.io/gorm"
 )
 
 func TestVoteRepository_Postgres(t *testing.T) {
@@ -20,9 +24,85 @@ func TestVoteRepository_Postgres(t *testing.T) {
 		t.Skip("skip postgres integration in short mode")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
+	ctx, db, cleanup := setupPostgresDB(t)
+	defer cleanup()
 
+	repo := persistence.NewVoteRepository(db)
+	vote := &entity.Vote{
+		ID:         "vote-pg-1",
+		ProposalID: "proposal-1",
+		Nullifier:  "null-pg-1",
+		Cipher:     []byte("cipher"),
+		CreatedAt:  time.Now().UTC(),
+	}
+	require.NoError(t, repo.Save(ctx, vote))
+
+	exists, err := repo.ExistsByNullifier(ctx, "null-pg-1")
+	require.NoError(t, err)
+	require.True(t, exists)
+}
+
+func TestVoteRepository_Postgres_ConcurrentSameUser(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skip postgres integration in short mode")
+	}
+
+	ctx, db, cleanup := setupPostgresDB(t)
+	defer cleanup()
+
+	repo := persistence.NewVoteRepository(db)
+	proposalID := "proposal-concurrent"
+	userHash := "user-hash-concurrent"
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 2; i++ {
+		vote := &entity.Vote{
+			ID:         fmt.Sprintf("vote-pg-concurrent-%d", i+1),
+			ProposalID: proposalID,
+			Nullifier:  fmt.Sprintf("null-pg-concurrent-%d", i+1),
+			Cipher:     []byte("cipher"),
+			CreatedAt:  time.Now().UTC(),
+		}
+		wg.Add(1)
+		go func(v *entity.Vote) {
+			defer wg.Done()
+			<-start
+			errs <- repo.SaveWithParticipation(ctx, v, userHash, v.CreatedAt)
+		}(vote)
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	success := 0
+	duplicateParticipation := 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			success++
+		case errors.Is(err, repository.ErrDuplicateParticipation):
+			duplicateParticipation++
+		default:
+			require.NoError(t, err)
+		}
+	}
+
+	require.Equal(t, 1, success)
+	require.Equal(t, 1, duplicateParticipation)
+
+	votes, err := repo.GetByProposal(ctx, proposalID)
+	require.NoError(t, err)
+	require.Len(t, votes, 1)
+}
+
+func setupPostgresDB(t *testing.T) (context.Context, *gorm.DB, func()) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	req := testcontainers.ContainerRequest{
 		Image:        "postgres:16-alpine",
 		ExposedPorts: []string{"5432/tcp"},
@@ -50,18 +130,15 @@ func TestVoteRepository_Postgres(t *testing.T) {
 		})
 	}()
 	if err != nil {
+		cancel()
 		if isDockerUnavailable(err) {
 			t.Skipf("docker unavailable: %v", err)
 		}
 		require.NoError(t, err)
 	}
-	defer func() {
-		_ = pgC.Terminate(context.Background())
-	}()
 
 	host, err := pgC.Host(ctx)
 	require.NoError(t, err)
-
 	port, err := pgC.MappedPort(ctx, "5432")
 	require.NoError(t, err)
 
@@ -77,19 +154,12 @@ func TestVoteRepository_Postgres(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, persistence.AutoMigrate(db))
 
-	repo := persistence.NewVoteRepository(db)
-	vote := &entity.Vote{
-		ID:         "vote-pg-1",
-		ProposalID: "proposal-1",
-		Nullifier:  "null-pg-1",
-		Cipher:     []byte("cipher"),
-		CreatedAt:  time.Now().UTC(),
+	cleanup := func() {
+		_ = pgC.Terminate(context.Background())
+		cancel()
 	}
-	require.NoError(t, repo.Save(ctx, vote))
 
-	exists, err := repo.ExistsByNullifier(ctx, "null-pg-1")
-	require.NoError(t, err)
-	require.True(t, exists)
+	return ctx, db, cleanup
 }
 
 func isDockerUnavailable(err error) bool {

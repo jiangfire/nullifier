@@ -174,6 +174,123 @@ func TestHandler_InvalidPayload(t *testing.T) {
 	}
 }
 
+func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
+	handler := NewHandlerWithTally(
+		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, zap.NewNop()),
+		usecase.NewRegisterUseCase(nil, nil, zap.NewNop()),
+		usecase.NewProposalUseCase(nil, zap.NewNop()),
+		usecase.NewParticipationUseCase(nil, zap.NewNop()),
+		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
+		zap.NewNop(),
+	)
+	engine := NewServer(&config.Config{
+		ServerAddress: ":0",
+		GinMode:       gin.TestMode,
+	}, handler, zap.NewNop()).Engine()
+
+	malformedCases := []struct {
+		method string
+		path   string
+		raw    string
+	}{
+		{method: http.MethodPost, path: "/api/v1/votes", raw: "{"},
+		{method: http.MethodPost, path: "/api/v1/credentials", raw: "{"},
+		{method: http.MethodPost, path: "/api/v1/proposals", raw: "{"},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/decryption/setup", raw: "{"},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/results/publish", raw: "{"},
+	}
+	for _, tc := range malformedCases {
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, rawRequest(tc.method, tc.path, tc.raw))
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+	}
+
+	invalidDecodeCases := []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{
+			method: http.MethodPost,
+			path:   "/api/v1/votes",
+			body: map[string]any{
+				"proposal_id":          "p1",
+				"encrypted_vote":       base64.StdEncoding.EncodeToString([]byte("cipher")),
+				"proof":                "%%%invalid-base64%%%",
+				"nullifier":            "n-proof",
+				"user_id":              "u1",
+				"user_pub_key":         base64.StdEncoding.EncodeToString([]byte("pub")),
+				"credential_signature": base64.StdEncoding.EncodeToString([]byte("sig")),
+			},
+		},
+		{
+			method: http.MethodPost,
+			path:   "/api/v1/votes",
+			body: map[string]any{
+				"proposal_id":          "p1",
+				"encrypted_vote":       base64.StdEncoding.EncodeToString([]byte("cipher")),
+				"proof":                base64.StdEncoding.EncodeToString([]byte("proof")),
+				"nullifier":            "n-pub",
+				"user_id":              "u1",
+				"user_pub_key":         "%%%invalid-base64%%%",
+				"credential_signature": base64.StdEncoding.EncodeToString([]byte("sig")),
+			},
+		},
+		{
+			method: http.MethodPost,
+			path:   "/api/v1/votes",
+			body: map[string]any{
+				"proposal_id":          "p1",
+				"encrypted_vote":       base64.StdEncoding.EncodeToString([]byte("cipher")),
+				"proof":                base64.StdEncoding.EncodeToString([]byte("proof")),
+				"nullifier":            "n-sig",
+				"user_id":              "u1",
+				"user_pub_key":         base64.StdEncoding.EncodeToString([]byte("pub")),
+				"credential_signature": "%%%invalid-base64%%%",
+			},
+		},
+		{
+			method: http.MethodPost,
+			path:   "/api/v1/proposals",
+			body: map[string]any{
+				"title":     "x",
+				"starts_at": time.Now().UTC().Format(time.RFC3339),
+				"ends_at":   "bad-time",
+			},
+		},
+	}
+	for _, tc := range invalidDecodeCases {
+		rec := httptest.NewRecorder()
+		req := jsonRequest(t, tc.method, tc.path, tc.body)
+		engine.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+	}
+
+	runtimeErrorCases := []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodGet, path: "/api/v1/proposals/open"},
+		{method: http.MethodGet, path: "/api/v1/proposals/p1/vote-status?user_id=u1"},
+		{method: http.MethodGet, path: "/api/v1/proposals/p1/results"},
+		{method: http.MethodGet, path: "/api/v1/proposals/p1/audit-anchors"},
+	}
+	for _, tc := range runtimeErrorCases {
+		rec := httptest.NewRecorder()
+		req := jsonRequest(t, tc.method, tc.path, nil)
+		engine.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
+	}
+}
+
+func TestHandler_GetResult_NotFound(t *testing.T) {
+	engine, _ := buildFullStackEngine(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/proposals/not-exist/results", nil)
+	engine.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
 func TestHandler_SuccessFlow(t *testing.T) {
 	engine, encrypter := buildFullStackEngine(t)
 	ts := httptest.NewServer(engine)
@@ -350,6 +467,12 @@ func jsonRequest(t *testing.T, method string, path string, body any) *http.Reque
 	raw, err := json.Marshal(body)
 	require.NoError(t, err)
 	req := httptest.NewRequest(method, path, bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+func rawRequest(method string, path string, raw string) *http.Request {
+	req := httptest.NewRequest(method, path, bytes.NewBufferString(raw))
 	req.Header.Set("Content-Type", "application/json")
 	return req
 }

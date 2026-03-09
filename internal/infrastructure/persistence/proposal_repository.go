@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"errors"
+	"time"
 
 	"anonvote/internal/domain/entity"
 	"anonvote/internal/domain/repository"
@@ -34,8 +35,9 @@ func (r *ProposalRepository) GetByID(ctx context.Context, id string) (*entity.Pr
 
 func (r *ProposalRepository) ListOpen(ctx context.Context) ([]*entity.Proposal, error) {
 	var proposals []*entity.Proposal
+	now := time.Now().UTC()
 	err := r.db.WithContext(ctx).
-		Where("status = ?", "open").
+		Where("status = ? AND starts_at <= ? AND ends_at > ?", "open", now, now).
 		Order("created_at asc").
 		Find(&proposals).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {

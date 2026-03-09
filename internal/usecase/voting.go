@@ -96,6 +96,10 @@ func NewVotingUseCase(
 	}
 }
 
+type atomicVoteParticipationSaver interface {
+	SaveWithParticipation(ctx context.Context, vote *entity.Vote, userHash string, votedAt time.Time) error
+}
+
 func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) error {
 	if uc.repo == nil {
 		return errors.New("vote repository is not configured")
@@ -134,6 +138,11 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 		}
 	}
 
+	userHash := ""
+	if req.UserID != "" {
+		userHash = hashUserID(req.UserID)
+	}
+
 	exists, err := uc.repo.ExistsByNullifier(ctx, req.Nullifier)
 	if err != nil {
 		return fmt.Errorf("check nullifier: %w", err)
@@ -142,7 +151,6 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 		return ErrDoubleVoting
 	}
 	if req.UserID != "" && uc.participationRepo != nil {
-		userHash := hashUserID(req.UserID)
 		hasVoted, err := uc.participationRepo.HasVoted(ctx, req.ProposalID, userHash)
 		if err != nil {
 			return fmt.Errorf("check user participation: %w", err)
@@ -159,18 +167,39 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 		Cipher:     req.EncryptedVote,
 		CreatedAt:  time.Now().UTC(),
 	}
-	if err := uc.repo.Save(ctx, vote); err != nil {
-		return fmt.Errorf("save vote: %w", err)
-	}
+
 	if req.UserID != "" && uc.participationRepo != nil {
-		if err := uc.participationRepo.MarkVoted(
-			ctx,
-			req.ProposalID,
-			hashUserID(req.UserID),
-			vote.CreatedAt,
-		); err != nil {
-			return fmt.Errorf("mark user voted: %w", err)
+		if txSaver, ok := uc.repo.(atomicVoteParticipationSaver); ok {
+			if err := txSaver.SaveWithParticipation(ctx, vote, userHash, vote.CreatedAt); err != nil {
+				if errors.Is(err, repository.ErrDuplicateParticipation) {
+					return ErrUserAlreadyVoted
+				}
+				if errors.Is(err, repository.ErrDuplicateVote) {
+					return ErrDoubleVoting
+				}
+				return fmt.Errorf("save vote with participation: %w", err)
+			}
+		} else {
+			if err := uc.repo.Save(ctx, vote); err != nil {
+				if errors.Is(err, repository.ErrDuplicateVote) {
+					return ErrDoubleVoting
+				}
+				return fmt.Errorf("save vote: %w", err)
+			}
+			if err := uc.participationRepo.MarkVoted(
+				ctx,
+				req.ProposalID,
+				userHash,
+				vote.CreatedAt,
+			); err != nil {
+				return fmt.Errorf("mark user voted: %w", err)
+			}
 		}
+	} else if err := uc.repo.Save(ctx, vote); err != nil {
+		if errors.Is(err, repository.ErrDuplicateVote) {
+			return ErrDoubleVoting
+		}
+		return fmt.Errorf("save vote: %w", err)
 	}
 
 	uc.logger.Info("vote submitted",

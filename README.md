@@ -27,10 +27,15 @@ DB_PASSWORD=postgres
 DB_SSLMODE=disable
 CRYPTO_ISSUER_KEY_PATH=issuer_keys.json
 CRYPTO_ISSUER_ROTATE_DAYS=90
+CRYPTO_VK_PATH=./keys/verifying.key
 ```
 
 也可使用 `configs/config.yaml` 覆盖默认配置。
 其中 `crypto.issuer_key_path` 和 `crypto.issuer_rotate_days` 用于凭证签发密钥持久化与自动轮换。
+当 `server.mode` 为 `release/prod/production` 时，必须设置 `crypto.vk_path`（或环境变量 `CRYPTO_VK_PATH`），否则服务会启动失败。
+生产部署可参考：
+- `configs/config.production.yaml`（`server.mode=release`）
+- `configs/production.env.example`（显式设置 `CRYPTO_VK_PATH` 等环境变量）
 
 ## API（v1）
 

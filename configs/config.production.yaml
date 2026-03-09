@@ -1,0 +1,8 @@
+server:
+  address: ":8080"
+  mode: "release"
+
+crypto:
+  vk_path: "./keys/verifying.key"
+  issuer_key_path: "issuer_keys.json"
+  issuer_rotate_days: 90
