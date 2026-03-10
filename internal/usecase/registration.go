@@ -37,6 +37,7 @@ func NewRegisterUseCase(
 
 func (uc *RegisterUseCase) IssueCredential(
 	ctx context.Context,
+	proposalID string,
 	userID string,
 	userPubKey []byte,
 ) (*entity.Credential, error) {
@@ -46,6 +47,9 @@ func (uc *RegisterUseCase) IssueCredential(
 	if uc.issuer == nil {
 		return nil, errors.New("credential issuer is not configured")
 	}
+	if proposalID == "" {
+		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
+	}
 	if userID == "" {
 		return nil, fmt.Errorf("%w: user_id is required", ErrInvalidRequest)
 	}
@@ -53,7 +57,7 @@ func (uc *RegisterUseCase) IssueCredential(
 		return nil, fmt.Errorf("%w: user_pub_key is required", ErrInvalidRequest)
 	}
 
-	existing, err := uc.repo.GetByUserID(ctx, userID)
+	existing, err := uc.repo.GetByProposalAndUserID(ctx, proposalID, userID)
 	if err == nil && existing != nil {
 		return nil, ErrCredentialAlreadyIssued
 	}
@@ -75,6 +79,9 @@ func (uc *RegisterUseCase) IssueCredential(
 	if credential.UserID == "" {
 		credential.UserID = userID
 	}
+	if credential.ProposalID == "" {
+		credential.ProposalID = proposalID
+	}
 	if len(credential.UserPubKey) == 0 {
 		credential.UserPubKey = append([]byte(nil), userPubKey...)
 	}
@@ -91,6 +98,7 @@ func (uc *RegisterUseCase) IssueCredential(
 
 	uc.logger.Info("credential issued",
 		zap.String("credential_id", credential.ID),
+		zap.String("proposal_id", credential.ProposalID),
 		zap.String("user_id", credential.UserID),
 	)
 	return credential, nil

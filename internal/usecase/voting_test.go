@@ -89,13 +89,63 @@ func (m *encrypterMock) ValidateCiphertext(cipher []byte) error {
 
 var _ domaincrypto.Encrypter = (*encrypterMock)(nil)
 
+type decryptionSessionRepositoryMock struct {
+	mock.Mock
+}
+
+func (m *decryptionSessionRepositoryMock) Save(ctx context.Context, session *entity.DecryptionSession) error {
+	args := m.Called(ctx, session)
+	return args.Error(0)
+}
+
+func (m *decryptionSessionRepositoryMock) GetByProposal(
+	ctx context.Context,
+	proposalID string,
+) (*entity.DecryptionSession, error) {
+	args := m.Called(ctx, proposalID)
+	session, _ := args.Get(0).(*entity.DecryptionSession)
+	return session, args.Error(1)
+}
+
+var _ repository.DecryptionSessionRepository = (*decryptionSessionRepositoryMock)(nil)
+
+func expectVotingProposalAndSession(
+	proposalRepo *proposalRepositoryMock,
+	sessionRepo *decryptionSessionRepositoryMock,
+	proposalID string,
+) {
+	proposalRepo.On("GetByID", mock.Anything, proposalID).Return(&entity.Proposal{
+		ID:       proposalID,
+		Status:   "open",
+		StartsAt: time.Now().UTC().Add(-1 * time.Hour),
+		EndsAt:   time.Now().UTC().Add(1 * time.Hour),
+	}, nil).Once()
+	sessionRepo.On("GetByProposal", mock.Anything, proposalID).Return(&entity.DecryptionSession{
+		ProposalID: proposalID,
+		Threshold:  1,
+		Trustees:   1,
+		SharesJSON: `["c2hhcmUtMQ=="]`,
+	}, nil).Once()
+}
+
 func TestVotingUseCase_Submit(t *testing.T) {
 	mockRepo := new(voteRepositoryMock)
 	mockParticipationRepo := new(participationRepositoryMock)
 	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
 	mockVerifier := new(proofVerifierMock)
 	mockEncrypter := new(encrypterMock)
-	uc := NewVotingUseCase(mockRepo, mockParticipationRepo, mockCredentialRepo, mockVerifier, mockEncrypter, zap.NewNop())
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
 
 	req := &SubmitVoteRequest{
 		ProposalID:          "prop-001",
@@ -109,7 +159,9 @@ func TestVotingUseCase_Submit(t *testing.T) {
 
 	mockVerifier.On("Verify", req.Proof, mock.Anything).Return(nil).Once()
 	mockEncrypter.On("ValidateCiphertext", req.EncryptedVote).Return(nil).Once()
-	mockCredentialRepo.On("GetByUserID", mock.Anything, "u-1").Return(&entity.Credential{
+	expectVotingProposalAndSession(mockProposalRepo, mockSessionRepo, req.ProposalID)
+	mockCredentialRepo.On("GetByProposalAndUserID", mock.Anything, "prop-001", "u-1").Return(&entity.Credential{
+		ProposalID: "prop-001",
 		UserID:     "u-1",
 		UserPubKey: []byte("pub"),
 		Signature:  []byte("sig"),
@@ -130,9 +182,20 @@ func TestVotingUseCase_Submit_DoubleVoting(t *testing.T) {
 	mockRepo := new(voteRepositoryMock)
 	mockParticipationRepo := new(participationRepositoryMock)
 	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
 	mockVerifier := new(proofVerifierMock)
 	mockEncrypter := new(encrypterMock)
-	uc := NewVotingUseCase(mockRepo, mockParticipationRepo, mockCredentialRepo, mockVerifier, mockEncrypter, zap.NewNop())
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
 
 	req := &SubmitVoteRequest{
 		ProposalID:    "prop-001",
@@ -143,6 +206,7 @@ func TestVotingUseCase_Submit_DoubleVoting(t *testing.T) {
 
 	mockVerifier.On("Verify", req.Proof, mock.Anything).Return(nil).Once()
 	mockEncrypter.On("ValidateCiphertext", req.EncryptedVote).Return(nil).Once()
+	expectVotingProposalAndSession(mockProposalRepo, mockSessionRepo, req.ProposalID)
 	mockRepo.On("ExistsByNullifier", mock.Anything, "null-dup").Return(true, nil).Once()
 
 	err := uc.Submit(context.Background(), req)
@@ -153,9 +217,20 @@ func TestVotingUseCase_Submit_InvalidProof(t *testing.T) {
 	mockRepo := new(voteRepositoryMock)
 	mockParticipationRepo := new(participationRepositoryMock)
 	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
 	mockVerifier := new(proofVerifierMock)
 	mockEncrypter := new(encrypterMock)
-	uc := NewVotingUseCase(mockRepo, mockParticipationRepo, mockCredentialRepo, mockVerifier, mockEncrypter, zap.NewNop())
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
 
 	req := &SubmitVoteRequest{
 		ProposalID:    "prop-001",
@@ -165,6 +240,7 @@ func TestVotingUseCase_Submit_InvalidProof(t *testing.T) {
 	}
 
 	mockVerifier.On("Verify", req.Proof, mock.Anything).Return(errors.New("invalid")).Once()
+	expectVotingProposalAndSession(mockProposalRepo, mockSessionRepo, req.ProposalID)
 
 	err := uc.Submit(context.Background(), req)
 	assert.Error(t, err)
@@ -175,9 +251,20 @@ func TestVotingUseCase_Submit_WithPublicWitness(t *testing.T) {
 	mockRepo := new(voteRepositoryMock)
 	mockParticipationRepo := new(participationRepositoryMock)
 	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
 	mockVerifier := new(proofVerifierMock)
 	mockEncrypter := new(encrypterMock)
-	uc := NewVotingUseCase(mockRepo, mockParticipationRepo, mockCredentialRepo, mockVerifier, mockEncrypter, zap.NewNop())
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
 
 	req := &SubmitVoteRequest{
 		ProposalID:    "prop-001",
@@ -192,6 +279,7 @@ func TestVotingUseCase_Submit_WithPublicWitness(t *testing.T) {
 		return ok && string(val) == "witness-binary"
 	})).Return(nil).Once()
 	mockEncrypter.On("ValidateCiphertext", req.EncryptedVote).Return(nil).Once()
+	expectVotingProposalAndSession(mockProposalRepo, mockSessionRepo, req.ProposalID)
 	mockRepo.On("ExistsByNullifier", mock.Anything, "null-123").Return(false, nil).Once()
 	mockRepo.On("Save", mock.Anything, mock.AnythingOfType("*entity.Vote")).Return(nil).Once()
 
@@ -203,9 +291,20 @@ func TestVotingUseCase_Submit_UserAlreadyVoted(t *testing.T) {
 	mockRepo := new(voteRepositoryMock)
 	mockParticipationRepo := new(participationRepositoryMock)
 	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
 	mockVerifier := new(proofVerifierMock)
 	mockEncrypter := new(encrypterMock)
-	uc := NewVotingUseCase(mockRepo, mockParticipationRepo, mockCredentialRepo, mockVerifier, mockEncrypter, zap.NewNop())
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
 
 	req := &SubmitVoteRequest{
 		ProposalID:          "prop-001",
@@ -219,7 +318,9 @@ func TestVotingUseCase_Submit_UserAlreadyVoted(t *testing.T) {
 
 	mockVerifier.On("Verify", req.Proof, mock.Anything).Return(nil).Once()
 	mockEncrypter.On("ValidateCiphertext", req.EncryptedVote).Return(nil).Once()
-	mockCredentialRepo.On("GetByUserID", mock.Anything, "u-1").Return(&entity.Credential{
+	expectVotingProposalAndSession(mockProposalRepo, mockSessionRepo, req.ProposalID)
+	mockCredentialRepo.On("GetByProposalAndUserID", mock.Anything, "prop-001", "u-1").Return(&entity.Credential{
+		ProposalID: "prop-001",
 		UserID:     "u-1",
 		UserPubKey: []byte("pub"),
 		Signature:  []byte("sig"),
@@ -235,9 +336,20 @@ func TestVotingUseCase_Submit_UsesAtomicSaveWhenSupported(t *testing.T) {
 	mockRepo := new(voteRepositoryAtomicMock)
 	mockParticipationRepo := new(participationRepositoryMock)
 	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
 	mockVerifier := new(proofVerifierMock)
 	mockEncrypter := new(encrypterMock)
-	uc := NewVotingUseCase(mockRepo, mockParticipationRepo, mockCredentialRepo, mockVerifier, mockEncrypter, zap.NewNop())
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
 
 	req := &SubmitVoteRequest{
 		ProposalID:          "prop-001",
@@ -252,7 +364,9 @@ func TestVotingUseCase_Submit_UsesAtomicSaveWhenSupported(t *testing.T) {
 	userHash := hashUserID("u-1")
 	mockVerifier.On("Verify", req.Proof, mock.Anything).Return(nil).Once()
 	mockEncrypter.On("ValidateCiphertext", req.EncryptedVote).Return(nil).Once()
-	mockCredentialRepo.On("GetByUserID", mock.Anything, "u-1").Return(&entity.Credential{
+	expectVotingProposalAndSession(mockProposalRepo, mockSessionRepo, req.ProposalID)
+	mockCredentialRepo.On("GetByProposalAndUserID", mock.Anything, "prop-001", "u-1").Return(&entity.Credential{
+		ProposalID: "prop-001",
 		UserID:     "u-1",
 		UserPubKey: []byte("pub"),
 		Signature:  []byte("sig"),
@@ -276,9 +390,20 @@ func TestVotingUseCase_Submit_AtomicSaveDuplicateParticipation(t *testing.T) {
 	mockRepo := new(voteRepositoryAtomicMock)
 	mockParticipationRepo := new(participationRepositoryMock)
 	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
 	mockVerifier := new(proofVerifierMock)
 	mockEncrypter := new(encrypterMock)
-	uc := NewVotingUseCase(mockRepo, mockParticipationRepo, mockCredentialRepo, mockVerifier, mockEncrypter, zap.NewNop())
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
 
 	req := &SubmitVoteRequest{
 		ProposalID:          "prop-001",
@@ -293,7 +418,9 @@ func TestVotingUseCase_Submit_AtomicSaveDuplicateParticipation(t *testing.T) {
 	userHash := hashUserID("u-1")
 	mockVerifier.On("Verify", req.Proof, mock.Anything).Return(nil).Once()
 	mockEncrypter.On("ValidateCiphertext", req.EncryptedVote).Return(nil).Once()
-	mockCredentialRepo.On("GetByUserID", mock.Anything, "u-1").Return(&entity.Credential{
+	expectVotingProposalAndSession(mockProposalRepo, mockSessionRepo, req.ProposalID)
+	mockCredentialRepo.On("GetByProposalAndUserID", mock.Anything, "prop-001", "u-1").Return(&entity.Credential{
+		ProposalID: "prop-001",
 		UserID:     "u-1",
 		UserPubKey: []byte("pub"),
 		Signature:  []byte("sig"),
@@ -315,9 +442,20 @@ func TestVotingUseCase_Submit_AtomicSaveDuplicateVote(t *testing.T) {
 	mockRepo := new(voteRepositoryAtomicMock)
 	mockParticipationRepo := new(participationRepositoryMock)
 	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
 	mockVerifier := new(proofVerifierMock)
 	mockEncrypter := new(encrypterMock)
-	uc := NewVotingUseCase(mockRepo, mockParticipationRepo, mockCredentialRepo, mockVerifier, mockEncrypter, zap.NewNop())
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
 
 	req := &SubmitVoteRequest{
 		ProposalID:          "prop-001",
@@ -332,7 +470,9 @@ func TestVotingUseCase_Submit_AtomicSaveDuplicateVote(t *testing.T) {
 	userHash := hashUserID("u-1")
 	mockVerifier.On("Verify", req.Proof, mock.Anything).Return(nil).Once()
 	mockEncrypter.On("ValidateCiphertext", req.EncryptedVote).Return(nil).Once()
-	mockCredentialRepo.On("GetByUserID", mock.Anything, "u-1").Return(&entity.Credential{
+	expectVotingProposalAndSession(mockProposalRepo, mockSessionRepo, req.ProposalID)
+	mockCredentialRepo.On("GetByProposalAndUserID", mock.Anything, "prop-001", "u-1").Return(&entity.Credential{
+		ProposalID: "prop-001",
 		UserID:     "u-1",
 		UserPubKey: []byte("pub"),
 		Signature:  []byte("sig"),
@@ -354,9 +494,20 @@ func TestVotingUseCase_Submit_SaveDuplicateVote(t *testing.T) {
 	mockRepo := new(voteRepositoryMock)
 	mockParticipationRepo := new(participationRepositoryMock)
 	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
 	mockVerifier := new(proofVerifierMock)
 	mockEncrypter := new(encrypterMock)
-	uc := NewVotingUseCase(mockRepo, mockParticipationRepo, mockCredentialRepo, mockVerifier, mockEncrypter, zap.NewNop())
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
 
 	req := &SubmitVoteRequest{
 		ProposalID:    "prop-001",
@@ -367,6 +518,7 @@ func TestVotingUseCase_Submit_SaveDuplicateVote(t *testing.T) {
 
 	mockVerifier.On("Verify", req.Proof, mock.Anything).Return(nil).Once()
 	mockEncrypter.On("ValidateCiphertext", req.EncryptedVote).Return(nil).Once()
+	expectVotingProposalAndSession(mockProposalRepo, mockSessionRepo, req.ProposalID)
 	mockRepo.On("ExistsByNullifier", mock.Anything, "null-dup-save").Return(false, nil).Once()
 	mockRepo.On("Save", mock.Anything, mock.AnythingOfType("*entity.Vote")).Return(repository.ErrDuplicateVote).Once()
 
@@ -378,9 +530,20 @@ func TestVotingUseCase_Submit_InvalidCredential(t *testing.T) {
 	mockRepo := new(voteRepositoryMock)
 	mockParticipationRepo := new(participationRepositoryMock)
 	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
 	mockVerifier := new(proofVerifierMock)
 	mockEncrypter := new(encrypterMock)
-	uc := NewVotingUseCase(mockRepo, mockParticipationRepo, mockCredentialRepo, mockVerifier, mockEncrypter, zap.NewNop())
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
 
 	req := &SubmitVoteRequest{
 		ProposalID:          "prop-001",
@@ -394,7 +557,9 @@ func TestVotingUseCase_Submit_InvalidCredential(t *testing.T) {
 
 	mockVerifier.On("Verify", req.Proof, mock.Anything).Return(nil).Once()
 	mockEncrypter.On("ValidateCiphertext", req.EncryptedVote).Return(nil).Once()
-	mockCredentialRepo.On("GetByUserID", mock.Anything, "u-1").Return(&entity.Credential{
+	expectVotingProposalAndSession(mockProposalRepo, mockSessionRepo, req.ProposalID)
+	mockCredentialRepo.On("GetByProposalAndUserID", mock.Anything, "prop-001", "u-1").Return(&entity.Credential{
+		ProposalID: "prop-001",
 		UserID:     "u-1",
 		UserPubKey: []byte("pub"),
 		Signature:  []byte("sig-y"),
@@ -402,4 +567,79 @@ func TestVotingUseCase_Submit_InvalidCredential(t *testing.T) {
 
 	err := uc.Submit(context.Background(), req)
 	assert.ErrorIs(t, err, ErrInvalidCredential)
+}
+
+func TestVotingUseCase_Submit_RejectClosedProposal(t *testing.T) {
+	mockRepo := new(voteRepositoryMock)
+	mockParticipationRepo := new(participationRepositoryMock)
+	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
+	mockVerifier := new(proofVerifierMock)
+	mockEncrypter := new(encrypterMock)
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
+
+	req := &SubmitVoteRequest{
+		ProposalID:    "prop-closed",
+		EncryptedVote: []byte("cipher"),
+		Proof:         &entity.Proof{Data: []byte("proof")},
+		Nullifier:     "null-closed",
+	}
+
+	mockProposalRepo.On("GetByID", mock.Anything, "prop-closed").Return(&entity.Proposal{
+		ID:       "prop-closed",
+		Status:   "closed",
+		StartsAt: time.Now().UTC().Add(-2 * time.Hour),
+		EndsAt:   time.Now().UTC().Add(-1 * time.Hour),
+	}, nil).Once()
+
+	err := uc.Submit(context.Background(), req)
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+}
+
+func TestVotingUseCase_Submit_RejectWhenSessionMissing(t *testing.T) {
+	mockRepo := new(voteRepositoryMock)
+	mockParticipationRepo := new(participationRepositoryMock)
+	mockCredentialRepo := new(credentialRepositoryMock)
+	mockProposalRepo := new(proposalRepositoryMock)
+	mockSessionRepo := new(decryptionSessionRepositoryMock)
+	mockVerifier := new(proofVerifierMock)
+	mockEncrypter := new(encrypterMock)
+	uc := NewVotingUseCase(
+		mockRepo,
+		mockParticipationRepo,
+		mockCredentialRepo,
+		mockProposalRepo,
+		mockSessionRepo,
+		mockVerifier,
+		mockEncrypter,
+		zap.NewNop(),
+	)
+
+	req := &SubmitVoteRequest{
+		ProposalID:    "prop-no-session",
+		EncryptedVote: []byte("cipher"),
+		Proof:         &entity.Proof{Data: []byte("proof")},
+		Nullifier:     "null-no-session",
+	}
+
+	mockProposalRepo.On("GetByID", mock.Anything, "prop-no-session").Return(&entity.Proposal{
+		ID:       "prop-no-session",
+		Status:   "open",
+		StartsAt: time.Now().UTC().Add(-1 * time.Hour),
+		EndsAt:   time.Now().UTC().Add(1 * time.Hour),
+	}, nil).Once()
+	mockSessionRepo.On("GetByProposal", mock.Anything, "prop-no-session").Return((*entity.DecryptionSession)(nil), repository.ErrNotFound).Once()
+
+	err := uc.Submit(context.Background(), req)
+	assert.ErrorIs(t, err, ErrInvalidRequest)
 }

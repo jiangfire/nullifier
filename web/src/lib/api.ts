@@ -8,6 +8,7 @@ export interface ApiCallOptions {
   method?: ApiMethod;
   query?: Record<string, QueryValue>;
   body?: unknown;
+  headers?: Record<string, string>;
   signal?: AbortSignal;
 }
 
@@ -66,10 +67,17 @@ function extractError(payload: unknown, status: number): string {
 }
 
 export async function apiCall<T = unknown>(options: ApiCallOptions): Promise<ApiCallResult<T>> {
-  const { baseUrl, path, method = 'GET', query, body, signal } = options;
+  const { baseUrl, path, method = 'GET', query, body, headers: extraHeaders, signal } = options;
   const url = buildUrl(baseUrl, path, query);
 
   const headers = new Headers();
+  if (extraHeaders) {
+    for (const [key, value] of Object.entries(extraHeaders)) {
+      if (value.trim() !== '') {
+        headers.set(key, value);
+      }
+    }
+  }
   const requestInit: RequestInit = { method, headers, signal };
   if (body !== undefined) {
     headers.set('Content-Type', 'application/json');

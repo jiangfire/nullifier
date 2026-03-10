@@ -54,6 +54,10 @@ func TestTallyUseCase_SetupAndPublishResult(t *testing.T) {
 	require.Len(t, setup.Shares, 3)
 	require.NotEmpty(t, setup.PublicKey)
 
+	storedSession, err := sessionRepo.GetByProposal(context.Background(), proposal.ID)
+	require.NoError(t, err)
+	require.Len(t, parseSharesForTest(t, storedSession.SharesJSON), 3)
+
 	pubKeyBytes, err := base64.StdEncoding.DecodeString(setup.PublicKey)
 	require.NoError(t, err)
 
@@ -120,7 +124,7 @@ func TestTallyUseCase_PublishResult_RejectsInsufficientShares(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestTallyUseCase_SetupThresholdSession_RejectOpenProposal(t *testing.T) {
+func TestTallyUseCase_SetupThresholdSession_RejectsOpenProposal(t *testing.T) {
 	proposalRepo := new(inMemoryProposalRepo)
 	proposalRepo.items = map[string]*entity.Proposal{}
 	proposalRepo.items["proposal-1"] = &entity.Proposal{
@@ -143,7 +147,41 @@ func TestTallyUseCase_SetupThresholdSession_RejectOpenProposal(t *testing.T) {
 	)
 
 	_, err := uc.SetupThresholdSession(context.Background(), "proposal-1", 2, 3)
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrInvalidRequest)
+}
+
+func TestTallyUseCase_PublishResult_RejectOpenProposal(t *testing.T) {
+	proposalRepo := new(inMemoryProposalRepo)
+	proposalRepo.items = map[string]*entity.Proposal{
+		"proposal-1": {
+			ID:        "proposal-1",
+			Status:    "open",
+			StartsAt:  time.Now().UTC().Add(-1 * time.Hour),
+			EndsAt:    time.Now().UTC().Add(1 * time.Hour),
+			CreatedAt: time.Now().UTC().Add(-2 * time.Hour),
+		},
+	}
+	uc := NewTallyUseCase(
+		new(inMemoryVoteRepo),
+		proposalRepo,
+		new(inMemoryDecryptionSessionRepo),
+		new(inMemoryTallyResultRepo),
+		new(inMemoryAuditAnchorRepo),
+		new(fakeThresholdCrypto),
+		new(fakeMerkleBuilder),
+		zap.NewNop(),
+	)
+	require.NoError(t, uc.sessionRepo.Save(context.Background(), &entity.DecryptionSession{
+		ID:         "s1",
+		ProposalID: "proposal-1",
+		Threshold:  2,
+		Trustees:   3,
+		PublicKey:  []byte("public-key"),
+		SharesJSON: `["` + hashShare("share-1") + `","` + hashShare("share-2") + `","` + hashShare("share-3") + `"]`,
+	}))
+
+	_, err := uc.PublishResult(context.Background(), "proposal-1", []string{"share-1", "share-2"})
+	require.ErrorIs(t, err, ErrInvalidRequest)
 }
 
 func TestTallyUseCase_ListAuditAnchors(t *testing.T) {
@@ -245,7 +283,6 @@ func TestTallyUseCase_PublishResult_InvalidShareFormat(t *testing.T) {
 	)
 	setup, err := uc.SetupThresholdSession(context.Background(), "proposal-1", 2, 3)
 	require.NoError(t, err)
-	require.Len(t, setup.Shares, 3)
 
 	_, err = uc.PublishResult(context.Background(), "proposal-1", []string{"not-base64", setup.Shares[1]})
 	require.ErrorIs(t, err, ErrInvalidRequest)
@@ -588,4 +625,12 @@ func cloneTally(in map[string]int) map[string]int {
 		out[k] = v
 	}
 	return out
+}
+
+func parseSharesForTest(t *testing.T, raw string) []string {
+	t.Helper()
+
+	values, err := parseSharesJSON(raw)
+	require.NoError(t, err)
+	return values
 }

@@ -5,7 +5,7 @@
 ## 项目状态
 
 - 最新交接状态见：`docs/status.md`
-- 截止 2026-03-09，后端主流程与前端用户门户已打通，覆盖率 gate（80%）已启用并通过。
+- 截止 2026-03-10，后端主流程、前端运营面板、CLI 工作流已打通，覆盖率 gate（80%）已启用并通过。
 
 ## 快速开始
 
@@ -13,6 +13,19 @@
 go mod tidy
 go test ./...
 go run ./cmd/server
+```
+
+也可以直接使用命令行客户端操作流程：
+
+```bash
+go run ./cmd/cli health
+go run ./cmd/cli -admin-token dev-admin-token proposal-create -title "Board" -options "A,B" -start 2026-03-10T10:00:00Z -end 2026-03-10T12:00:00Z
+go run ./cmd/cli credential-issue -proposal p-1 -user u-1001 -out cred-u1001.json
+go run ./cmd/cli ballot-draft -proposal p-1 -option A -out ballot.json
+go run ./cmd/cli vote-submit -credential-file cred-u1001.json -ballot-file ballot.json
+go run ./cmd/cli -admin-token dev-admin-token credentials-list -proposal p-1
+go run ./cmd/cli -admin-token dev-admin-token decrypt-setup -proposal p-1 -threshold 2 -trustees 3 -out shares.json
+go run ./cmd/cli -admin-token dev-admin-token result-publish -proposal p-1 -shares-file shares.json
 ```
 
 默认使用 SQLite 文件数据库 `anonvote.db`，可通过环境变量切到 PostgreSQL：
@@ -33,6 +46,7 @@ CRYPTO_VK_PATH=./keys/verifying.key
 也可使用 `configs/config.yaml` 覆盖默认配置。
 其中 `crypto.issuer_key_path` 和 `crypto.issuer_rotate_days` 用于凭证签发密钥持久化与自动轮换。
 当 `server.mode` 为 `release/prod/production` 时，必须设置 `crypto.vk_path`（或环境变量 `CRYPTO_VK_PATH`），否则服务会启动失败。
+管理面接口使用 `server.admin_bearer_token` 鉴权；在 `release/prod/production` 下该值不能为空，否则服务会启动失败。
 生产部署可参考：
 - `configs/config.production.yaml`（`server.mode=release`）
 - `configs/production.env.example`（显式设置 `CRYPTO_VK_PATH` 等环境变量）
@@ -44,6 +58,7 @@ CRYPTO_VK_PATH=./keys/verifying.key
 - `GET /api/v1/proposals/open`：查询开放提案
 - `POST /api/v1/votes`：提交匿名投票（含 `user_id + user_pub_key + credential_signature`，服务端校验防冒充）
 - `GET /api/v1/proposals/:proposal_id/vote-status?user_id=...`：查询该用户是否已投票
+- `GET /api/v1/proposals/:proposal_id/credentials`：管理员查询该提案下所有凭证及 `has_voted`
 - `POST /api/v1/proposals/:proposal_id/ballot-draft`：按选项生成投票草稿（开发联调）
 - `POST /api/v1/proposals/:proposal_id/decryption/setup`：初始化阈值解密会话（threshold/trustees）
 - `POST /api/v1/proposals/:proposal_id/results/publish`：提交份额并发布计票结果
@@ -54,6 +69,8 @@ CRYPTO_VK_PATH=./keys/verifying.key
 说明：
 - 票据表仅存匿名投票数据（不含用户标识）。
 - “已投票状态”单独存储为用户标识哈希，可用于“知道你是否投过票”，但不直接关联具体票内容。
+- 匿名凭证按 `proposal_id` 绑定，管理员可看到某提案下哪些凭证已投票，但看不到凭证对应的投票内容。
+- 管理面接口（创建提案、凭证状态、解密 setup、发布结果）都需要 `Authorization: Bearer <admin token>`。
 - 开发模式内置 CORS（支持 `http://localhost:3000` 本地前端跨域访问）。
 - `ballot-draft` 用于开发联调；生产模式应使用真实钱包/客户端生成 proof 与密文。
 
@@ -65,11 +82,15 @@ CRYPTO_VK_PATH=./keys/verifying.key
   - 匿名凭证文件导入/导出
   - 创建多选项提案
   - 参与投票时按提案选项选择并一键生成投票草稿
+  - 管理员凭证状态面板（只看 `has_voted`，不看投票内容）
+  - 顶部 `Admin Token` 输入，直连已鉴权的管理接口
 - 详细说明见：`web/README.md`
 
 ## 测试
 
 - 单元/集成/E2E：`go test ./...`
+- CLI 帮助：`go run ./cmd/cli help`
+- 前端类型检查：`pnpm --dir web exec tsc --noEmit`
 - 生成 gomock：`go generate ./internal/usecase/mocks`
 - 覆盖率门槛（默认检查 `usecase + config + di + http`，总覆盖率需 >=80%）：
   - PowerShell：`./scripts/check-coverage.ps1`

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	domaincrypto "anonvote/internal/domain/crypto"
@@ -70,6 +71,8 @@ type VotingUseCase struct {
 	repo              repository.VoteRepository
 	participationRepo repository.ParticipationRepository
 	credentialRepo    repository.CredentialRepository
+	proposalRepo      repository.ProposalRepository
+	sessionRepo       repository.DecryptionSessionRepository
 	verifier          domaincrypto.ProofVerifier
 	encrypter         domaincrypto.Encrypter
 	logger            *zap.Logger
@@ -79,6 +82,8 @@ func NewVotingUseCase(
 	repo repository.VoteRepository,
 	participationRepo repository.ParticipationRepository,
 	credentialRepo repository.CredentialRepository,
+	proposalRepo repository.ProposalRepository,
+	sessionRepo repository.DecryptionSessionRepository,
 	verifier domaincrypto.ProofVerifier,
 	encrypter domaincrypto.Encrypter,
 	logger *zap.Logger,
@@ -90,6 +95,8 @@ func NewVotingUseCase(
 		repo:              repo,
 		participationRepo: participationRepo,
 		credentialRepo:    credentialRepo,
+		proposalRepo:      proposalRepo,
+		sessionRepo:       sessionRepo,
 		verifier:          verifier,
 		encrypter:         encrypter,
 		logger:            logger,
@@ -104,11 +111,31 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 	if uc.repo == nil {
 		return errors.New("vote repository is not configured")
 	}
+	if uc.proposalRepo == nil {
+		return errors.New("proposal repository is not configured")
+	}
+	if uc.sessionRepo == nil {
+		return errors.New("decryption session repository is not configured")
+	}
 	if uc.verifier == nil {
 		return errors.New("proof verifier is not configured")
 	}
 	if err := req.Validate(); err != nil {
 		return err
+	}
+	proposal, err := uc.proposalRepo.GetByID(ctx, req.ProposalID)
+	if err != nil {
+		return fmt.Errorf("load proposal: %w", err)
+	}
+	if !isProposalOpenForVoting(proposal, time.Now().UTC()) {
+		return fmt.Errorf("%w: proposal is not open for voting", ErrInvalidRequest)
+	}
+	_, err = uc.sessionRepo.GetByProposal(ctx, req.ProposalID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return fmt.Errorf("%w: decryption session is not ready", ErrInvalidRequest)
+		}
+		return fmt.Errorf("load decryption session: %w", err)
 	}
 
 	if err := uc.verifier.Verify(req.Proof, req.PublicInputs()); err != nil {
@@ -123,7 +150,7 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 		if uc.credentialRepo == nil {
 			return errors.New("credential repository is not configured")
 		}
-		credential, err := uc.credentialRepo.GetByUserID(ctx, req.UserID)
+		credential, err := uc.credentialRepo.GetByProposalAndUserID(ctx, req.ProposalID, req.UserID)
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
 				return ErrInvalidCredential
@@ -212,4 +239,21 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 func hashUserID(userID string) string {
 	sum := sha256.Sum256([]byte(userID))
 	return hex.EncodeToString(sum[:])
+}
+
+func isProposalOpenForVoting(proposal *entity.Proposal, now time.Time) bool {
+	if proposal == nil {
+		return false
+	}
+	status := strings.ToLower(strings.TrimSpace(proposal.Status))
+	if status != "" && status != "open" {
+		return false
+	}
+	if !proposal.StartsAt.IsZero() && now.Before(proposal.StartsAt) {
+		return false
+	}
+	if !proposal.EndsAt.IsZero() && !now.Before(proposal.EndsAt) {
+		return false
+	}
+	return true
 }

@@ -20,11 +20,12 @@ pnpm run dev
 4. `GET /api/v1/proposals/open`
 5. `POST /api/v1/votes`
 6. `GET /api/v1/proposals/:proposal_id/vote-status`
-7. `POST /api/v1/proposals/:proposal_id/ballot-draft`
-8. `POST /api/v1/proposals/:proposal_id/decryption/setup`
-9. `POST /api/v1/proposals/:proposal_id/results/publish`
-10. `GET /api/v1/proposals/:proposal_id/results`
-11. `GET /api/v1/proposals/:proposal_id/audit-anchors`
+7. `GET /api/v1/proposals/:proposal_id/credentials`
+8. `POST /api/v1/proposals/:proposal_id/ballot-draft`
+9. `POST /api/v1/proposals/:proposal_id/decryption/setup`
+10. `POST /api/v1/proposals/:proposal_id/results/publish`
+11. `GET /api/v1/proposals/:proposal_id/results`
+12. `GET /api/v1/proposals/:proposal_id/audit-anchors`
 
 ## 页面模块
 
@@ -32,6 +33,7 @@ pnpm run dev
 2. `我的身份`：签发匿名凭证（user_id + user_pub_key），支持凭证文件导入/导出
 3. `参与投票`：按提案选项选择投票意向，支持“一键生成投票凭据”或导入投票凭据 JSON 后提交
 4. `计票与审计`：创建提案（支持多选项）、初始化解密、发布结果、查询结果、查看审计锚点
+5. `凭证状态`：管理员查看某提案下所有凭证的 `has_voted` 状态
 
 ## 推荐使用顺序
 
@@ -40,7 +42,14 @@ pnpm run dev
 3. 在 `投票大厅` 选择提案
 4. 在 `计票与审计` 先初始化对应提案的解密会话
 5. 在 `参与投票` 按选项生成投票凭据并提交（或导入外部凭据）
-6. 在 `计票与审计` 完成后续发布与审计流程
+6. 在 `凭证状态` 查看提案内凭证的投票状态
+7. 在 `计票与审计` 完成后续发布与审计流程
+
+## 鉴权说明
+
+- 用户接口不需要管理员令牌。
+- 管理接口需要在页面顶部填写 `Admin Token`，前端会自动附带 `Authorization: Bearer <token>`。
+- 凭证状态面板只显示某提案下哪些凭证已投票，不显示具体投票内容。
 
 提示：在 `参与投票` 中可使用“按选项生成投票凭据”，该能力依赖后端
 `POST /api/v1/proposals/:proposal_id/ballot-draft`，并需要先初始化对应提案的解密会话。

@@ -12,7 +12,7 @@ import (
 func TestCORS_AllowsOriginOnSimpleRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(CORS())
+	engine.Use(CORS([]string{"http://localhost:3000"}))
 	engine.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
@@ -31,7 +31,7 @@ func TestCORS_AllowsOriginOnSimpleRequest(t *testing.T) {
 func TestCORS_HandlesPreflightRequest(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(CORS())
+	engine.Use(CORS([]string{"http://localhost:3000"}))
 	engine.POST("/api/v1/votes", func(c *gin.Context) {
 		c.Status(http.StatusCreated)
 	})
@@ -45,4 +45,22 @@ func TestCORS_HandlesPreflightRequest(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	require.Equal(t, "http://localhost:3000", rec.Header().Get("Access-Control-Allow-Origin"))
 	require.Equal(t, "GET,POST,OPTIONS", rec.Header().Get("Access-Control-Allow-Methods"))
+}
+
+func TestCORS_RejectsUnknownOriginPreflight(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(CORS([]string{"http://localhost:3000"}))
+	engine.POST("/api/v1/votes", func(c *gin.Context) {
+		c.Status(http.StatusCreated)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/votes", nil)
+	req.Header.Set("Origin", "http://evil.example.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	engine.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Empty(t, rec.Header().Get("Access-Control-Allow-Origin"))
 }

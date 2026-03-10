@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"anonvote/internal/config"
+	"anonvote/internal/domain/entity"
 	"anonvote/internal/infrastructure/crypto"
 	httpapi "anonvote/internal/infrastructure/http"
 	"anonvote/internal/infrastructure/persistence"
@@ -38,6 +39,7 @@ func (c *voteCircuit) Define(api frontend.API) error {
 }
 
 func TestAPI_VoteFlow_E2E(t *testing.T) {
+	const adminToken = "secret"
 	db, err := persistence.NewDB(&persistence.DBConfig{
 		Driver:   "sqlite",
 		Database: ":memory:",
@@ -64,10 +66,19 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	merkleBuilder := crypto.NewGnarkMerkleRootBuilder()
 
 	logger := zap.NewNop()
-	votingUC := usecase.NewVotingUseCase(voteRepo, participationRepo, credentialRepo, proofVerifier, encrypter, logger)
+	votingUC := usecase.NewVotingUseCase(
+		voteRepo,
+		participationRepo,
+		credentialRepo,
+		proposalRepo,
+		sessionRepo,
+		proofVerifier,
+		encrypter,
+		logger,
+	)
 	registerUC := usecase.NewRegisterUseCase(credentialRepo, issuer, logger)
 	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
-	participationUC := usecase.NewParticipationUseCase(participationRepo, logger)
+	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(
 		voteRepo,
 		proposalRepo,
@@ -81,8 +92,9 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 
 	handler := httpapi.NewHandlerWithTally(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
 	server := httpapi.NewServer(&config.Config{
-		ServerAddress: ":0",
-		GinMode:       "test",
+		ServerAddress:    ":0",
+		GinMode:          "test",
+		AdminBearerToken: adminToken,
 	}, handler, logger)
 
 	ts := httptest.NewServer(server.Engine())
@@ -90,10 +102,31 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 
 	// 1) 签发凭证
 	credentialReq := map[string]any{
+		"proposal_id":  "",
 		"user_id":      "u-1",
 		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key")),
 	}
-	resp := postJSON(t, ts.URL+"/api/v1/credentials", credentialReq)
+	var resp *http.Response
+	// 2) 创建提案
+	startAt := time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339)
+	endAt := time.Now().UTC().Add(90 * time.Minute).Format(time.RFC3339)
+	proposalReq := map[string]any{
+		"title":       "Board Election",
+		"description": "Vote for one candidate",
+		"starts_at":   startAt,
+		"ends_at":     endAt,
+	}
+	resp = postAdminJSON(t, ts.URL+"/api/v1/proposals", adminToken, proposalReq)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var proposalResp struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
+	resp.Body.Close()
+	require.NotEmpty(t, proposalResp.ID)
+
+	credentialReq["proposal_id"] = proposalResp.ID
+	resp = postJSON(t, ts.URL+"/api/v1/credentials", credentialReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var credentialResp struct {
 		UserPubKey string `json:"user_pub_key"`
@@ -104,30 +137,12 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	require.NotEmpty(t, credentialResp.UserPubKey)
 	require.NotEmpty(t, credentialResp.Signature)
 
-	// 2) 创建提案
-	startAt := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
-	endAt := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339)
-	proposalReq := map[string]any{
-		"title":       "Board Election",
-		"description": "Vote for one candidate",
-		"starts_at":   startAt,
-		"ends_at":     endAt,
-	}
-	resp = postJSON(t, ts.URL+"/api/v1/proposals", proposalReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var proposalResp struct {
-		ID string `json:"id"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
-	resp.Body.Close()
-	require.NotEmpty(t, proposalResp.ID)
-
 	// 3) 初始化阈值解密会话
 	setupReq := map[string]any{
 		"threshold": 2,
 		"trustees":  3,
 	}
-	resp = postJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/decryption/setup", setupReq)
+	resp = postAdminJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/decryption/setup", adminToken, setupReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var setupResp struct {
 		PublicKey string   `json:"public_key"`
@@ -143,6 +158,13 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 
 	ciphertext, err := encrypter.Encrypt(publicKey, []byte("candidate-A"))
 	require.NoError(t, err)
+
+	require.NoError(t, db.Model(&entity.Proposal{}).
+		Where("id = ?", proposalResp.ID).
+		Updates(map[string]any{
+			"starts_at": time.Now().UTC().Add(-5 * time.Minute),
+			"ends_at":   time.Now().UTC().Add(30 * time.Minute),
+		}).Error)
 
 	proofBytes := mustBuildProofBytes(t, 3, 35)
 	voteReq := map[string]any{
@@ -208,10 +230,17 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	resp.Body.Close()
 
 	// 8) 发布计票结果
+	require.NoError(t, db.Model(&entity.Proposal{}).
+		Where("id = ?", proposalResp.ID).
+		Updates(map[string]any{
+			"status":  "closed",
+			"ends_at": time.Now().UTC().Add(-1 * time.Second),
+		}).Error)
+
 	publishReq := map[string]any{
 		"shares": setupResp.Shares[:2],
 	}
-	resp = postJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/results/publish", publishReq)
+	resp = postAdminJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/results/publish", adminToken, publishReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var publishResp struct {
 		TotalVotes int            `json:"total_votes"`
@@ -250,6 +279,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 }
 
 func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
+	const adminToken = "secret"
 	db, err := persistence.NewDB(&persistence.DBConfig{
 		Driver:   "sqlite",
 		Database: "file:e2e-concurrent?mode=memory&cache=shared&_busy_timeout=5000",
@@ -276,10 +306,19 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 	merkleBuilder := crypto.NewGnarkMerkleRootBuilder()
 
 	logger := zap.NewNop()
-	votingUC := usecase.NewVotingUseCase(voteRepo, participationRepo, credentialRepo, proofVerifier, encrypter, logger)
+	votingUC := usecase.NewVotingUseCase(
+		voteRepo,
+		participationRepo,
+		credentialRepo,
+		proposalRepo,
+		sessionRepo,
+		proofVerifier,
+		encrypter,
+		logger,
+	)
 	registerUC := usecase.NewRegisterUseCase(credentialRepo, issuer, logger)
 	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
-	participationUC := usecase.NewParticipationUseCase(participationRepo, logger)
+	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(
 		voteRepo,
 		proposalRepo,
@@ -293,18 +332,36 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 
 	handler := httpapi.NewHandlerWithTally(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
 	server := httpapi.NewServer(&config.Config{
-		ServerAddress: ":0",
-		GinMode:       "test",
+		ServerAddress:    ":0",
+		GinMode:          "test",
+		AdminBearerToken: adminToken,
 	}, handler, logger)
 
 	ts := httptest.NewServer(server.Engine())
 	defer ts.Close()
 
 	credentialReq := map[string]any{
+		"proposal_id":  "",
 		"user_id":      "u-concurrent",
 		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key-concurrent")),
 	}
-	resp := postJSON(t, ts.URL+"/api/v1/credentials", credentialReq)
+	var resp *http.Response
+	proposalReq := map[string]any{
+		"title":       "Concurrent Vote Test",
+		"description": "Same user concurrent vote requests",
+		"starts_at":   time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339),
+		"ends_at":     time.Now().UTC().Add(90 * time.Minute).Format(time.RFC3339),
+	}
+	resp = postAdminJSON(t, ts.URL+"/api/v1/proposals", adminToken, proposalReq)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var proposalResp struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
+	_ = resp.Body.Close()
+
+	credentialReq["proposal_id"] = proposalResp.ID
+	resp = postJSON(t, ts.URL+"/api/v1/credentials", credentialReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var credentialResp struct {
 		UserPubKey string `json:"user_pub_key"`
@@ -313,22 +370,26 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credentialResp))
 	_ = resp.Body.Close()
 
-	proposalReq := map[string]any{
-		"title":       "Concurrent Vote Test",
-		"description": "Same user concurrent vote requests",
-		"starts_at":   time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339),
-		"ends_at":     time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339),
+	setupReq := map[string]any{
+		"threshold": 2,
+		"trustees":  3,
 	}
-	resp = postJSON(t, ts.URL+"/api/v1/proposals", proposalReq)
+	resp = postAdminJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/decryption/setup", adminToken, setupReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var proposalResp struct {
-		ID string `json:"id"`
+	var setupResp struct {
+		PublicKey string `json:"public_key"`
 	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&setupResp))
 	_ = resp.Body.Close()
 
-	_, publicKey, err := encrypter.GenerateKeyPair()
+	publicKey, err := base64.StdEncoding.DecodeString(setupResp.PublicKey)
 	require.NoError(t, err)
+	require.NoError(t, db.Model(&entity.Proposal{}).
+		Where("id = ?", proposalResp.ID).
+		Updates(map[string]any{
+			"starts_at": time.Now().UTC().Add(-5 * time.Minute),
+			"ends_at":   time.Now().UTC().Add(30 * time.Minute),
+		}).Error)
 	ciphertext, err := encrypter.Encrypt(publicKey, []byte("candidate-concurrent"))
 	require.NoError(t, err)
 	proofBytes := mustBuildProofBytes(t, 3, 35)
@@ -420,6 +481,22 @@ func postJSON(t *testing.T, url string, body any) *http.Response {
 	require.NoError(t, err)
 
 	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
+	require.NoError(t, err)
+	return resp
+}
+
+func postAdminJSON(t *testing.T, url string, token string, body any) *http.Response {
+	t.Helper()
+
+	data, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	return resp
 }

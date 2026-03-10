@@ -28,10 +28,10 @@ func (r *CredentialRepository) Save(ctx context.Context, credential *entity.Cred
 	return r.Create(ctx, credential)
 }
 
-func (r *CredentialRepository) GetByUserID(ctx context.Context, userID string) (*entity.Credential, error) {
+func (r *CredentialRepository) GetByProposalAndUserID(ctx context.Context, proposalID string, userID string) (*entity.Credential, error) {
 	var credential entity.Credential
 	err := r.db.WithContext(ctx).
-		Where("user_id = ?", userID).
+		Where("proposal_id = ? AND user_id = ?", proposalID, userID).
 		First(&credential).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, repository.ErrNotFound
@@ -40,4 +40,15 @@ func (r *CredentialRepository) GetByUserID(ctx context.Context, userID string) (
 		return nil, err
 	}
 	return &credential, nil
+}
+
+func (r *CredentialRepository) ListByProposal(ctx context.Context, proposalID string) ([]*entity.Credential, error) {
+	var credentials []*entity.Credential
+	if err := r.db.WithContext(ctx).
+		Where("proposal_id = ?", proposalID).
+		Order("issued_at ASC").
+		Find(&credentials).Error; err != nil {
+		return nil, err
+	}
+	return credentials, nil
 }

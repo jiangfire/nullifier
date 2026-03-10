@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"anonvote/internal/config"
+	"anonvote/internal/domain/entity"
 	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	"anonvote/internal/infrastructure/persistence"
 	"anonvote/internal/usecase"
@@ -21,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
 type serverTestCircuit struct {
@@ -54,8 +56,9 @@ func TestServer_DefaultAndRunError(t *testing.T) {
 
 func TestHandler_WithNilUsecases(t *testing.T) {
 	engine := NewServer(&config.Config{
-		ServerAddress: ":0",
-		GinMode:       gin.TestMode,
+		ServerAddress:    ":0",
+		GinMode:          gin.TestMode,
+		AdminBearerToken: "secret",
 	}, NewHandlerWithTally(nil, nil, nil, nil, nil, zap.NewNop()), zap.NewNop()).Engine()
 
 	cases := []struct {
@@ -65,12 +68,9 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 	}{
 		{method: http.MethodPost, path: "/api/v1/votes", body: map[string]any{}},
 		{method: http.MethodPost, path: "/api/v1/credentials", body: map[string]any{}},
-		{method: http.MethodPost, path: "/api/v1/proposals", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/open"},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/vote-status?user_id=u1"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", body: map[string]any{}},
-		{method: http.MethodPost, path: "/api/v1/proposals/p1/decryption/setup", body: map[string]any{}},
-		{method: http.MethodPost, path: "/api/v1/proposals/p1/results/publish", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/results"},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/audit-anchors"},
 	}
@@ -81,20 +81,37 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 		engine.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
 	}
+
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   any
+	}{
+		{method: http.MethodPost, path: "/api/v1/proposals", body: map[string]any{}},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/decryption/setup", body: map[string]any{}},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/results/publish", body: map[string]any{}},
+	} {
+		rec := httptest.NewRecorder()
+		req := jsonRequest(t, tc.method, tc.path, tc.body)
+		req.Header.Set("Authorization", "Bearer secret")
+		engine.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
+	}
 }
 
 func TestHandler_InvalidPayload(t *testing.T) {
 	handler := NewHandlerWithTally(
-		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, zap.NewNop()),
+		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		usecase.NewRegisterUseCase(nil, nil, zap.NewNop()),
 		usecase.NewProposalUseCase(nil, zap.NewNop()),
-		usecase.NewParticipationUseCase(nil, zap.NewNop()),
+		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
 		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		zap.NewNop(),
 	)
 	engine := NewServer(&config.Config{
-		ServerAddress: ":0",
-		GinMode:       gin.TestMode,
+		ServerAddress:    ":0",
+		GinMode:          gin.TestMode,
+		AdminBearerToken: "secret",
 	}, handler, zap.NewNop()).Engine()
 
 	cases := []struct {
@@ -133,6 +150,7 @@ func TestHandler_InvalidPayload(t *testing.T) {
 			method: http.MethodPost,
 			path:   "/api/v1/credentials",
 			body: map[string]any{
+				"proposal_id":  "p1",
 				"user_id":      "u1",
 				"user_pub_key": "%%%invalid-base64%%%",
 			},
@@ -177,6 +195,9 @@ func TestHandler_InvalidPayload(t *testing.T) {
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
 		req := jsonRequest(t, tc.method, tc.path, tc.body)
+		if tc.path == "/api/v1/proposals" || tc.path == "/api/v1/proposals/p1/decryption/setup" || tc.path == "/api/v1/proposals/p1/results/publish" {
+			req.Header.Set("Authorization", "Bearer secret")
+		}
 		engine.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	}
@@ -184,16 +205,17 @@ func TestHandler_InvalidPayload(t *testing.T) {
 
 func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 	handler := NewHandlerWithTally(
-		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, zap.NewNop()),
+		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		usecase.NewRegisterUseCase(nil, nil, zap.NewNop()),
 		usecase.NewProposalUseCase(nil, zap.NewNop()),
-		usecase.NewParticipationUseCase(nil, zap.NewNop()),
+		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
 		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		zap.NewNop(),
 	)
 	engine := NewServer(&config.Config{
-		ServerAddress: ":0",
-		GinMode:       gin.TestMode,
+		ServerAddress:    ":0",
+		GinMode:          gin.TestMode,
+		AdminBearerToken: "secret",
 	}, handler, zap.NewNop()).Engine()
 
 	malformedCases := []struct {
@@ -210,7 +232,11 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 	}
 	for _, tc := range malformedCases {
 		rec := httptest.NewRecorder()
-		engine.ServeHTTP(rec, rawRequest(tc.method, tc.path, tc.raw))
+		req := rawRequest(tc.method, tc.path, tc.raw)
+		if tc.path == "/api/v1/proposals" || tc.path == "/api/v1/proposals/p1/decryption/setup" || tc.path == "/api/v1/proposals/p1/results/publish" {
+			req.Header.Set("Authorization", "Bearer secret")
+		}
+		engine.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	}
 
@@ -271,6 +297,9 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 	for _, tc := range invalidDecodeCases {
 		rec := httptest.NewRecorder()
 		req := jsonRequest(t, tc.method, tc.path, tc.body)
+		if tc.path == "/api/v1/proposals" {
+			req.Header.Set("Authorization", "Bearer secret")
+		}
 		engine.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	}
@@ -293,7 +322,7 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 }
 
 func TestHandler_GetResult_NotFound(t *testing.T) {
-	engine, _ := buildFullStackEngine(t)
+	engine, _, _ := buildFullStackEngine(t)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/proposals/not-exist/results", nil)
 	engine.ServeHTTP(rec, req)
@@ -301,15 +330,32 @@ func TestHandler_GetResult_NotFound(t *testing.T) {
 }
 
 func TestHandler_SuccessFlow(t *testing.T) {
-	engine, _ := buildFullStackEngine(t)
+	engine, _, db := buildFullStackEngine(t)
 	ts := httptest.NewServer(engine)
 	defer ts.Close()
 
 	credentialReq := map[string]any{
+		"proposal_id": "",
 		"user_id":      "u-1",
 		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key")),
 	}
-	resp := doPostJSON(t, ts.URL+"/api/v1/credentials", credentialReq)
+	var resp *http.Response
+	proposalReq := map[string]any{
+		"title":       "Board Election",
+		"description": "Vote",
+		"starts_at":   time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339),
+		"ends_at":     time.Now().UTC().Add(90 * time.Minute).Format(time.RFC3339),
+	}
+	resp = doPostAdminJSON(t, ts.URL+"/api/v1/proposals", "secret", proposalReq)
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var proposalResp struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
+	_ = resp.Body.Close()
+
+	credentialReq["proposal_id"] = proposalResp.ID
+	resp = doPostJSON(t, ts.URL+"/api/v1/credentials", credentialReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var credentialResp struct {
 		UserPubKey string `json:"user_pub_key"`
@@ -318,25 +364,11 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credentialResp))
 	_ = resp.Body.Close()
 
-	proposalReq := map[string]any{
-		"title":       "Board Election",
-		"description": "Vote",
-		"starts_at":   time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339),
-		"ends_at":     time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339),
-	}
-	resp = doPostJSON(t, ts.URL+"/api/v1/proposals", proposalReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var proposalResp struct {
-		ID string `json:"id"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
-	_ = resp.Body.Close()
-
 	setupReq := map[string]any{
 		"threshold": 2,
 		"trustees":  3,
 	}
-	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/decryption/setup", setupReq)
+	resp = doPostAdminJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/decryption/setup", "secret", setupReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var setupResp struct {
 		PublicKey string   `json:"public_key"`
@@ -345,6 +377,13 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&setupResp))
 	_ = resp.Body.Close()
 	require.Len(t, setupResp.Shares, 3)
+
+	require.NoError(t, db.Model(&entity.Proposal{}).
+		Where("id = ?", proposalResp.ID).
+		Updates(map[string]any{
+			"starts_at": time.Now().UTC().Add(-5 * time.Minute),
+			"ends_at":   time.Now().UTC().Add(30 * time.Minute),
+		}).Error)
 
 	draftReq := map[string]any{"option": "candidate-A"}
 	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/ballot-draft", draftReq)
@@ -389,10 +428,17 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_ = resp.Body.Close()
 
+	require.NoError(t, db.Model(&entity.Proposal{}).
+		Where("id = ?", proposalResp.ID).
+		Updates(map[string]any{
+			"status":  "closed",
+			"ends_at": time.Now().UTC().Add(-1 * time.Second),
+		}).Error)
+
 	publishReq := map[string]any{
 		"shares": setupResp.Shares[:2],
 	}
-	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/results/publish", publishReq)
+	resp = doPostAdminJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/results/publish", "secret", publishReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	_ = resp.Body.Close()
 
@@ -407,7 +453,7 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
-func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.KyberElGamal) {
+func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.KyberElGamal, *gorm.DB) {
 	t.Helper()
 
 	db, err := persistence.NewDB(&persistence.DBConfig{
@@ -432,18 +478,28 @@ func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.KyberElGamal)
 	merkleBuilder := cryptoinfra.NewGnarkMerkleRootBuilder()
 
 	logger := zap.NewNop()
-	votingUC := usecase.NewVotingUseCase(voteRepo, participationRepo, credentialRepo, proofVerifier, encrypter, logger)
+	votingUC := usecase.NewVotingUseCase(
+		voteRepo,
+		participationRepo,
+		credentialRepo,
+		proposalRepo,
+		sessionRepo,
+		proofVerifier,
+		encrypter,
+		logger,
+	)
 	registerUC := usecase.NewRegisterUseCase(credentialRepo, issuer, logger)
 	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
-	participationUC := usecase.NewParticipationUseCase(participationRepo, logger)
+	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo, encrypter, merkleBuilder, logger)
 
 	handler := NewHandlerWithTally(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
 	server := NewServer(&config.Config{
-		ServerAddress: ":0",
-		GinMode:       gin.TestMode,
+		ServerAddress:    ":0",
+		GinMode:          gin.TestMode,
+		AdminBearerToken: "secret",
 	}, handler, logger)
-	return server.Engine(), encrypter
+	return server.Engine(), encrypter, db
 }
 
 func buildProofBytes(t *testing.T, x int, y int) []byte {
@@ -473,6 +529,22 @@ func doPostJSON(t *testing.T, url string, body any) *http.Response {
 	raw, err := json.Marshal(body)
 	require.NoError(t, err)
 	resp, err := http.Post(url, "application/json", bytes.NewReader(raw))
+	require.NoError(t, err)
+	return resp
+}
+
+func doPostAdminJSON(t *testing.T, url string, token string, body any) *http.Response {
+	t.Helper()
+
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	return resp
 }

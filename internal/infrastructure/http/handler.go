@@ -60,12 +60,9 @@ func NewHandlerWithTally(
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.POST("/votes", h.SubmitVote)
 	r.POST("/credentials", h.IssueCredential)
-	r.POST("/proposals", h.CreateProposal)
 	r.GET("/proposals/open", h.ListOpenProposals)
 	r.GET("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
 	r.POST("/proposals/:proposal_id/ballot-draft", h.PrepareBallotDraft)
-	r.POST("/proposals/:proposal_id/decryption/setup", h.SetupDecryptionSession)
-	r.POST("/proposals/:proposal_id/results/publish", h.PublishResult)
 	r.GET("/proposals/:proposal_id/results", h.GetResult)
 	r.GET("/proposals/:proposal_id/audit-anchors", h.ListAuditAnchors)
 }
@@ -147,6 +144,7 @@ func (h *Handler) SubmitVote(c *gin.Context) {
 }
 
 type issueCredentialPayload struct {
+	ProposalID string `json:"proposal_id" validate:"required"`
 	UserID     string `json:"user_id" validate:"required"`
 	UserPubKey string `json:"user_pub_key" validate:"required,base64"`
 }
@@ -173,7 +171,7 @@ func (h *Handler) IssueCredential(c *gin.Context) {
 		return
 	}
 
-	credential, err := h.registerUC.IssueCredential(c.Request.Context(), payload.UserID, pubKeyBytes)
+	credential, err := h.registerUC.IssueCredential(c.Request.Context(), payload.ProposalID, payload.UserID, pubKeyBytes)
 	if err != nil {
 		c.Error(err)
 		return
@@ -181,6 +179,7 @@ func (h *Handler) IssueCredential(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, gin.H{
 		"id":                 credential.ID,
+		"proposal_id":        credential.ProposalID,
 		"user_id":            credential.UserID,
 		"user_pub_key":       base64.StdEncoding.EncodeToString(credential.UserPubKey),
 		"signature":          base64.StdEncoding.EncodeToString(credential.Signature),
@@ -493,4 +492,38 @@ func (h *Handler) GetVoteStatus(c *gin.Context) {
 		"user_id":     userID,
 		"has_voted":   hasVoted,
 	})
+}
+
+func (h *Handler) ListProposalCredentialStatuses(c *gin.Context) {
+	if h.participationUC == nil {
+		c.Error(fmt.Errorf("participation usecase is not configured"))
+		return
+	}
+
+	proposalID := c.Param("proposal_id")
+	if proposalID == "" {
+		c.Error(fmt.Errorf("%w: proposal_id is required", usecase.ErrInvalidRequest))
+		return
+	}
+
+	items, err := h.participationUC.ListCredentialStatuses(c.Request.Context(), proposalID)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+
+	out := make([]gin.H, 0, len(items))
+	for _, item := range items {
+		out = append(out, gin.H{
+			"credential_id":       item.CredentialID,
+			"proposal_id":         item.ProposalID,
+			"user_id":             item.UserID,
+			"user_pub_key":        base64.StdEncoding.EncodeToString(item.UserPubKey),
+			"issuer_key_version":  item.IssuerKeyVersion,
+			"issued_at":           item.IssuedAt.Format(time.RFC3339),
+			"has_voted":           item.HasVoted,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"items": out})
 }

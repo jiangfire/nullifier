@@ -14,10 +14,10 @@ import (
 )
 
 func TestConstructors_DefaultLogger(t *testing.T) {
-	require.NotNil(t, NewVotingUseCase(nil, nil, nil, nil, nil, nil))
+	require.NotNil(t, NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil))
 	require.NotNil(t, NewRegisterUseCase(nil, nil, nil))
 	require.NotNil(t, NewProposalUseCase(nil, nil))
-	require.NotNil(t, NewParticipationUseCase(nil, nil))
+	require.NotNil(t, NewParticipationUseCase(nil, nil, nil))
 	require.NotNil(t, NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil))
 }
 
@@ -52,12 +52,12 @@ func TestCreateProposalRequest_Validate(t *testing.T) {
 
 func TestRegisterUseCase_IssueCredential_InvalidAndMissingDeps(t *testing.T) {
 	uc := NewRegisterUseCase(nil, nil, nil)
-	_, err := uc.IssueCredential(context.Background(), "u1", []byte("pub"))
+	_, err := uc.IssueCredential(context.Background(), "p1", "u1", []byte("pub"))
 	require.Error(t, err)
 
 	repo := new(credentialRepositoryMock)
 	uc = NewRegisterUseCase(repo, nil, nil)
-	_, err = uc.IssueCredential(context.Background(), "", []byte("pub"))
+	_, err = uc.IssueCredential(context.Background(), "", "", []byte("pub"))
 	require.Error(t, err)
 }
 
@@ -66,8 +66,8 @@ func TestRegisterUseCase_IssueCredential_CheckExistingError(t *testing.T) {
 	issuer := new(credentialIssuerMock)
 	uc := NewRegisterUseCase(repo, issuer, nil)
 
-	repo.On("GetByUserID", mock.Anything, "u1").Return((*entity.Credential)(nil), errors.New("db down")).Once()
-	_, err := uc.IssueCredential(context.Background(), "u1", []byte("pub"))
+	repo.On("GetByProposalAndUserID", mock.Anything, "p1", "u1").Return((*entity.Credential)(nil), errors.New("db down")).Once()
+	_, err := uc.IssueCredential(context.Background(), "p1", "u1", []byte("pub"))
 	require.Error(t, err)
 }
 
@@ -80,17 +80,17 @@ func TestProposalUseCase_ListOpen_RepoNil(t *testing.T) {
 func TestParticipationUseCase_HasVoted_RepoError(t *testing.T) {
 	repo := new(participationRepositoryMock)
 	repo.On("HasVoted", mock.Anything, "p1", hashUserID("u1")).Return(false, repository.ErrNotFound).Once()
-	uc := NewParticipationUseCase(repo, nil)
+	uc := NewParticipationUseCase(repo, nil, nil)
 	_, err := uc.HasVoted(context.Background(), "p1", "u1")
 	require.Error(t, err)
 }
 
 func TestVotingUseCase_Submit_MissingDeps(t *testing.T) {
-	uc := NewVotingUseCase(nil, nil, nil, nil, nil, nil)
+	uc := NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil)
 	err := uc.Submit(context.Background(), &SubmitVoteRequest{})
 	require.Error(t, err)
 
-	uc = NewVotingUseCase(new(voteRepositoryMock), nil, nil, nil, nil, nil)
+	uc = NewVotingUseCase(new(voteRepositoryMock), nil, nil, nil, nil, nil, nil, nil)
 	err = uc.Submit(context.Background(), &SubmitVoteRequest{})
 	require.Error(t, err)
 }

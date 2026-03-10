@@ -14,6 +14,8 @@ import (
 type Config struct {
 	ServerAddress               string
 	GinMode                     string
+	CORSAllowedOrigins          []string
+	AdminBearerToken            string
 	VerifyingKeyPath            string
 	CredentialIssuerKeyPath     string
 	CredentialIssuerRotateAfter time.Duration
@@ -31,6 +33,13 @@ func Load() (*Config, error) {
 
 	v.SetDefault("server.address", ":8080")
 	v.SetDefault("server.mode", "release")
+	v.SetDefault("server.cors_allowed_origins", []string{
+		"http://localhost:3000",
+		"http://127.0.0.1:3000",
+		"http://localhost:5173",
+		"http://127.0.0.1:5173",
+	})
+	v.SetDefault("server.admin_bearer_token", "")
 	v.SetDefault("crypto.vk_path", "")
 	v.SetDefault("crypto.issuer_key_path", "issuer_keys.json")
 	v.SetDefault("crypto.issuer_rotate_days", 90)
@@ -71,6 +80,8 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		ServerAddress:               v.GetString("server.address"),
 		GinMode:                     v.GetString("server.mode"),
+		CORSAllowedOrigins:          v.GetStringSlice("server.cors_allowed_origins"),
+		AdminBearerToken:            strings.TrimSpace(v.GetString("server.admin_bearer_token")),
 		VerifyingKeyPath:            v.GetString("crypto.vk_path"),
 		CredentialIssuerKeyPath:     v.GetString("crypto.issuer_key_path"),
 		CredentialIssuerRotateAfter: time.Duration(v.GetInt("crypto.issuer_rotate_days")) * 24 * time.Hour,
@@ -78,6 +89,9 @@ func Load() (*Config, error) {
 	}
 	if requiresVerifyingKey(cfg.GinMode) && strings.TrimSpace(cfg.VerifyingKeyPath) == "" {
 		return nil, fmt.Errorf("crypto.vk_path is required when server.mode=%q", cfg.GinMode)
+	}
+	if requiresVerifyingKey(cfg.GinMode) && cfg.AdminBearerToken == "" {
+		return nil, fmt.Errorf("server.admin_bearer_token is required when server.mode=%q", cfg.GinMode)
 	}
 
 	return cfg, nil

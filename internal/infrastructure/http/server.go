@@ -27,7 +27,7 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 
 	gin.SetMode(cfg.GinMode)
 	engine := gin.New()
-	engine.Use(middleware.CORS())
+	engine.Use(middleware.CORS(cfg.CORSAllowedOrigins))
 	engine.Use(gin.Recovery())
 	engine.Use(middleware.ErrorHandler(logger))
 
@@ -37,6 +37,13 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 
 	v1 := engine.Group("/api/v1")
 	handler.RegisterRoutes(v1)
+
+	admin := v1.Group("/")
+	admin.Use(middleware.RequireAdminBearerToken(cfg.AdminBearerToken))
+	admin.POST("/proposals", handler.CreateProposal)
+	admin.GET("/proposals/:proposal_id/credentials", handler.ListProposalCredentialStatuses)
+	admin.POST("/proposals/:proposal_id/decryption/setup", handler.SetupDecryptionSession)
+	admin.POST("/proposals/:proposal_id/results/publish", handler.PublishResult)
 
 	return &Server{
 		engine: engine,

@@ -22,6 +22,7 @@ func TestLoad_DefaultsAndEnv(t *testing.T) {
 	t.Setenv("GO_ENV", "test")
 	t.Setenv("SERVER_ADDRESS", ":9090")
 	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "secret-token")
 	t.Setenv("CRYPTO_ISSUER_ROTATE_DAYS", "7")
 	t.Setenv("DB_DRIVER", "")
 	t.Setenv("DB_PATH", "ignored.db")
@@ -30,6 +31,7 @@ func TestLoad_DefaultsAndEnv(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ":9090", cfg.ServerAddress)
 	require.Equal(t, "debug", cfg.GinMode)
+	require.Equal(t, "secret-token", cfg.AdminBearerToken)
 	require.Equal(t, 7*24*time.Hour, cfg.CredentialIssuerRotateAfter)
 	require.NotNil(t, cfg.DB)
 	require.Equal(t, "sqlite", cfg.DB.Driver)
@@ -48,10 +50,30 @@ func TestLoad_RequiresVKInReleaseMode(t *testing.T) {
 
 	t.Setenv("SERVER_MODE", "release")
 	t.Setenv("CRYPTO_VK_PATH", "")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "secret")
 
 	_, err = Load()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "crypto.vk_path is required")
+}
+
+func TestLoad_RequiresAdminTokenInReleaseMode(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "release")
+	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "server.admin_bearer_token is required")
 }
 
 func TestLoad_FromConfigFile(t *testing.T) {
@@ -84,6 +106,7 @@ func TestLoad_FromConfigFile(t *testing.T) {
 server:
   address: ":7001"
   mode: "debug"
+  admin_bearer_token: "ops-secret"
 crypto:
   vk_path: "vk.bin"
   issuer_key_path: "issuer.json"
@@ -102,6 +125,7 @@ db:
 	require.NoError(t, err)
 	require.Equal(t, ":7001", cfg.ServerAddress)
 	require.Equal(t, "debug", cfg.GinMode)
+	require.Equal(t, "ops-secret", cfg.AdminBearerToken)
 	require.Equal(t, "vk.bin", cfg.VerifyingKeyPath)
 	require.Equal(t, "issuer.json", cfg.CredentialIssuerKeyPath)
 	require.Equal(t, 15*24*time.Hour, cfg.CredentialIssuerRotateAfter)

@@ -98,8 +98,8 @@ func (uc *TallyUseCase) SetupThresholdSession(
 	if err != nil {
 		return nil, fmt.Errorf("load proposal: %w", err)
 	}
-	if !isProposalClosed(proposal, time.Now().UTC()) {
-		return nil, fmt.Errorf("%w: proposal must be closed before tally", ErrInvalidRequest)
+	if isProposalOpenForVoting(proposal, time.Now().UTC()) {
+		return nil, fmt.Errorf("%w: proposal decryption must be prepared before voting opens", ErrInvalidRequest)
 	}
 
 	privateKey, publicKey, err := uc.crypto.GenerateKeyPair()
@@ -112,7 +112,7 @@ func (uc *TallyUseCase) SetupThresholdSession(
 	}
 
 	encodedShares := encodeBase64List(shares)
-	sharesJSON, err := json.Marshal(encodedShares)
+	sharesJSON, err := json.Marshal(hashShareList(encodedShares))
 	if err != nil {
 		return nil, fmt.Errorf("marshal shares: %w", err)
 	}
@@ -164,6 +164,13 @@ func (uc *TallyUseCase) PublishResult(
 	session, err := uc.sessionRepo.GetByProposal(ctx, proposalID)
 	if err != nil {
 		return nil, fmt.Errorf("load decryption session: %w", err)
+	}
+	proposal, err := uc.proposalRepo.GetByID(ctx, proposalID)
+	if err != nil {
+		return nil, fmt.Errorf("load proposal: %w", err)
+	}
+	if !isProposalClosed(proposal, time.Now().UTC()) {
+		return nil, fmt.Errorf("%w: proposal must be closed before tally", ErrInvalidRequest)
 	}
 	if len(providedShares) < session.Threshold {
 		return nil, fmt.Errorf("%w: insufficient shares", ErrInvalidRequest)
@@ -394,11 +401,24 @@ func ensureSharesBelongToSession(registered []string, provided []string) error {
 		allowed[item] = struct{}{}
 	}
 	for _, item := range provided {
-		if _, ok := allowed[item]; !ok {
+		if _, ok := allowed[hashShare(item)]; !ok {
 			return fmt.Errorf("share does not belong to session")
 		}
 	}
 	return nil
+}
+
+func hashShare(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func hashShareList(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, hashShare(value))
+	}
+	return out
 }
 
 func buildVoteLeaf(vote *entity.Vote) []byte {

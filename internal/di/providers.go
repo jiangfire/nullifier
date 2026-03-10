@@ -83,11 +83,22 @@ func NewVotingUseCase(
 	repo repository.VoteRepository,
 	participationRepo repository.ParticipationRepository,
 	credentialRepo repository.CredentialRepository,
+	proposalRepo repository.ProposalRepository,
+	sessionRepo repository.DecryptionSessionRepository,
 	verifier domaincrypto.ProofVerifier,
 	encrypter domaincrypto.Encrypter,
 	logger *zap.Logger,
 ) *usecase.VotingUseCase {
-	return usecase.NewVotingUseCase(repo, participationRepo, credentialRepo, verifier, encrypter, logger)
+	return usecase.NewVotingUseCase(
+		repo,
+		participationRepo,
+		credentialRepo,
+		proposalRepo,
+		sessionRepo,
+		verifier,
+		encrypter,
+		logger,
+	)
 }
 
 func NewRegisterUseCase(
@@ -107,9 +118,10 @@ func NewProposalUseCase(
 
 func NewParticipationUseCase(
 	repo repository.ParticipationRepository,
+	credentialRepo repository.CredentialRepository,
 	logger *zap.Logger,
 ) *usecase.ParticipationUseCase {
-	return usecase.NewParticipationUseCase(repo, logger)
+	return usecase.NewParticipationUseCase(repo, credentialRepo, logger)
 }
 
 func NewTallyUseCase(

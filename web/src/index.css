@@ -1,13 +1,23 @@
+@import url('https://fonts.googleapis.com/css2?family=Fira+Sans:wght@400;500;600;700;800&family=Fira+Code:wght@400;500;600;700&display=swap');
 @import 'tailwindcss';
 
 :root {
-  --panel: rgba(255, 252, 244, 0.92);
-  --line: rgba(84, 108, 107, 0.24);
-  --line-strong: rgba(84, 108, 107, 0.42);
-  --text-main: #1f2f34;
-  --text-soft: #586c71;
-  --brand: #2f7f92;
-  --brand-deep: #235d72;
+  color-scheme: light;
+  --surface: rgba(255, 255, 255, 0.97);
+  --surface-alt: rgba(248, 251, 255, 0.95);
+  --surface-strong: #f8fbff;
+  --line: rgba(100, 116, 139, 0.28);
+  --line-strong: rgba(71, 85, 105, 0.46);
+  --text-main: #0f172a;
+  --text-soft: #475569;
+  --brand: #0f172a;
+  --brand-strong: #1e293b;
+  --brand-soft: rgba(226, 232, 240, 0.9);
+  --cta: #16a34a;
+  --cta-strong: #15803d;
+  --danger: #c2410c;
+  --focus-ring: rgba(37, 99, 235, 0.35);
+  --mono-font: 'Fira Code', 'IBM Plex Mono', 'JetBrains Mono', 'SFMono-Regular', 'Consolas', monospace;
 }
 
 * {
@@ -24,11 +34,12 @@ body,
 body {
   margin: 0;
   color: var(--text-main);
-  font-family: 'Avenir Next', 'PingFang SC', 'Noto Sans SC', 'Segoe UI', sans-serif;
+  font-family: 'Fira Sans', 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Segoe UI', sans-serif;
+  line-height: 1.5;
   background:
-    radial-gradient(circle at 10% 10%, rgba(64, 143, 153, 0.22) 0%, transparent 38%),
-    radial-gradient(circle at 88% 18%, rgba(115, 165, 124, 0.2) 0%, transparent 34%),
-    linear-gradient(152deg, #f2efe6 0%, #ebe8d8 100%);
+    radial-gradient(circle at 8% 10%, rgba(14, 116, 144, 0.14), transparent 34%),
+    radial-gradient(circle at 92% 8%, rgba(34, 197, 94, 0.14), transparent 28%),
+    linear-gradient(160deg, #f1f5f9 0%, #f8fafc 46%, #eff6ff 100%);
 }
 
 a {

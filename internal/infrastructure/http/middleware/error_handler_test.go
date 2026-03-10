@@ -26,6 +26,7 @@ func TestMapError(t *testing.T) {
 		{name: "credential_exists", err: usecase.ErrCredentialAlreadyIssued, status: http.StatusConflict, code: "CREDENTIAL_EXISTS"},
 		{name: "user_voted", err: usecase.ErrUserAlreadyVoted, status: http.StatusConflict, code: "USER_ALREADY_VOTED"},
 		{name: "invalid_credential", err: usecase.ErrInvalidCredential, status: http.StatusUnauthorized, code: "INVALID_CREDENTIAL"},
+		{name: "unauthorized", err: usecase.ErrUnauthorized, status: http.StatusUnauthorized, code: "UNAUTHORIZED"},
 		{name: "not_found", err: repository.ErrNotFound, status: http.StatusNotFound, code: "NOT_FOUND"},
 		{name: "unknown", err: errors.New("x"), status: http.StatusInternalServerError, code: "INTERNAL_ERROR"},
 	}
@@ -46,6 +47,9 @@ func TestErrorHandler(t *testing.T) {
 	engine.GET("/bad", func(c *gin.Context) {
 		c.Error(usecase.ErrInvalidRequest)
 	})
+	engine.GET("/boom", func(c *gin.Context) {
+		c.Error(errors.New("sql: connection refused"))
+	})
 	engine.GET("/ok", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
@@ -57,6 +61,16 @@ func TestErrorHandler(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Equal(t, "INVALID_REQUEST", body["code"])
+	require.Equal(t, "invalid request", body["error"])
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/boom", nil)
+	engine.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	body = map[string]any{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "INTERNAL_ERROR", body["code"])
+	require.Equal(t, "internal server error", body["error"])
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/ok", nil)

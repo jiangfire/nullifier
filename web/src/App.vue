@@ -1,975 +1,859 @@
-
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue';
-import { apiCall } from './lib/api';
+import { reactive, ref } from 'vue';
+import { useVotePortal } from './composables/useVotePortal';
+import type { SectionId, WorkspaceId } from './types/portal';
 
-type SectionId = 'hall' | 'identity' | 'vote' | 'ops';
-type JsonMap = Record<string, unknown>;
+const portalState = useVotePortal();
+const portal = reactive(portalState);
+const credentialFileInput = portalState.credentialFileInput;
+const showVoteTools = ref(false);
 
-interface SectionMeta {
-  id: SectionId;
-  title: string;
-  description: string;
-}
-
-interface ProposalItem {
-  id: string;
-  title: string;
-  description: string;
-  options: string[];
-  status: string;
-  startsAt: string;
-  endsAt: string;
-}
-
-interface Notice {
-  level: 'success' | 'error' | 'info';
-  title: string;
-  detail: string;
-  at: string;
-}
-
-interface AnchorItem {
-  id: string;
-  anchorHash: string;
-  merkleRoot: string;
-  createdAt: string;
-}
-
-const sections: SectionMeta[] = [
-  { id: 'hall', title: '投票大厅', description: '浏览可参与提案' },
-  { id: 'identity', title: '我的身份', description: '领取匿名凭证' },
-  { id: 'vote', title: '参与投票', description: '导入投票凭据并提交' },
-  { id: 'ops', title: '计票与审计', description: '发布结果与审计锚点' },
+type OpsStepId = 'create' | 'decrypt' | 'publish' | 'result' | 'credential' | 'anchor';
+const opsStep = ref<OpsStepId>('create');
+const opsSteps: Array<{ id: OpsStepId; order: number; title: string; description: string }> = [
+  { id: 'create', order: 1, title: '创建提案', description: '定义标题、选项和时间窗口' },
+  { id: 'decrypt', order: 2, title: '初始化解密', description: '生成门限会话和份额' },
+  { id: 'publish', order: 3, title: '发布结果', description: '提交 shares 并上链锚定' },
+  { id: 'result', order: 4, title: '查询结果', description: '查看 tally 与总票数' },
+  { id: 'credential', order: 5, title: '凭证状态', description: '查看哪些凭证已投票' },
+  { id: 'anchor', order: 6, title: '审计锚点', description: '核验 anchor_hash 与 merkle_root' },
 ];
 
-const baseUrlStorageKey = 'anonvote.front.base_url';
-const apiBaseUrl = ref(localStorage.getItem(baseUrlStorageKey) ?? 'http://localhost:8080');
-watch(apiBaseUrl, (value) => localStorage.setItem(baseUrlStorageKey, value.trim()));
+function setOpsStep(step: OpsStepId): void {
+  opsStep.value = step;
+}
 
-const activeSection = ref<SectionId>('hall');
-const notices = ref<Notice[]>([]);
+function openVoteForProposal(id: string): void {
+  portal.adoptProposal(id, 'vote');
+}
 
-const healthState = reactive({ loading: false, ok: false, text: '未检测', checkedAt: '' });
-const hallState = reactive({ loading: false, proposals: [] as ProposalItem[] });
-const selectedProposalId = ref('');
+function openOpsForProposal(id: string): void {
+  portal.adoptProposal(id, 'ops');
+  opsStep.value = 'decrypt';
+}
 
-const identityForm = reactive({ userId: '', customPubKey: '' });
-const useCustomPubKey = ref(false);
-const generatedPubKey = ref(randomBase64(32));
-const wallet = reactive({ userId: '', userPubKey: '', signature: '', issuerKeyVersion: '', issuedAt: '' });
-const credentialLoading = ref(false);
-const credentialFileInput = ref<HTMLInputElement | null>(null);
-
-const voteForm = reactive({
-  proposalId: '',
-  ballotJson: '',
-  encryptedVote: '',
-  proof: '',
-  nullifier: '',
-  publicWitness: '',
-});
-const voteLoading = ref(false);
-const voteStatusLoading = ref(false);
-const hasVoted = ref<boolean | null>(null);
-const selectedVoteOption = ref('');
-
-const createProposalForm = reactive({ title: '', description: '', optionsText: '', startsAt: '', endsAt: '' });
-const createProposalLoading = ref(false);
-
-const decryptForm = reactive({ proposalId: '', threshold: 2, trustees: 3 });
-const decryptLoading = ref(false);
-const decryptPublicKey = ref('');
-const decryptShares = ref<string[]>([]);
-
-const publishForm = reactive({ proposalId: '', sharesText: '' });
-const publishLoading = ref(false);
-const publishedSummary = ref('');
-
-const resultForm = reactive({ proposalId: '' });
-const resultLoading = ref(false);
-const resultSummary = ref('');
-const resultTally = ref<Array<{ option: string; count: number }>>([]);
-
-const anchorForm = reactive({ proposalId: '' });
-const anchorLoading = ref(false);
-const anchors = ref<AnchorItem[]>([]);
-
-const currentPubKey = computed(() => (useCustomPubKey.value ? identityForm.customPubKey.trim() : generatedPubKey.value));
-const walletReady = computed(() => wallet.userId !== '' && wallet.userPubKey !== '' && wallet.signature !== '');
-const latestNotice = computed(() => notices.value[0] ?? null);
-const selectedProposal = computed(() =>
-  hallState.proposals.find((item) => item.id === voteForm.proposalId.trim()) ??
-  hallState.proposals.find((item) => item.id === selectedProposalId.value.trim()) ??
-  null,
-);
-
-watch(selectedProposalId, (value) => {
-  const id = value.trim();
-  if (id === '') {
+function handleTabKeydown(event: KeyboardEvent, group: 'workspace' | 'section', currentId: string): void {
+  const supported = ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'];
+  if (!supported.includes(event.key)) {
     return;
   }
-  voteForm.proposalId = id;
-  decryptForm.proposalId = id;
-  publishForm.proposalId = id;
-  resultForm.proposalId = id;
-  anchorForm.proposalId = id;
-  const proposal = hallState.proposals.find((item) => item.id === id);
-  if (proposal && proposal.options.length > 0 && !proposal.options.includes(selectedVoteOption.value)) {
-    selectedVoteOption.value = proposal.options[0];
-  }
-});
+  event.preventDefault();
 
-watch(selectedProposal, (proposal) => {
-  if (!proposal || proposal.options.length === 0) {
+  const ids =
+    group === 'workspace'
+      ? portal.workspaces.map((item) => item.id)
+      : portal.visibleSections.filter((item) => item && item.id).map((item) => item.id);
+  const currentIndex = Math.max(0, ids.indexOf(currentId));
+
+  let targetIndex = currentIndex;
+  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+    targetIndex = (currentIndex + 1) % ids.length;
+  } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+    targetIndex = (currentIndex - 1 + ids.length) % ids.length;
+  } else if (event.key === 'Home') {
+    targetIndex = 0;
+  } else if (event.key === 'End') {
+    targetIndex = ids.length - 1;
+  }
+
+  const nextId = ids[targetIndex];
+  if (!nextId) {
     return;
   }
-  if (!proposal.options.includes(selectedVoteOption.value)) {
-    selectedVoteOption.value = proposal.options[0];
+
+  if (group === 'workspace') {
+    portal.setWorkspace(nextId as WorkspaceId);
+  } else {
+    portal.setActiveSection(nextId as SectionId);
   }
-});
 
-onMounted(async () => {
-  setProposalWindow('active');
-  createProposalForm.optionsText = '候选人 A\n候选人 B';
-  voteForm.nullifier = newNullifier();
-  await checkHealth(false);
-  await loadOpenProposals(false);
-});
-
-function addNotice(level: Notice['level'], title: string, detail: string): void {
-  notices.value.unshift({ level, title, detail, at: new Date().toLocaleString('zh-CN', { hour12: false }) });
-  if (notices.value.length > 8) {
-    notices.value.length = 8;
-  }
-}
-
-function toObject(value: unknown): JsonMap | null {
-  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-    return value as JsonMap;
-  }
-  return null;
-}
-
-function textOf(object: JsonMap | null, key: string): string {
-  if (object === null) {
-    return '';
-  }
-  const value = object[key];
-  return typeof value === 'string' ? value : '';
-}
-
-function boolOf(object: JsonMap | null, key: string): boolean | null {
-  if (object === null) {
-    return null;
-  }
-  const value = object[key];
-  return typeof value === 'boolean' ? value : null;
-}
-
-function randomBase64(size: number): string {
-  const bytes = new Uint8Array(size);
-  crypto.getRandomValues(bytes);
-  let output = '';
-  for (const value of bytes) {
-    output += String.fromCharCode(value);
-  }
-  return btoa(output);
-}
-
-function newNullifier(): string {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  const suffix = Array.from(bytes, (item) => item.toString(16).padStart(2, '0')).join('');
-  return `null-${Date.now()}-${suffix}`;
-}
-
-function splitShares(raw: string): string[] {
-  return raw
-    .split(/[\s,]+/)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
-}
-
-function normalizeOptions(raw: string): string[] {
-  return raw
-    .split(/\r?\n|,/)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
-    .filter((item, index, array) => array.indexOf(item) === index);
-}
-
-function encodeProposalDescription(summary: string, options: string[]): string {
-  return JSON.stringify({
-    summary: summary.trim(),
-    options,
-  });
-}
-
-function decodeProposalDescription(raw: string): { description: string; options: string[] } {
-  const text = raw.trim();
-  if (text === '') {
-    return { description: '', options: [] };
-  }
-  try {
-    const parsed = toObject(JSON.parse(text));
-    if (parsed === null) {
-      return { description: raw, options: [] };
+  const prefix = group === 'workspace' ? 'workspace-tab-' : 'section-tab-';
+  requestAnimationFrame(() => {
+    const target = document.getElementById(`${prefix}${nextId}`);
+    if (target instanceof HTMLButtonElement) {
+      target.focus();
     }
-    const summary = textOf(parsed, 'summary') || textOf(parsed, 'description');
-    const optionField = parsed.options;
-    const options = Array.isArray(optionField) ? optionField.filter((item): item is string => typeof item === 'string') : [];
-    return { description: summary, options };
-  } catch {
-    return { description: raw, options: [] };
-  }
-}
-
-function toRfc3339(date: Date): string {
-  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
-}
-
-function setProposalWindow(mode: 'active' | 'closed'): void {
-  if (mode === 'active') {
-    createProposalForm.startsAt = toRfc3339(new Date(Date.now() - 5 * 60 * 1000));
-    createProposalForm.endsAt = toRfc3339(new Date(Date.now() + 60 * 60 * 1000));
-    return;
-  }
-  createProposalForm.startsAt = toRfc3339(new Date(Date.now() - 2 * 60 * 60 * 1000));
-  createProposalForm.endsAt = toRfc3339(new Date(Date.now() - 60 * 1000));
-}
-function adoptProposal(id: string, section?: SectionId): void {
-  if (id.trim() === '') {
-    return;
-  }
-  selectedProposalId.value = id.trim();
-  if (section !== undefined) {
-    activeSection.value = section;
-  }
-}
-
-function exportCredentialFile(): void {
-  if (!walletReady.value) {
-    addNotice('error', '导出失败', '请先领取或导入凭证');
-    return;
-  }
-  const payload = {
-    version: 1,
-    user_id: wallet.userId,
-    user_pub_key: wallet.userPubKey,
-    signature: wallet.signature,
-    issuer_key_version: wallet.issuerKeyVersion,
-    issued_at: wallet.issuedAt,
-    exported_at: new Date().toISOString(),
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = `credential-${wallet.userId || 'user'}.json`;
-  link.click();
-  URL.revokeObjectURL(link.href);
-  addNotice('success', '导出成功', '凭证文件已下载');
-}
-
-function openCredentialImport(): void {
-  credentialFileInput.value?.click();
-}
-
-async function importCredentialFile(event: Event): Promise<void> {
-  const target = event.target;
-  if (!(target instanceof HTMLInputElement) || !target.files || target.files.length === 0) {
-    return;
-  }
-  const file = target.files[0];
-  try {
-    const content = await file.text();
-    const parsed = toObject(JSON.parse(content));
-    if (parsed === null) {
-      addNotice('error', '导入失败', '凭证文件格式无效');
-      return;
-    }
-    const userID = textOf(parsed, 'user_id');
-    const userPubKey = textOf(parsed, 'user_pub_key');
-    const signature = textOf(parsed, 'signature');
-    if (userID === '' || userPubKey === '' || signature === '') {
-      addNotice('error', '导入失败', '凭证文件缺少必要字段');
-      return;
-    }
-    wallet.userId = userID;
-    wallet.userPubKey = userPubKey;
-    wallet.signature = signature;
-    wallet.issuerKeyVersion = textOf(parsed, 'issuer_key_version');
-    wallet.issuedAt = textOf(parsed, 'issued_at');
-    identityForm.userId = userID;
-    hasVoted.value = null;
-    addNotice('success', '导入成功', `已导入凭证：${userID}`);
-  } catch {
-    addNotice('error', '导入失败', '文件内容不是合法 JSON');
-  } finally {
-    target.value = '';
-  }
-}
-
-function applySelectedOptionToBallot(): void {
-  if (!selectedProposal.value || selectedProposal.value.options.length === 0) {
-    addNotice('error', '填充失败', '当前提案没有可选项');
-    return;
-  }
-  if (selectedVoteOption.value.trim() === '') {
-    addNotice('error', '填充失败', '请先选择一个选项');
-    return;
-  }
-  try {
-    const current = voteForm.ballotJson.trim();
-    const base = current === '' ? {} : toObject(JSON.parse(current)) ?? {};
-    const payload: JsonMap = {
-      ...base,
-      selected_option: selectedVoteOption.value,
-      encrypted_vote: textOf(base, 'encrypted_vote'),
-      proof: textOf(base, 'proof'),
-      nullifier: textOf(base, 'nullifier') || newNullifier(),
-      public_witness: textOf(base, 'public_witness'),
-    };
-    voteForm.ballotJson = JSON.stringify(payload, null, 2);
-    if (voteForm.nullifier.trim() === '') {
-      voteForm.nullifier = textOf(payload, 'nullifier');
-    }
-    addNotice('success', '已写入选项', '选项已同步到投票凭据 JSON');
-  } catch {
-    addNotice('error', '填充失败', '当前投票凭据 JSON 不是合法格式');
-  }
-}
-
-function fillBallotTemplate(): void {
-  voteForm.ballotJson = JSON.stringify(
-    { selected_option: selectedVoteOption.value, encrypted_vote: '', proof: '', nullifier: newNullifier(), public_witness: '' },
-    null,
-    2,
-  );
-}
-
-function importBallotJson(): void {
-  if (voteForm.ballotJson.trim() === '') {
-    addNotice('error', '导入失败', '请先粘贴投票凭据 JSON');
-    return;
-  }
-  try {
-    const parsed = toObject(JSON.parse(voteForm.ballotJson));
-    if (parsed === null) {
-      addNotice('error', '导入失败', 'JSON 顶层必须是对象');
-      return;
-    }
-    voteForm.encryptedVote = textOf(parsed, 'encrypted_vote') || textOf(parsed, 'encryptedVote');
-    voteForm.proof = textOf(parsed, 'proof');
-    voteForm.nullifier = textOf(parsed, 'nullifier');
-    voteForm.publicWitness = textOf(parsed, 'public_witness') || textOf(parsed, 'publicWitness');
-    const chosenOption = textOf(parsed, 'selected_option') || textOf(parsed, 'option');
-    if (chosenOption !== '') {
-      selectedVoteOption.value = chosenOption;
-    }
-    addNotice('success', '导入成功', '投票凭据已写入表单');
-  } catch {
-    addNotice('error', '导入失败', 'JSON 格式不合法');
-  }
-}
-
-async function prepareBallotByOption(): Promise<void> {
-  if (!walletReady.value) {
-    addNotice('error', '生成失败', '请先领取或导入匿名凭证');
-    return;
-  }
-  if (voteForm.proposalId.trim() === '') {
-    addNotice('error', '生成失败', '请先选择 proposal_id');
-    return;
-  }
-  if (selectedVoteOption.value.trim() === '') {
-    addNotice('error', '生成失败', '请先选择投票选项');
-    return;
-  }
-
-  voteLoading.value = true;
-  const result = await apiCall({
-    baseUrl: apiBaseUrl.value,
-    path: `/api/v1/proposals/${encodeURIComponent(voteForm.proposalId.trim())}/ballot-draft`,
-    method: 'POST',
-    body: { option: selectedVoteOption.value.trim() },
   });
-  voteLoading.value = false;
-
-  if (!result.ok) {
-    addNotice('error', '生成失败', result.error ?? '无法根据选项生成投票凭据');
-    return;
-  }
-
-  const payload = toObject(result.data);
-  voteForm.encryptedVote = textOf(payload, 'encrypted_vote');
-  voteForm.proof = textOf(payload, 'proof');
-  voteForm.nullifier = textOf(payload, 'nullifier');
-  const option = textOf(payload, 'option');
-  if (option !== '') {
-    selectedVoteOption.value = option;
-  }
-  voteForm.ballotJson = JSON.stringify(
-    {
-      selected_option: selectedVoteOption.value,
-      encrypted_vote: voteForm.encryptedVote,
-      proof: voteForm.proof,
-      nullifier: voteForm.nullifier,
-      public_witness: voteForm.publicWitness,
-    },
-    null,
-    2,
-  );
-  addNotice('success', '生成成功', '已根据选项生成可提交的投票凭据');
-}
-
-async function checkHealth(showNotice = true): Promise<void> {
-  healthState.loading = true;
-  const result = await apiCall({ baseUrl: apiBaseUrl.value, path: '/healthz' });
-  healthState.loading = false;
-  healthState.checkedAt = new Date().toLocaleString('zh-CN', { hour12: false });
-  if (result.ok) {
-    healthState.ok = true;
-    healthState.text = '服务在线';
-    if (showNotice) addNotice('success', '连接成功', '后端服务可访问');
-    return;
-  }
-  healthState.ok = false;
-  healthState.text = '服务不可用';
-  if (showNotice) addNotice('error', '连接失败', result.error ?? '无法访问后端服务');
-}
-
-async function loadOpenProposals(showNotice = true): Promise<void> {
-  hallState.loading = true;
-  const result = await apiCall({ baseUrl: apiBaseUrl.value, path: '/api/v1/proposals/open' });
-  hallState.loading = false;
-  if (!result.ok) {
-    hallState.proposals = [];
-    if (showNotice) addNotice('error', '加载失败', result.error ?? '无法获取提案');
-    return;
-  }
-  const payload = toObject(result.data);
-  const items = payload?.items;
-  if (!Array.isArray(items)) {
-    hallState.proposals = [];
-    if (showNotice) addNotice('info', '暂无提案', '当前没有可参与提案');
-    return;
-  }
-  hallState.proposals = items
-    .map((item): ProposalItem | null => {
-      const object = toObject(item);
-      if (object === null) return null;
-      const id = textOf(object, 'id');
-      if (id === '') return null;
-      const parsedDescription = decodeProposalDescription(textOf(object, 'description'));
-      return {
-        id,
-        title: textOf(object, 'title'),
-        description: parsedDescription.description,
-        options: parsedDescription.options,
-        status: textOf(object, 'status'),
-        startsAt: textOf(object, 'starts_at'),
-        endsAt: textOf(object, 'ends_at'),
-      };
-    })
-    .filter((item): item is ProposalItem => item !== null);
-  if (selectedProposalId.value === '' && hallState.proposals.length > 0) adoptProposal(hallState.proposals[0].id);
-  if (showNotice) addNotice('success', '提案已刷新', `共 ${hallState.proposals.length} 个提案`);
-}
-
-async function issueCredential(): Promise<void> {
-  if (identityForm.userId.trim() === '') {
-    addNotice('error', '签发失败', '请输入 user_id');
-    return;
-  }
-  if (currentPubKey.value === '') {
-    addNotice('error', '签发失败', '公钥不能为空');
-    return;
-  }
-  credentialLoading.value = true;
-  const result = await apiCall({
-    baseUrl: apiBaseUrl.value,
-    path: '/api/v1/credentials',
-    method: 'POST',
-    body: { user_id: identityForm.userId.trim(), user_pub_key: currentPubKey.value },
-  });
-  credentialLoading.value = false;
-  if (!result.ok) {
-    addNotice('error', '签发失败', result.error ?? '后端未返回凭证');
-    return;
-  }
-  const payload = toObject(result.data);
-  wallet.userId = textOf(payload, 'user_id') || identityForm.userId.trim();
-  wallet.userPubKey = textOf(payload, 'user_pub_key');
-  wallet.signature = textOf(payload, 'signature');
-  wallet.issuerKeyVersion = textOf(payload, 'issuer_key_version');
-  wallet.issuedAt = textOf(payload, 'issued_at');
-  hasVoted.value = null;
-  addNotice('success', '凭证已领取', '你已可以进行匿名投票');
-}
-
-async function submitVote(): Promise<void> {
-  if (!walletReady.value) {
-    addNotice('error', '提交失败', '请先领取凭证');
-    return;
-  }
-  if (voteForm.proposalId.trim() === '') {
-    addNotice('error', '提交失败', '请选择 proposal_id');
-    return;
-  }
-  if (voteForm.encryptedVote.trim() === '' || voteForm.proof.trim() === '' || voteForm.nullifier.trim() === '') {
-    addNotice('error', '提交失败', '请导入完整投票凭据');
-    return;
-  }
-  if (selectedProposal.value && selectedProposal.value.options.length > 0 && selectedVoteOption.value.trim() === '') {
-    addNotice('error', '提交失败', '请选择一个投票选项');
-    return;
-  }
-  const body: JsonMap = {
-    proposal_id: voteForm.proposalId.trim(),
-    encrypted_vote: voteForm.encryptedVote.trim(),
-    proof: voteForm.proof.trim(),
-    nullifier: voteForm.nullifier.trim(),
-    user_id: wallet.userId,
-    user_pub_key: wallet.userPubKey,
-    credential_signature: wallet.signature,
-  };
-  if (selectedVoteOption.value.trim() !== '') {
-    body.selected_option = selectedVoteOption.value.trim();
-  }
-  if (voteForm.publicWitness.trim() !== '') body.public_witness = voteForm.publicWitness.trim();
-  voteLoading.value = true;
-  const result = await apiCall({ baseUrl: apiBaseUrl.value, path: '/api/v1/votes', method: 'POST', body });
-  voteLoading.value = false;
-  if (!result.ok) {
-    addNotice('error', '投票失败', result.error ?? '请检查投票凭据');
-    return;
-  }
-  addNotice('success', '投票成功', '匿名选票已提交');
-  await fetchVoteStatus(false);
-}
-async function fetchVoteStatus(showNotice = true): Promise<void> {
-  if (!walletReady.value || voteForm.proposalId.trim() === '') {
-    addNotice('error', '查询失败', '请先准备凭证与提案');
-    return;
-  }
-  voteStatusLoading.value = true;
-  const result = await apiCall({
-    baseUrl: apiBaseUrl.value,
-    path: `/api/v1/proposals/${encodeURIComponent(voteForm.proposalId.trim())}/vote-status`,
-    query: { user_id: wallet.userId },
-  });
-  voteStatusLoading.value = false;
-  if (!result.ok) {
-    hasVoted.value = null;
-    if (showNotice) addNotice('error', '查询失败', result.error ?? '无法查询状态');
-    return;
-  }
-  const payload = toObject(result.data);
-  hasVoted.value = boolOf(payload, 'has_voted');
-  if (showNotice) addNotice('success', '查询完成', hasVoted.value ? '你已投票' : '你还未投票');
-}
-
-async function createProposal(): Promise<void> {
-  if (
-    createProposalForm.title.trim() === '' ||
-    createProposalForm.startsAt.trim() === '' ||
-    createProposalForm.endsAt.trim() === ''
-  ) {
-    addNotice('error', '创建失败', '请填写标题和时间');
-    return;
-  }
-  const options = normalizeOptions(createProposalForm.optionsText);
-  if (options.length < 2) {
-    addNotice('error', '创建失败', '请至少提供 2 个投票选项');
-    return;
-  }
-  createProposalLoading.value = true;
-  const result = await apiCall({
-    baseUrl: apiBaseUrl.value,
-    path: '/api/v1/proposals',
-    method: 'POST',
-    body: {
-      title: createProposalForm.title.trim(),
-      description: encodeProposalDescription(createProposalForm.description, options),
-      starts_at: createProposalForm.startsAt.trim(),
-      ends_at: createProposalForm.endsAt.trim(),
-    },
-  });
-  createProposalLoading.value = false;
-  if (!result.ok) {
-    addNotice('error', '创建失败', result.error ?? '提案创建失败');
-    return;
-  }
-  const payload = toObject(result.data);
-  const id = textOf(payload, 'id');
-  if (id !== '') adoptProposal(id);
-  addNotice('success', '提案创建成功', id === '' ? '已创建提案' : `提案编号：${id}`);
-  await loadOpenProposals(false);
-}
-
-async function setupDecryptionSession(): Promise<void> {
-  if (decryptForm.proposalId.trim() === '') {
-    addNotice('error', '初始化失败', 'proposal_id 不能为空');
-    return;
-  }
-  decryptLoading.value = true;
-  const result = await apiCall({
-    baseUrl: apiBaseUrl.value,
-    path: `/api/v1/proposals/${encodeURIComponent(decryptForm.proposalId.trim())}/decryption/setup`,
-    method: 'POST',
-    body: { threshold: Number(decryptForm.threshold), trustees: Number(decryptForm.trustees) },
-  });
-  decryptLoading.value = false;
-  if (!result.ok) {
-    addNotice('error', '初始化失败', result.error ?? '无法初始化解密会话');
-    return;
-  }
-  const payload = toObject(result.data);
-  decryptPublicKey.value = textOf(payload, 'public_key');
-  const shares = payload?.shares;
-  decryptShares.value = Array.isArray(shares) ? shares.filter((item): item is string => typeof item === 'string') : [];
-  publishForm.sharesText = decryptShares.value.join('\n');
-  addNotice('success', '会话已初始化', `已生成 ${decryptShares.value.length} 份解密份额`);
-}
-
-async function publishResult(): Promise<void> {
-  if (publishForm.proposalId.trim() === '') {
-    addNotice('error', '发布失败', 'proposal_id 不能为空');
-    return;
-  }
-  const shares = splitShares(publishForm.sharesText);
-  if (shares.length === 0) {
-    addNotice('error', '发布失败', '至少提供一份 share');
-    return;
-  }
-  publishLoading.value = true;
-  const result = await apiCall({
-    baseUrl: apiBaseUrl.value,
-    path: `/api/v1/proposals/${encodeURIComponent(publishForm.proposalId.trim())}/results/publish`,
-    method: 'POST',
-    body: { shares },
-  });
-  publishLoading.value = false;
-  if (!result.ok) {
-    addNotice('error', '发布失败', result.error ?? '发布结果失败');
-    return;
-  }
-  const payload = toObject(result.data);
-  const votes = payload?.total_votes;
-  const anchorHash = textOf(payload, 'anchor_hash');
-  publishedSummary.value = `总票数 ${typeof votes === 'number' ? votes : '-'}，Anchor ${anchorHash || '-'}`;
-  addNotice('success', '发布成功', publishedSummary.value);
-}
-
-async function fetchResult(): Promise<void> {
-  if (resultForm.proposalId.trim() === '') {
-    addNotice('error', '查询失败', 'proposal_id 不能为空');
-    return;
-  }
-  resultLoading.value = true;
-  const result = await apiCall({
-    baseUrl: apiBaseUrl.value,
-    path: `/api/v1/proposals/${encodeURIComponent(resultForm.proposalId.trim())}/results`,
-  });
-  resultLoading.value = false;
-  if (!result.ok) {
-    resultSummary.value = '';
-    resultTally.value = [];
-    addNotice('error', '查询失败', result.error ?? '无法获取计票结果');
-    return;
-  }
-  const payload = toObject(result.data);
-  const votes = payload?.total_votes;
-  const anchorHash = textOf(payload, 'anchor_hash');
-  resultSummary.value = `总票数 ${typeof votes === 'number' ? votes : '-'}，Anchor ${anchorHash || '-'}`;
-  const tally = toObject(payload?.tally);
-  resultTally.value = tally
-    ? Object.entries(tally)
-        .map(([option, value]) => ({ option, count: typeof value === 'number' ? value : 0 }))
-        .sort((a, b) => b.count - a.count)
-    : [];
-  addNotice('success', '查询完成', resultSummary.value);
-}
-
-async function fetchAnchors(): Promise<void> {
-  if (anchorForm.proposalId.trim() === '') {
-    addNotice('error', '查询失败', 'proposal_id 不能为空');
-    return;
-  }
-  anchorLoading.value = true;
-  const result = await apiCall({
-    baseUrl: apiBaseUrl.value,
-    path: `/api/v1/proposals/${encodeURIComponent(anchorForm.proposalId.trim())}/audit-anchors`,
-  });
-  anchorLoading.value = false;
-  if (!result.ok) {
-    anchors.value = [];
-    addNotice('error', '查询失败', result.error ?? '无法获取审计锚点');
-    return;
-  }
-  const payload = toObject(result.data);
-  const items = payload?.items;
-  if (!Array.isArray(items)) {
-    anchors.value = [];
-    addNotice('info', '查询完成', '暂无审计锚点');
-    return;
-  }
-  anchors.value = items
-    .map((item): AnchorItem | null => {
-      const object = toObject(item);
-      if (object === null) return null;
-      const id = textOf(object, 'id');
-      if (id === '') return null;
-      return {
-        id,
-        anchorHash: textOf(object, 'anchor_hash'),
-        merkleRoot: textOf(object, 'merkle_root'),
-        createdAt: textOf(object, 'created_at'),
-      };
-    })
-    .filter((item): item is AnchorItem => item !== null);
-  addNotice('success', '查询完成', `获取到 ${anchors.value.length} 条审计锚点`);
 }
 </script>
+
 <template>
-  <div class="app">
+  <a class="skip-link" href="#main-content">跳转到主内容</a>
+  <div class="app-shell">
     <header class="hero">
-      <div>
-        <p class="tagline">Anonymous Vote Portal</p>
-        <h1>匿名投票门户</h1>
-        <p class="intro">面向用户与运营人员的业务页面，不再展示调试面板。</p>
+      <div class="hero-main">
+        <p class="eyebrow">Nullifier Vote Console</p>
+        <h1>匿名投票控制台</h1>
+        <p class="hero-copy">将“用户投票流程”与“运营计票流程”分区，减少误操作与认知负担。</p>
+        <div class="workspace-tabs" role="tablist" aria-label="工作区切换">
+          <button
+            v-for="item in portal.workspaces"
+            :id="`workspace-tab-${item.id}`"
+            :key="item.id"
+            class="workspace-btn"
+            role="tab"
+            :aria-controls="`workspace-panel-${item.id}`"
+            :aria-selected="portal.workspace === item.id"
+            :tabindex="portal.workspace === item.id ? 0 : -1"
+            :class="{ active: portal.workspace === item.id }"
+            @click="portal.setWorkspace(item.id)"
+            @keydown="handleTabKeydown($event, 'workspace', item.id)"
+          >
+            <strong>{{ item.title }}</strong>
+            <small>{{ item.description }}</small>
+          </button>
+        </div>
       </div>
-      <div class="hero-side">
-        <label class="label">
+
+      <form class="endpoint-card" @submit.prevent="portal.checkHealth()">
+        <label class="field" for="api-base-url">
           后端地址
-          <input v-model.trim="apiBaseUrl" placeholder="http://localhost:8080" />
+          <input id="api-base-url" v-model.trim="portal.apiBaseUrl" type="url" inputmode="url" placeholder="http://localhost:8080" />
         </label>
-        <button class="secondary" type="button" :disabled="healthState.loading" @click="checkHealth()">
-          {{ healthState.loading ? '检测中...' : '检测服务连接' }}
-        </button>
-        <p :class="['health', healthState.ok ? 'ok' : 'bad']">
-          {{ healthState.text }} <span>{{ healthState.checkedAt }}</span>
+        <label class="field" for="admin-bearer-token">
+          Admin Token
+          <input
+            id="admin-bearer-token"
+            v-model.trim="portal.adminBearerToken"
+            type="password"
+            autocomplete="off"
+            placeholder="用于运营端管理接口"
+          />
+        </label>
+        <div class="action-row">
+          <button class="btn btn-secondary" type="submit" :disabled="portal.healthState.loading">
+            {{ portal.healthState.loading ? '检测中...' : '检测服务连接' }}
+          </button>
+        </div>
+        <p class="health-line" :class="portal.healthState.ok ? 'ok' : 'bad'">
+          {{ portal.healthState.text }}
+          <span>最近检测：{{ portal.healthState.checkedAt || '尚未检测' }}</span>
         </p>
-      </div>
+      </form>
     </header>
 
-    <nav class="tabs">
-      <button v-for="item in sections" :key="item.id" :class="{ active: activeSection === item.id }" @click="activeSection = item.id">
+    <div v-if="portal.activeAlert" class="alert-banner" :class="portal.activeAlert.level" role="status" aria-live="polite">
+      <div>
+        <strong>{{ portal.activeAlert.title }}</strong>
+        <p>{{ portal.activeAlert.detail }}</p>
+      </div>
+      <button class="btn btn-ghost" type="button" @click="portal.dismissActiveAlert">关闭</button>
+    </div>
+
+    <nav class="section-tabs" role="tablist" aria-label="功能分区导航">
+      <button
+        v-for="item in portal.visibleSections"
+        :id="`section-tab-${item.id}`"
+        :key="item.id"
+        class="section-btn"
+        role="tab"
+        :aria-controls="`section-panel-${item.id}`"
+        :aria-selected="portal.activeSection === item.id"
+        :tabindex="portal.activeSection === item.id ? 0 : -1"
+        :class="{ active: portal.activeSection === item.id }"
+        @click="portal.setActiveSection(item.id)"
+        @keydown="handleTabKeydown($event, 'section', item.id)"
+      >
         <strong>{{ item.title }}</strong>
         <small>{{ item.description }}</small>
       </button>
     </nav>
 
-    <main class="layout">
-      <section v-if="activeSection === 'hall'" class="card">
-        <header class="head">
-          <div>
-            <h2>投票大厅</h2>
-            <p>从这里选择提案并进入投票流程。</p>
-          </div>
-          <button class="secondary" :disabled="hallState.loading" @click="loadOpenProposals()">
-            {{ hallState.loading ? '刷新中...' : '刷新提案' }}
-          </button>
-        </header>
-        <div v-if="hallState.proposals.length === 0" class="empty">暂无开放提案</div>
-        <div v-else class="proposals">
-          <article v-for="item in hallState.proposals" :key="item.id" class="proposal">
-            <h3>{{ item.title || '未命名提案' }}</h3>
-            <p class="desc">{{ item.description || '暂无描述' }}</p>
-            <ul v-if="item.options.length > 0" class="options-list">
-              <li v-for="option in item.options" :key="option">{{ option }}</li>
-            </ul>
-            <p class="meta">状态：{{ item.status || '-' }}</p>
-            <p class="meta">开始：{{ item.startsAt || '-' }}</p>
-            <p class="meta">结束：{{ item.endsAt || '-' }}</p>
-            <div class="row">
-              <button @click="adoptProposal(item.id, 'vote')">参与投票</button>
-              <button class="secondary" @click="adoptProposal(item.id, 'ops')">计票管理</button>
+    <main id="main-content" class="main-grid">
+      <section :id="`workspace-panel-${portal.workspace}`" class="main-panel" role="region" :aria-labelledby="`workspace-tab-${portal.workspace}`">
+        <section v-if="portal.activeSection === 'hall'" id="section-panel-hall" class="panel" role="tabpanel" aria-labelledby="section-tab-hall">
+          <header class="panel-head">
+            <div>
+              <h2>投票大厅</h2>
+              <p class="panel-tip">先选提案，再进入“参与投票”。</p>
             </div>
-          </article>
-        </div>
-      </section>
+            <button class="btn btn-secondary" type="button" :disabled="portal.hallState.loading" @click="portal.loadOpenProposals()">
+              {{ portal.hallState.loading ? '刷新中...' : '刷新提案' }}
+            </button>
+          </header>
 
-      <section v-else-if="activeSection === 'identity'" class="card">
-        <header class="head">
-          <div>
-            <h2>我的身份</h2>
-            <p>先领取匿名凭证，再去投票。</p>
-          </div>
-        </header>
-        <form class="form" @submit.prevent="issueCredential">
-          <label class="label">
-            用户标识（user_id）
-            <input v-model.trim="identityForm.userId" placeholder="例如 u-1001" />
-          </label>
-          <label class="switch">
-            <input v-model="useCustomPubKey" type="checkbox" /> 手动输入公钥（高级）
-          </label>
-          <label v-if="useCustomPubKey" class="label">
-            公钥（Base64）
-            <textarea v-model.trim="identityForm.customPubKey" rows="3" />
-          </label>
-          <div v-else class="box">
-            <p>已自动生成设备公钥：</p>
-            <code>{{ currentPubKey }}</code>
-            <button class="secondary" type="button" @click="generatedPubKey = randomBase64(32)">重新生成</button>
-          </div>
-          <div class="row">
-            <button class="secondary" type="button" @click="openCredentialImport">导入凭证文件</button>
-            <button class="secondary" type="button" @click="exportCredentialFile">导出凭证文件</button>
-          </div>
-          <input ref="credentialFileInput" class="hidden-input" type="file" accept="application/json" @change="importCredentialFile" />
-          <button :disabled="credentialLoading">{{ credentialLoading ? '签发中...' : '领取匿名凭证' }}</button>
-        </form>
-        <article class="wallet" :class="{ ready: walletReady }">
-          <h3>凭证包</h3>
-          <p v-if="!walletReady">尚未领取凭证</p>
-          <div v-else>
-            <p>user_id: {{ wallet.userId }}</p>
-            <p>issuer_key_version: {{ wallet.issuerKeyVersion || '-' }}</p>
-            <p>issued_at: {{ wallet.issuedAt || '-' }}</p>
-            <p class="mono">user_pub_key: {{ wallet.userPubKey }}</p>
-            <p class="mono">signature: {{ wallet.signature }}</p>
-          </div>
-        </article>
-      </section>
+          <p v-if="portal.hallState.proposals.length === 0" class="empty-state">暂无开放提案</p>
 
-      <section v-else-if="activeSection === 'vote'" class="card">
-        <header class="head">
-          <div>
-            <h2>参与投票</h2>
-            <p>导入钱包生成的投票凭据，然后提交匿名选票。</p>
+          <div v-else class="proposal-grid">
+            <article v-for="item in portal.hallState.proposals" :key="item.id" class="proposal-card">
+              <header class="proposal-head">
+                <h3>{{ item.title || '未命名提案' }}</h3>
+                <span class="status-badge">{{ item.status || '未知状态' }}</span>
+              </header>
+              <p class="card-desc">{{ item.description || '暂无描述' }}</p>
+              <div v-if="item.options.length > 0">
+                <p class="card-label">可选项</p>
+                <ul class="option-list">
+                  <li v-for="option in item.options" :key="option">{{ option }}</li>
+                </ul>
+              </div>
+              <dl class="meta-grid">
+                <div>
+                  <dt>开始</dt>
+                  <dd>{{ item.startsAt || '-' }}</dd>
+                </div>
+                <div>
+                  <dt>结束</dt>
+                  <dd>{{ item.endsAt || '-' }}</dd>
+                </div>
+              </dl>
+              <div class="action-row">
+                <button class="btn" type="button" @click="openVoteForProposal(item.id)">去投票</button>
+                <button class="btn btn-secondary" type="button" @click="openOpsForProposal(item.id)">计票管理</button>
+              </div>
+            </article>
           </div>
-          <button class="secondary" :disabled="hallState.loading" @click="loadOpenProposals(false)">同步提案</button>
-        </header>
-        <form class="form" @submit.prevent="submitVote">
-          <label class="label">
-            proposal_id
-            <input v-model.trim="voteForm.proposalId" />
-          </label>
-          <fieldset v-if="selectedProposal && selectedProposal.options.length > 0" class="option-box">
-            <legend>选择投票选项</legend>
-            <label v-for="option in selectedProposal.options" :key="option" class="option-item">
-              <input v-model="selectedVoteOption" :value="option" type="radio" />
-              <span>{{ option }}</span>
+        </section>
+
+        <section
+          v-else-if="portal.activeSection === 'identity'"
+          id="section-panel-identity"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="section-tab-identity"
+        >
+          <header class="panel-head">
+            <div>
+              <h2>我的身份</h2>
+              <p class="panel-tip">领取匿名凭证后，投票步骤会自动复用该凭证。</p>
+            </div>
+          </header>
+
+          <form class="form-grid" @submit.prevent="portal.issueCredential">
+            <label class="field" for="identity-proposal-id">
+              proposal_id<span class="required-mark" aria-hidden="true">*</span>
+              <input id="identity-proposal-id" v-model.trim="portal.voteForm.proposalId" placeholder="先选择要发放凭证的提案" />
+              <span class="field-help">提案内凭证只能用于对应 proposal 投票。</span>
             </label>
-          </fieldset>
-          <div v-if="hallState.proposals.length > 0" class="chip-row">
-            <button v-for="item in hallState.proposals" :key="item.id" class="chip" type="button" @click="adoptProposal(item.id)">
-              {{ item.title || item.id }}
+            <label class="field" for="identity-user-id">
+              用户标识（user_id）<span class="required-mark" aria-hidden="true">*</span>
+              <input
+                id="identity-user-id"
+                v-model.trim="portal.identityForm.userId"
+                placeholder="例如 u-1001"
+                :aria-invalid="portal.identityErrors.userId ? 'true' : 'false'"
+                :aria-describedby="portal.identityErrors.userId ? 'identity-user-id-error' : undefined"
+                autocomplete="username"
+              />
+              <span v-if="portal.identityErrors.userId" id="identity-user-id-error" class="field-error" role="alert" aria-live="assertive">{{
+                portal.identityErrors.userId
+              }}</span>
+            </label>
+
+            <label class="switch-field">
+              <input v-model="portal.useCustomPubKey" type="checkbox" />
+              手动输入公钥（高级模式）
+            </label>
+
+            <label v-if="portal.useCustomPubKey" class="field" for="identity-pub-key">
+              公钥（Base64）<span class="required-mark" aria-hidden="true">*</span>
+              <textarea
+                id="identity-pub-key"
+                v-model.trim="portal.identityForm.customPubKey"
+                rows="3"
+                :aria-invalid="portal.identityErrors.customPubKey ? 'true' : 'false'"
+                :aria-describedby="portal.identityErrors.customPubKey ? 'identity-pub-key-error' : undefined"
+              />
+              <span
+                v-if="portal.identityErrors.customPubKey"
+                id="identity-pub-key-error"
+                class="field-error"
+                role="alert"
+                aria-live="assertive"
+                >{{ portal.identityErrors.customPubKey }}</span
+              >
+            </label>
+
+            <article v-else class="inline-card">
+              <p class="card-label">自动生成设备公钥</p>
+              <code class="code">{{ portal.currentPubKey }}</code>
+              <button class="btn btn-secondary" type="button" @click="portal.regeneratePubKey">重新生成公钥</button>
+            </article>
+
+            <div class="action-row">
+              <button class="btn btn-secondary" type="button" @click="portal.openCredentialImport">导入凭证文件</button>
+              <button class="btn btn-secondary" type="button" @click="portal.exportCredentialFile">导出凭证文件</button>
+            </div>
+
+            <input ref="credentialFileInput" class="hidden-input" type="file" accept="application/json" @change="portal.importCredentialFile" />
+
+            <button class="btn" :disabled="portal.credentialLoading">
+              {{ portal.credentialLoading ? '签发中...' : '领取匿名凭证' }}
             </button>
+          </form>
+
+          <article class="wallet-card" :class="{ ready: portal.walletReady }">
+            <h3>凭证包</h3>
+            <p v-if="!portal.walletReady" class="muted">尚未领取或导入凭证。</p>
+            <dl v-else class="wallet-list">
+              <div>
+                <dt>user_id</dt>
+                <dd>{{ portal.wallet.userId }}</dd>
+              </div>
+              <div>
+                <dt>issuer_key_version</dt>
+                <dd>{{ portal.wallet.issuerKeyVersion || '-' }}</dd>
+              </div>
+              <div>
+                <dt>issued_at</dt>
+                <dd>{{ portal.wallet.issuedAt || '-' }}</dd>
+              </div>
+              <div>
+                <dt>user_pub_key</dt>
+                <dd class="code">{{ portal.wallet.userPubKey }}</dd>
+              </div>
+              <div>
+                <dt>signature</dt>
+                <dd class="code">{{ portal.wallet.signature }}</dd>
+              </div>
+            </dl>
+          </article>
+        </section>
+
+        <section v-else-if="portal.activeSection === 'vote'" id="section-panel-vote" class="panel" role="tabpanel" aria-labelledby="section-tab-vote">
+          <header class="panel-head">
+            <div>
+              <h2>参与投票</h2>
+              <p class="panel-tip">按步骤完成：先选提案和选项，再生成凭据，最后提交匿名选票。</p>
+            </div>
+            <div class="header-actions">
+              <button class="btn btn-secondary" type="button" :disabled="portal.hallState.loading" @click="portal.loadOpenProposals(false)">
+                同步提案
+              </button>
+              <button class="btn btn-secondary" type="button" :disabled="portal.voteStatusLoading || !portal.walletReady" @click="portal.fetchVoteStatus()">
+                {{ portal.voteStatusLoading ? '查询中...' : '查询投票状态' }}
+              </button>
+            </div>
+          </header>
+
+          <div class="status-strip">
+            <p>当前提案：{{ portal.voteForm.proposalId || '-' }}</p>
+            <p>凭证状态：{{ portal.walletReady ? '已就绪' : '未就绪' }}</p>
+            <span class="status-pill" :class="portal.walletReady ? 'done' : 'todo'">
+              {{ portal.walletReady ? '可提交' : '先领取凭证' }}
+            </span>
+            <span v-if="portal.hasVoted !== null" class="status-pill" :class="portal.hasVoted ? 'done' : 'todo'">
+              {{ portal.hasVoted ? '你已投票' : '你还未投票' }}
+            </span>
           </div>
-          <label class="label">
-            投票凭据 JSON
-            <textarea
-              v-model.trim="voteForm.ballotJson"
-              rows="5"
-              placeholder='{"encrypted_vote":"...","proof":"...","nullifier":"...","public_witness":"..."}'
-            />
-          </label>
-          <div class="row">
-            <button class="secondary" type="button" :disabled="voteLoading || !walletReady" @click="prepareBallotByOption">
-              {{ voteLoading ? '生成中...' : '按选项生成投票凭据' }}
+
+          <form class="form-grid flow-form" @submit.prevent="portal.submitVote">
+            <article class="flow-step-card">
+              <p class="step-kicker">步骤 1 · 选择提案</p>
+              <label class="field" for="vote-proposal-id">
+                proposal_id<span class="required-mark" aria-hidden="true">*</span>
+                <input
+                  id="vote-proposal-id"
+                  v-model.trim="portal.voteForm.proposalId"
+                  :aria-invalid="portal.voteErrors.proposalId ? 'true' : 'false'"
+                  :aria-describedby="portal.voteErrors.proposalId ? 'vote-proposal-id-error' : undefined"
+                />
+                <span v-if="portal.voteErrors.proposalId" id="vote-proposal-id-error" class="field-error" role="alert" aria-live="assertive">{{
+                  portal.voteErrors.proposalId
+                }}</span>
+              </label>
+
+              <div v-if="portal.hallState.proposals.length > 0" class="chip-row" aria-label="快速选择提案">
+                <button
+                  v-for="item in portal.hallState.proposals"
+                  :key="item.id"
+                  class="chip"
+                  type="button"
+                  :class="{ active: portal.voteForm.proposalId === item.id }"
+                  @click="portal.adoptProposal(item.id)"
+                >
+                  {{ item.title || item.id }}
+                </button>
+              </div>
+            </article>
+
+            <article class="flow-step-card">
+              <p class="step-kicker">步骤 2 · 选择选项</p>
+              <fieldset
+                v-if="portal.selectedProposal && portal.selectedProposal.options.length > 0"
+                class="option-box"
+                :aria-describedby="portal.voteErrors.option ? 'vote-option-error' : undefined"
+              >
+                <legend>投票选项<span class="required-mark" aria-hidden="true">*</span></legend>
+                <label v-for="option in portal.selectedProposal.options" :key="option" class="option-item">
+                  <input v-model="portal.selectedVoteOption" :value="option" type="radio" />
+                  <span>{{ option }}</span>
+                </label>
+                <span v-if="portal.voteErrors.option" id="vote-option-error" class="field-error" role="alert" aria-live="assertive">{{
+                  portal.voteErrors.option
+                }}</span>
+              </fieldset>
+              <p v-else class="muted">当前提案没有可选项，请先切换提案。</p>
+            </article>
+
+            <article class="flow-step-card">
+              <div class="step-head-inline">
+                <p class="step-kicker">步骤 3 · 生成投票凭据</p>
+                <button class="btn btn-ghost" type="button" @click="showVoteTools = !showVoteTools">
+                  {{ showVoteTools ? '收起低频工具' : '展开低频工具' }}
+                </button>
+              </div>
+
+              <button class="btn btn-primary" type="button" :disabled="portal.voteLoading || !portal.walletReady" @click="portal.prepareBallotByOption">
+                {{ portal.voteLoading ? '生成中...' : '按选项生成凭据（推荐）' }}
+              </button>
+
+              <label class="field" for="vote-ballot-json">
+                投票凭据 JSON（可选）
+                <textarea
+                  id="vote-ballot-json"
+                  v-model.trim="portal.voteForm.ballotJson"
+                  rows="5"
+                  placeholder='{"encrypted_vote":"...","proof":"...","nullifier":"...","public_witness":"..."}'
+                  :aria-invalid="portal.voteErrors.ballotJson ? 'true' : 'false'"
+                  :aria-describedby="portal.voteErrors.ballotJson ? 'vote-ballot-json-error' : undefined"
+                />
+                <span class="field-help">常规情况下只需点击“按选项生成凭据”，无需手写 JSON。</span>
+                <span
+                  v-if="portal.voteErrors.ballotJson"
+                  id="vote-ballot-json-error"
+                  class="field-error"
+                  role="alert"
+                  aria-live="assertive"
+                  >{{ portal.voteErrors.ballotJson }}</span
+                >
+              </label>
+
+              <div v-if="showVoteTools" class="advanced-tools">
+                <p class="field-help">低频辅助工具：仅在调试或手工修复凭据时使用。</p>
+                <div class="action-row compact">
+                  <button class="btn btn-secondary" type="button" @click="portal.applySelectedOptionToBallot">写入选项</button>
+                  <button class="btn btn-secondary" type="button" @click="portal.fillBallotTemplate">填充模板</button>
+                  <button class="btn btn-secondary" type="button" @click="portal.importBallotJson">导入 JSON</button>
+                  <button class="btn btn-secondary" type="button" @click="portal.voteForm.nullifier = portal.newNullifier()">新 nullifier</button>
+                </div>
+              </div>
+
+              <label class="switch-field">
+                <input v-model="portal.showAdvancedVoteFields" type="checkbox" />
+                显示高级字段（仅排障时使用）
+              </label>
+
+              <div v-if="portal.showAdvancedVoteFields" class="advanced-grid">
+                <label class="field">
+                  encrypted_vote<span class="required-mark" aria-hidden="true">*</span>
+                  <textarea
+                    v-model.trim="portal.voteForm.encryptedVote"
+                    rows="2"
+                    :aria-invalid="portal.voteErrors.encryptedVote ? 'true' : 'false'"
+                    :aria-describedby="portal.voteErrors.encryptedVote ? 'vote-encrypted-error' : undefined"
+                  />
+                  <span v-if="portal.voteErrors.encryptedVote" id="vote-encrypted-error" class="field-error" role="alert" aria-live="assertive">{{
+                    portal.voteErrors.encryptedVote
+                  }}</span>
+                </label>
+                <label class="field">
+                  proof<span class="required-mark" aria-hidden="true">*</span>
+                  <textarea
+                    v-model.trim="portal.voteForm.proof"
+                    rows="2"
+                    :aria-invalid="portal.voteErrors.proof ? 'true' : 'false'"
+                    :aria-describedby="portal.voteErrors.proof ? 'vote-proof-error' : undefined"
+                  />
+                  <span v-if="portal.voteErrors.proof" id="vote-proof-error" class="field-error" role="alert" aria-live="assertive">{{
+                    portal.voteErrors.proof
+                  }}</span>
+                </label>
+                <label class="field">
+                  nullifier<span class="required-mark" aria-hidden="true">*</span>
+                  <input
+                    v-model.trim="portal.voteForm.nullifier"
+                    :aria-invalid="portal.voteErrors.nullifier ? 'true' : 'false'"
+                    :aria-describedby="portal.voteErrors.nullifier ? 'vote-nullifier-error' : undefined"
+                  />
+                  <span v-if="portal.voteErrors.nullifier" id="vote-nullifier-error" class="field-error" role="alert" aria-live="assertive">{{
+                    portal.voteErrors.nullifier
+                  }}</span>
+                </label>
+                <label class="field">
+                  public_witness（可选）
+                  <textarea v-model.trim="portal.voteForm.publicWitness" rows="2" />
+                </label>
+              </div>
+            </article>
+
+            <article class="flow-step-card flow-submit">
+              <p class="step-kicker">步骤 4 · 提交选票</p>
+              <button class="btn btn-primary" :disabled="portal.voteLoading || !portal.walletReady">
+                {{ portal.voteLoading ? '提交中...' : '提交匿名选票' }}
+              </button>
+            </article>
+          </form>
+
+          <div class="mobile-vote-dock" role="region" aria-label="移动端快捷操作">
+            <p class="mobile-vote-meta">
+              <span>提案：{{ portal.voteForm.proposalId || '-' }}</span>
+              <span>{{ portal.walletReady ? '凭证已就绪' : '先领取凭证' }}</span>
+            </p>
+            <div class="mobile-vote-actions">
+              <button class="btn btn-secondary" type="button" :disabled="portal.voteLoading || !portal.walletReady" @click="portal.prepareBallotByOption">
+                {{ portal.voteLoading ? '生成中...' : '生成凭据' }}
+              </button>
+              <button class="btn btn-primary" type="button" :disabled="portal.voteLoading || !portal.walletReady" @click="portal.submitVote">
+                {{ portal.voteLoading ? '提交中...' : '立即提交' }}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section v-else id="section-panel-ops" class="panel" role="tabpanel" aria-labelledby="section-tab-ops">
+          <header class="panel-head">
+            <div>
+              <h2>计票与审计</h2>
+              <p class="panel-tip">按固定步骤完成运营流程，减少并行操作导致的误配置。</p>
+            </div>
+          </header>
+
+          <nav class="ops-stepper" aria-label="运营步骤">
+            <button
+              v-for="item in opsSteps"
+              :key="item.id"
+              class="ops-step-btn"
+              :class="{ active: opsStep === item.id }"
+              :aria-current="opsStep === item.id ? 'step' : undefined"
+              @click="setOpsStep(item.id)"
+            >
+              <span class="ops-step-order">{{ item.order }}</span>
+              <span class="ops-step-content">
+                <strong>{{ item.title }}</strong>
+                <small>{{ item.description }}</small>
+              </span>
             </button>
-            <button class="secondary" type="button" @click="importBallotJson">导入凭据</button>
-            <button class="secondary" type="button" @click="fillBallotTemplate">填模板</button>
-            <button class="secondary" type="button" @click="applySelectedOptionToBallot">写入选项</button>
-            <button class="secondary" type="button" @click="voteForm.nullifier = newNullifier()">新 nullifier</button>
+          </nav>
+
+          <div class="ops-stage">
+            <form v-if="opsStep === 'create'" class="ops-card ops-card-main" @submit.prevent="portal.createProposal">
+              <h3>步骤 1：创建提案</h3>
+              <label class="field" for="ops-create-title">
+                标题<span class="required-mark" aria-hidden="true">*</span>
+                <input
+                  id="ops-create-title"
+                  v-model.trim="portal.createProposalForm.title"
+                  :aria-invalid="portal.createProposalErrors.title ? 'true' : 'false'"
+                  :aria-describedby="portal.createProposalErrors.title ? 'ops-create-title-error' : undefined"
+                />
+                <span
+                  v-if="portal.createProposalErrors.title"
+                  id="ops-create-title-error"
+                  class="field-error"
+                  role="alert"
+                  aria-live="assertive"
+                  >{{ portal.createProposalErrors.title }}</span
+                >
+              </label>
+              <label class="field" for="ops-create-description">
+                描述
+                <textarea id="ops-create-description" v-model.trim="portal.createProposalForm.description" rows="2" />
+              </label>
+              <label class="field" for="ops-create-options">
+                选项（每行一个）<span class="required-mark" aria-hidden="true">*</span>
+                <textarea
+                  id="ops-create-options"
+                  v-model.trim="portal.createProposalForm.optionsText"
+                  rows="4"
+                  :aria-invalid="portal.createProposalErrors.options ? 'true' : 'false'"
+                  :aria-describedby="portal.createProposalErrors.options ? 'ops-create-options-error' : undefined"
+                />
+                <span
+                  v-if="portal.createProposalErrors.options"
+                  id="ops-create-options-error"
+                  class="field-error"
+                  role="alert"
+                  aria-live="assertive"
+                  >{{ portal.createProposalErrors.options }}</span
+                >
+              </label>
+              <div class="time-grid">
+                <label class="field" for="ops-create-start">
+                  starts_at<span class="required-mark" aria-hidden="true">*</span>
+                  <input
+                    id="ops-create-start"
+                    v-model.trim="portal.createProposalForm.startsAtLocal"
+                    type="datetime-local"
+                    :aria-invalid="portal.createProposalErrors.startsAt ? 'true' : 'false'"
+                    :aria-describedby="portal.createProposalErrors.startsAt ? 'ops-create-start-error' : undefined"
+                  />
+                  <span
+                    v-if="portal.createProposalErrors.startsAt"
+                    id="ops-create-start-error"
+                    class="field-error"
+                    role="alert"
+                    aria-live="assertive"
+                    >{{ portal.createProposalErrors.startsAt }}</span
+                  >
+                </label>
+                <label class="field" for="ops-create-end">
+                  ends_at<span class="required-mark" aria-hidden="true">*</span>
+                  <input
+                    id="ops-create-end"
+                    v-model.trim="portal.createProposalForm.endsAtLocal"
+                    type="datetime-local"
+                    :aria-invalid="portal.createProposalErrors.endsAt ? 'true' : 'false'"
+                    :aria-describedby="portal.createProposalErrors.endsAt ? 'ops-create-end-error' : undefined"
+                  />
+                  <span
+                    v-if="portal.createProposalErrors.endsAt"
+                    id="ops-create-end-error"
+                    class="field-error"
+                    role="alert"
+                    aria-live="assertive"
+                    >{{ portal.createProposalErrors.endsAt }}</span
+                  >
+                </label>
+              </div>
+              <div class="action-row">
+                <button class="btn btn-secondary" type="button" @click="portal.setProposalWindow('active')">开放窗口</button>
+                <button class="btn btn-secondary" type="button" @click="portal.setProposalWindow('closed')">结束窗口</button>
+              </div>
+              <div class="action-row">
+                <button class="btn btn-primary" :disabled="portal.createProposalLoading">
+                  {{ portal.createProposalLoading ? '创建中...' : '创建提案' }}
+                </button>
+                <button class="btn btn-ghost" type="button" @click="setOpsStep('decrypt')">下一步：初始化解密</button>
+              </div>
+            </form>
+
+            <form v-else-if="opsStep === 'decrypt'" class="ops-card ops-card-main" @submit.prevent="portal.setupDecryptionSession">
+              <h3>步骤 2：初始化解密会话</h3>
+              <label class="field" for="ops-decrypt-proposal-id">
+                proposal_id<span class="required-mark" aria-hidden="true">*</span>
+                <input
+                  id="ops-decrypt-proposal-id"
+                  v-model.trim="portal.decryptForm.proposalId"
+                  :aria-invalid="portal.decryptErrors.proposalId ? 'true' : 'false'"
+                  :aria-describedby="portal.decryptErrors.proposalId ? 'ops-decrypt-proposal-id-error' : undefined"
+                />
+                <span
+                  v-if="portal.decryptErrors.proposalId"
+                  id="ops-decrypt-proposal-id-error"
+                  class="field-error"
+                  role="alert"
+                  aria-live="assertive"
+                  >{{ portal.decryptErrors.proposalId }}</span
+                >
+              </label>
+              <div class="time-grid">
+                <label class="field" for="ops-decrypt-threshold">
+                  threshold<span class="required-mark" aria-hidden="true">*</span>
+                  <input
+                    id="ops-decrypt-threshold"
+                    v-model.number="portal.decryptForm.threshold"
+                    type="number"
+                    min="1"
+                    inputmode="numeric"
+                    :aria-invalid="portal.decryptErrors.threshold ? 'true' : 'false'"
+                    :aria-describedby="portal.decryptErrors.threshold ? 'ops-decrypt-threshold-error' : undefined"
+                  />
+                  <span
+                    v-if="portal.decryptErrors.threshold"
+                    id="ops-decrypt-threshold-error"
+                    class="field-error"
+                    role="alert"
+                    aria-live="assertive"
+                    >{{ portal.decryptErrors.threshold }}</span
+                  >
+                </label>
+                <label class="field" for="ops-decrypt-trustees">
+                  trustees<span class="required-mark" aria-hidden="true">*</span>
+                  <input
+                    id="ops-decrypt-trustees"
+                    v-model.number="portal.decryptForm.trustees"
+                    type="number"
+                    min="1"
+                    inputmode="numeric"
+                    :aria-invalid="portal.decryptErrors.trustees ? 'true' : 'false'"
+                    :aria-describedby="portal.decryptErrors.trustees ? 'ops-decrypt-trustees-error' : undefined"
+                  />
+                  <span
+                    v-if="portal.decryptErrors.trustees"
+                    id="ops-decrypt-trustees-error"
+                    class="field-error"
+                    role="alert"
+                    aria-live="assertive"
+                    >{{ portal.decryptErrors.trustees }}</span
+                  >
+                </label>
+              </div>
+              <button class="btn btn-primary" :disabled="portal.decryptLoading">{{ portal.decryptLoading ? '初始化中...' : '初始化' }}</button>
+              <p v-if="portal.decryptPublicKey" class="code block-code">public_key: {{ portal.decryptPublicKey }}</p>
+              <div class="action-row">
+                <button class="btn btn-ghost" type="button" @click="setOpsStep('publish')">下一步：发布结果</button>
+              </div>
+            </form>
+
+            <form v-else-if="opsStep === 'publish'" class="ops-card ops-card-main" @submit.prevent="portal.publishResult">
+              <h3>步骤 3：发布结果</h3>
+              <label class="field" for="ops-publish-proposal-id">
+                proposal_id<span class="required-mark" aria-hidden="true">*</span>
+                <input
+                  id="ops-publish-proposal-id"
+                  v-model.trim="portal.publishForm.proposalId"
+                  :aria-invalid="portal.publishErrors.proposalId ? 'true' : 'false'"
+                  :aria-describedby="portal.publishErrors.proposalId ? 'ops-publish-proposal-id-error' : undefined"
+                />
+                <span
+                  v-if="portal.publishErrors.proposalId"
+                  id="ops-publish-proposal-id-error"
+                  class="field-error"
+                  role="alert"
+                  aria-live="assertive"
+                  >{{ portal.publishErrors.proposalId }}</span
+                >
+              </label>
+              <label class="field" for="ops-publish-shares">
+                shares<span class="required-mark" aria-hidden="true">*</span>
+                <textarea
+                  id="ops-publish-shares"
+                  v-model.trim="portal.publishForm.sharesText"
+                  rows="3"
+                  :aria-invalid="portal.publishErrors.shares ? 'true' : 'false'"
+                  :aria-describedby="portal.publishErrors.shares ? 'ops-publish-shares-error' : undefined"
+                />
+                <span
+                  v-if="portal.publishErrors.shares"
+                  id="ops-publish-shares-error"
+                  class="field-error"
+                  role="alert"
+                  aria-live="assertive"
+                  >{{ portal.publishErrors.shares }}</span
+                >
+              </label>
+              <button class="btn btn-primary" :disabled="portal.publishLoading">{{ portal.publishLoading ? '发布中...' : '发布结果' }}</button>
+              <p class="muted">{{ portal.publishedSummary || '发布后将在此显示摘要' }}</p>
+              <div class="action-row">
+                <button class="btn btn-ghost" type="button" @click="setOpsStep('result')">下一步：查询结果</button>
+              </div>
+            </form>
+
+            <form v-else-if="opsStep === 'result'" class="ops-card ops-card-main" @submit.prevent="portal.fetchResult">
+              <h3>步骤 4：查询结果</h3>
+              <label class="field" for="ops-result-proposal-id">
+                proposal_id<span class="required-mark" aria-hidden="true">*</span>
+                <input
+                  id="ops-result-proposal-id"
+                  v-model.trim="portal.resultForm.proposalId"
+                  :aria-invalid="portal.resultErrors.proposalId ? 'true' : 'false'"
+                  :aria-describedby="portal.resultErrors.proposalId ? 'ops-result-proposal-id-error' : undefined"
+                />
+                <span
+                  v-if="portal.resultErrors.proposalId"
+                  id="ops-result-proposal-id-error"
+                  class="field-error"
+                  role="alert"
+                  aria-live="assertive"
+                  >{{ portal.resultErrors.proposalId }}</span
+                >
+              </label>
+              <button class="btn btn-primary" :disabled="portal.resultLoading">{{ portal.resultLoading ? '查询中...' : '查询' }}</button>
+              <p class="muted">{{ portal.resultSummary || '结果摘要将在此显示' }}</p>
+              <ul v-if="portal.resultTally.length > 0" class="result-list">
+                <li v-for="item in portal.resultTally" :key="item.option">
+                  <span>{{ item.option }}</span>
+                  <strong>{{ item.count }}</strong>
+                </li>
+              </ul>
+              <div class="action-row">
+                <button class="btn btn-ghost" type="button" @click="setOpsStep('credential')">下一步：凭证状态</button>
+              </div>
+            </form>
+
+            <form v-else-if="opsStep === 'credential'" class="ops-card ops-card-main" @submit.prevent="portal.fetchCredentialStatuses">
+              <h3>步骤 5：凭证状态</h3>
+              <label class="field" for="ops-credential-proposal-id">
+                proposal_id<span class="required-mark" aria-hidden="true">*</span>
+                <input
+                  id="ops-credential-proposal-id"
+                  v-model.trim="portal.credentialStatusForm.proposalId"
+                  :aria-invalid="portal.credentialStatusErrors.proposalId ? 'true' : 'false'"
+                  :aria-describedby="portal.credentialStatusErrors.proposalId ? 'ops-credential-proposal-id-error' : undefined"
+                />
+                <span
+                  v-if="portal.credentialStatusErrors.proposalId"
+                  id="ops-credential-proposal-id-error"
+                  class="field-error"
+                  role="alert"
+                  aria-live="assertive"
+                  >{{ portal.credentialStatusErrors.proposalId }}</span
+                >
+              </label>
+              <button class="btn btn-primary" :disabled="portal.credentialStatusLoading">
+                {{ portal.credentialStatusLoading ? '查询中...' : '查询凭证状态' }}
+              </button>
+              <p class="muted">这里只展示凭证是否已投票，不展示具体投票内容。</p>
+              <div v-if="portal.credentialStatuses.length > 0" class="credential-status-list">
+                <article v-for="item in portal.credentialStatuses" :key="item.credentialId" class="credential-status-card">
+                  <p>
+                    <strong>{{ item.userId }}</strong>
+                    <span class="status-pill" :class="item.hasVoted ? 'done' : 'todo'">{{ item.hasVoted ? '已投票' : '未投票' }}</span>
+                  </p>
+                  <p class="code">credential_id: {{ item.credentialId }}</p>
+                  <p class="code">user_pub_key: {{ item.userPubKey }}</p>
+                  <p>issued_at: {{ item.issuedAt || '-' }}</p>
+                </article>
+              </div>
+              <div class="action-row">
+                <button class="btn btn-ghost" type="button" @click="setOpsStep('anchor')">下一步：审计锚点</button>
+              </div>
+            </form>
+
+            <form v-else class="ops-card ops-card-main" @submit.prevent="portal.fetchAnchors">
+              <h3>步骤 6：审计锚点</h3>
+              <label class="field" for="ops-anchor-proposal-id">
+                proposal_id<span class="required-mark" aria-hidden="true">*</span>
+                <input
+                  id="ops-anchor-proposal-id"
+                  v-model.trim="portal.anchorForm.proposalId"
+                  :aria-invalid="portal.anchorErrors.proposalId ? 'true' : 'false'"
+                  :aria-describedby="portal.anchorErrors.proposalId ? 'ops-anchor-proposal-id-error' : undefined"
+                />
+                <span
+                  v-if="portal.anchorErrors.proposalId"
+                  id="ops-anchor-proposal-id-error"
+                  class="field-error"
+                  role="alert"
+                  aria-live="assertive"
+                  >{{ portal.anchorErrors.proposalId }}</span
+                >
+              </label>
+              <button class="btn btn-primary" :disabled="portal.anchorLoading">{{ portal.anchorLoading ? '查询中...' : '查询锚点' }}</button>
+              <div v-if="portal.anchors.length > 0" class="anchor-list">
+                <article v-for="item in portal.anchors" :key="item.id">
+                  <p><strong>{{ item.id }}</strong> · {{ item.createdAt }}</p>
+                  <p class="code">anchor_hash: {{ item.anchorHash }}</p>
+                  <p class="code">merkle_root: {{ item.merkleRoot }}</p>
+                </article>
+              </div>
+            </form>
           </div>
-          <details>
-            <summary>高级字段（一般由钱包自动填充）</summary>
-            <label class="label">encrypted_vote<textarea v-model.trim="voteForm.encryptedVote" rows="2" /></label>
-            <label class="label">proof<textarea v-model.trim="voteForm.proof" rows="2" /></label>
-            <label class="label">nullifier<input v-model.trim="voteForm.nullifier" /></label>
-            <label class="label">public_witness（可选）<textarea v-model.trim="voteForm.publicWitness" rows="2" /></label>
-          </details>
-          <button :disabled="voteLoading || !walletReady">{{ voteLoading ? '提交中...' : '提交匿名选票' }}</button>
-        </form>
-        <div class="status">
-          <p>当前提案：{{ voteForm.proposalId || '-' }}</p>
-          <p>凭证状态：{{ walletReady ? '已就绪' : '未就绪' }}</p>
-          <button class="secondary" :disabled="voteStatusLoading || !walletReady" @click="fetchVoteStatus()">
-            {{ voteStatusLoading ? '查询中...' : '查询投票状态' }}
-          </button>
-          <p v-if="hasVoted !== null" :class="['pill', hasVoted ? 'done' : 'todo']">{{ hasVoted ? '你已投票' : '你还未投票' }}</p>
-        </div>
+        </section>
       </section>
 
-      <section v-else class="card">
-        <header class="head">
-          <div>
-            <h2>计票与审计</h2>
-            <p>覆盖创建提案、解密会话、发布结果、查询结果、审计锚点。</p>
-          </div>
+      <aside class="activity-panel" aria-label="系统动态">
+        <header>
+          <h2>系统动态</h2>
+          <p class="muted">操作结果和接口反馈会同步显示在这里。</p>
         </header>
-        <div class="ops">
-          <form class="panel" @submit.prevent="createProposal">
-            <h3>创建提案</h3>
-            <label class="label">标题<input v-model.trim="createProposalForm.title" /></label>
-            <label class="label">描述<textarea v-model.trim="createProposalForm.description" rows="2" /></label>
-            <label class="label">选项（每行一个）<textarea v-model.trim="createProposalForm.optionsText" rows="4" /></label>
-            <label class="label">starts_at<input v-model.trim="createProposalForm.startsAt" /></label>
-            <label class="label">ends_at<input v-model.trim="createProposalForm.endsAt" /></label>
-            <div class="row">
-              <button class="secondary" type="button" @click="setProposalWindow('active')">开放窗口</button>
-              <button class="secondary" type="button" @click="setProposalWindow('closed')">结束窗口</button>
-            </div>
-            <button :disabled="createProposalLoading">{{ createProposalLoading ? '创建中...' : '创建提案' }}</button>
-          </form>
 
-          <form class="panel" @submit.prevent="setupDecryptionSession">
-            <h3>初始化解密会话</h3>
-            <label class="label">proposal_id<input v-model.trim="decryptForm.proposalId" /></label>
-            <label class="label">threshold<input v-model.number="decryptForm.threshold" type="number" min="1" /></label>
-            <label class="label">trustees<input v-model.number="decryptForm.trustees" type="number" min="1" /></label>
-            <button :disabled="decryptLoading">{{ decryptLoading ? '初始化中...' : '初始化' }}</button>
-            <p v-if="decryptPublicKey" class="mono">public_key: {{ decryptPublicKey }}</p>
-          </form>
-
-          <form class="panel" @submit.prevent="publishResult">
-            <h3>发布结果</h3>
-            <label class="label">proposal_id<input v-model.trim="publishForm.proposalId" /></label>
-            <label class="label">shares<textarea v-model.trim="publishForm.sharesText" rows="3" /></label>
-            <button :disabled="publishLoading">{{ publishLoading ? '发布中...' : '发布结果' }}</button>
-            <p>{{ publishedSummary }}</p>
-          </form>
-
-          <form class="panel" @submit.prevent="fetchResult">
-            <h3>查询结果</h3>
-            <label class="label">proposal_id<input v-model.trim="resultForm.proposalId" /></label>
-            <button :disabled="resultLoading">{{ resultLoading ? '查询中...' : '查询' }}</button>
-            <p>{{ resultSummary }}</p>
-            <ul v-if="resultTally.length > 0" class="tally">
-              <li v-for="item in resultTally" :key="item.option"><span>{{ item.option }}</span><strong>{{ item.count }}</strong></li>
-            </ul>
-          </form>
-
-          <form class="panel" @submit.prevent="fetchAnchors">
-            <h3>审计锚点</h3>
-            <label class="label">proposal_id<input v-model.trim="anchorForm.proposalId" /></label>
-            <button :disabled="anchorLoading">{{ anchorLoading ? '查询中...' : '查询锚点' }}</button>
-            <div v-if="anchors.length > 0" class="anchors">
-              <article v-for="item in anchors" :key="item.id">
-                <p><strong>{{ item.id }}</strong> · {{ item.createdAt }}</p>
-                <p class="mono">anchor_hash: {{ item.anchorHash }}</p>
-                <p class="mono">merkle_root: {{ item.merkleRoot }}</p>
-              </article>
-            </div>
-          </form>
-        </div>
-      </section>
-
-      <aside class="card side">
-        <h2>最新动态</h2>
-        <article v-if="latestNotice" :class="['notice', latestNotice.level]">
-          <h3>{{ latestNotice.title }}</h3>
-          <p>{{ latestNotice.detail }}</p>
-          <time>{{ latestNotice.at }}</time>
+        <article v-if="portal.latestNotice" class="notice-card" :class="portal.latestNotice.level">
+          <h3>{{ portal.latestNotice.title }}</h3>
+          <p>{{ portal.latestNotice.detail }}</p>
+          <time>{{ portal.latestNotice.at }}</time>
         </article>
-        <p v-if="notices.length === 0">暂无动态</p>
-        <div class="history">
-          <article v-for="item in notices.slice(1)" :key="`${item.at}-${item.title}`" :class="['notice', item.level]">
+
+        <p v-else class="muted">暂无动态</p>
+
+        <div class="history-list">
+          <article
+            v-for="item in portal.noticeHistory.filter(Boolean)"
+            :key="`${item.at}-${item.title}`"
+            class="notice-card"
+            :class="item.level"
+          >
             <h3>{{ item.title }}</h3>
             <p>{{ item.detail }}</p>
             <time>{{ item.at }}</time>
@@ -981,226 +865,467 @@ async function fetchAnchors(): Promise<void> {
 </template>
 
 <style scoped>
-.app {
-  width: min(1220px, 100%);
+.skip-link {
+  position: absolute;
+  left: 16px;
+  top: -52px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: var(--cta);
+  color: #ffffff;
+  font-weight: 700;
+  text-decoration: none;
+  z-index: 200;
+}
+
+.skip-link:focus {
+  top: 12px;
+}
+
+.app-shell {
+  width: min(1380px, 100%);
   margin: 0 auto;
-  padding: 20px 14px 34px;
+  padding: 20px 18px 48px;
   display: grid;
-  gap: 12px;
+  gap: 16px;
 }
 
 .hero {
   border: 1px solid var(--line);
-  border-radius: 16px;
-  background: linear-gradient(120deg, #214b5b, #39706e);
-  color: #eff7f7;
-  padding: 16px;
+  border-radius: 22px;
+  padding: 20px;
+  background:
+    radial-gradient(circle at 88% 14%, rgba(33, 197, 94, 0.2), transparent 34%),
+    linear-gradient(138deg, #0f172a 0%, #16243d 58%, #1f365f 100%);
+  color: #f9fbff;
   display: grid;
-  grid-template-columns: 1fr 360px;
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 1fr);
+  gap: 16px;
+  box-shadow: 0 16px 32px rgba(2, 7, 23, 0.24);
+}
+
+.hero-main {
+  display: grid;
   gap: 14px;
 }
 
-.tagline {
-  margin: 0 0 6px;
-  font-size: 0.74rem;
-  text-transform: uppercase;
+.eyebrow {
+  margin: 0;
+  font-size: 0.76rem;
   letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(242, 247, 255, 0.78);
+  font-weight: 700;
 }
 
 h1,
 h2,
 h3 {
   margin: 0;
-  font-family: 'Rockwell', 'Times New Roman', serif;
 }
 
-.intro {
-  margin: 8px 0 0;
+h1 {
+  font-size: clamp(1.56rem, 2.2vw, 2.38rem);
+  line-height: 1.14;
+  letter-spacing: -0.012em;
 }
 
-.hero-side {
-  display: grid;
-  gap: 8px;
-  align-content: start;
-}
-
-.health {
+.hero-copy {
   margin: 0;
-  font-size: 0.82rem;
+  max-width: 54ch;
+  color: rgba(241, 247, 255, 0.9);
 }
 
-.health.ok {
-  color: #b6ffd8;
-}
-
-.health.bad {
-  color: #ffd0c0;
-}
-
-.tabs {
+.workspace-tabs {
   display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
-.tabs button {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 10px;
-  text-align: left;
-  display: grid;
-  gap: 4px;
-  background: var(--panel);
-}
-
-.tabs button.active {
-  border-color: var(--brand);
-  box-shadow: 0 8px 16px rgba(26, 95, 107, 0.15);
-}
-
-.tabs small {
-  color: var(--text-soft);
-}
-
-.layout {
-  display: grid;
-  grid-template-columns: 1fr 320px;
-  gap: 12px;
-}
-
-.card {
-  border: 1px solid var(--line);
+.workspace-btn {
+  border: 1px solid rgba(210, 224, 244, 0.35);
   border-radius: 14px;
-  padding: 12px;
-  background: var(--panel);
-}
-
-.head {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  align-items: start;
-}
-
-.head p {
-  margin: 6px 0 0;
-  color: var(--text-soft);
-}
-
-.proposals {
-  margin-top: 10px;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 10px;
-}
-
-.proposal {
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  padding: 10px;
+  background: rgba(255, 255, 255, 0.07);
+  color: inherit;
+  text-align: left;
+  padding: 11px 12px;
   display: grid;
   gap: 5px;
-  background: #f8f8f3;
+  cursor: pointer;
+  transition: border-color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
 }
 
-.desc,
-.meta {
+.workspace-btn:hover {
+  border-color: rgba(248, 252, 255, 0.78);
+  box-shadow: 0 8px 16px rgba(3, 8, 24, 0.22);
+}
+
+.workspace-btn.active {
+  background: rgba(240, 249, 255, 0.2);
+  border-color: rgba(253, 255, 255, 0.92);
+}
+
+.workspace-btn small {
+  color: rgba(241, 247, 255, 0.82);
+}
+
+.endpoint-card {
+  border: 1px solid rgba(211, 224, 245, 0.32);
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(251, 254, 255, 0.1);
+  display: grid;
+  gap: 10px;
+}
+
+.health-line {
   margin: 0;
-  color: var(--text-soft);
-  font-size: 0.84rem;
-}
-
-.options-list {
-  margin: 2px 0 0;
-  padding-left: 18px;
-  color: var(--text-main);
-  font-size: 0.84rem;
+  font-size: 0.87rem;
   display: grid;
   gap: 3px;
 }
 
-.empty {
-  margin-top: 10px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 10px;
-  padding: 12px;
+.health-line.ok {
+  color: #ddffe9;
+}
+
+.health-line.bad {
+  color: #ffd9d3;
+}
+
+.health-line span {
+  color: rgba(241, 247, 255, 0.82);
+}
+
+.alert-banner {
+  border-radius: 15px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  padding: 11px 14px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.alert-banner strong {
+  display: block;
+}
+
+.alert-banner p {
+  margin: 4px 0 0;
+}
+
+.alert-banner.success {
+  border-color: rgba(22, 163, 74, 0.42);
+}
+
+.alert-banner.error {
+  border-color: rgba(220, 74, 47, 0.48);
+}
+
+.alert-banner.info {
+  border-color: rgba(59, 130, 246, 0.44);
+}
+
+.section-tabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.section-btn {
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface);
+  text-align: left;
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+  cursor: pointer;
+  transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+}
+
+.section-btn small {
   color: var(--text-soft);
 }
 
-.form {
-  margin-top: 10px;
+.section-btn:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-strong);
+}
+
+.section-btn.active {
+  border-color: var(--cta);
+  box-shadow: 0 12px 26px rgba(22, 163, 74, 0.18);
+  background: #f8fffb;
+}
+
+.main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(290px, 0.95fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.main-panel {
+  display: grid;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+  box-shadow: 0 14px 28px rgba(15, 23, 42, 0.05);
+}
+
+.panel-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.panel-tip {
+  margin: 6px 0 0;
+  color: var(--text-soft);
+}
+
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.proposal-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.proposal-card {
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  padding: 12px;
+  background: var(--surface-strong);
   display: grid;
   gap: 9px;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
 }
 
-.label {
-  display: grid;
-  gap: 6px;
-  color: var(--text-soft);
-  font-size: 0.84rem;
+.proposal-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: 0 12px 22px rgba(15, 23, 42, 0.08);
 }
 
-.switch {
-  color: var(--text-soft);
-  font-size: 0.84rem;
+.proposal-head {
   display: flex;
-  gap: 8px;
   align-items: center;
-}
-
-.box {
-  border: 1px dashed var(--line-strong);
-  border-radius: 10px;
-  padding: 10px;
-  display: grid;
+  justify-content: space-between;
   gap: 8px;
 }
 
-.box p {
+.status-badge {
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  background: #ffffff;
+}
+
+.card-desc {
   margin: 0;
   color: var(--text-soft);
 }
 
-.box code {
-  font-family: 'Consolas', 'Courier New', monospace;
-  word-break: break-all;
+.card-label {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-soft);
+}
+
+.option-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
+.meta-grid {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.meta-grid div {
+  display: grid;
+  gap: 2px;
+}
+
+.meta-grid dt {
   font-size: 0.78rem;
+  color: var(--text-soft);
 }
 
-.wallet {
-  margin-top: 10px;
+.meta-grid dd {
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.form-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  color: var(--text-soft);
+}
+
+.field-help {
+  font-size: 0.83rem;
+  color: var(--text-soft);
+}
+
+.field-error {
+  color: var(--danger);
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.field-error::before {
+  content: '错误：';
+  font-weight: 700;
+  margin-right: 2px;
+}
+
+.required-mark {
+  margin-left: 2px;
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.switch-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 0.93rem;
+}
+
+input,
+textarea {
+  width: 100%;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 10px;
-  background: #f8f8f3;
+  border-radius: 12px;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--text-main);
+  background: #ffffff;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
 }
 
-.wallet.ready {
-  border-color: rgba(73, 131, 105, 0.45);
+textarea {
+  resize: vertical;
 }
 
-.wallet p {
-  margin: 0 0 5px;
+input:hover,
+textarea:hover {
+  border-color: var(--line-strong);
+}
+
+input[aria-invalid='true'],
+textarea[aria-invalid='true'] {
+  border-color: rgba(220, 74, 47, 0.65);
+  background: #fff9f8;
+}
+
+.inline-card,
+.wallet-card,
+.ops-card,
+.activity-panel,
+.status-strip {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-strong);
+  padding: 12px;
+}
+
+.wallet-card.ready {
+  border-color: rgba(22, 163, 74, 0.55);
+  background: #f7fff9;
+}
+
+.wallet-list,
+.wallet-list div {
+  display: grid;
+  gap: 4px;
+}
+
+.wallet-list dt {
+  font-size: 0.8rem;
+  color: var(--text-soft);
+}
+
+.wallet-list dd {
+  margin: 0;
+}
+
+.code {
+  font-family: var(--mono-font);
+  word-break: break-all;
+}
+
+.block-code {
+  margin: 0;
 }
 
 .chip-row {
   display: flex;
-  gap: 6px;
   flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: #ffffff;
+  padding: 7px 11px;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.chip:hover {
+  border-color: var(--cta);
+  background: #f2fff6;
+}
+
+.chip.active {
+  border-color: var(--cta);
+  background: #ecfdf2;
+  box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.14);
 }
 
 .option-box {
-  border: 1px dashed var(--line-strong);
-  border-radius: 10px;
-  padding: 8px 10px;
   margin: 0;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  padding: 10px 12px;
   display: grid;
-  gap: 6px;
+  gap: 9px;
+  background: #ffffff;
 }
 
 .option-box legend {
+  font-size: 0.84rem;
   color: var(--text-soft);
-  font-size: 0.82rem;
   padding: 0 4px;
 }
 
@@ -1208,216 +1333,528 @@ h3 {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--text-main);
-}
-
-.chip {
-  border: 1px solid var(--line-strong);
-  background: #f3f5eb;
-  color: var(--text-main);
-}
-
-.status {
-  margin-top: 10px;
-  border-top: 1px dashed var(--line-strong);
-  padding-top: 10px;
-  display: grid;
-  gap: 7px;
-}
-
-.status p {
-  margin: 0;
-}
-
-.pill {
-  justify-self: start;
-  border-radius: 999px;
-  padding: 3px 9px;
-  font-size: 0.8rem;
-}
-
-.pill.done {
-  border: 1px solid rgba(73, 131, 105, 0.5);
-  color: #2f6f51;
-}
-
-.pill.todo {
-  border: 1px solid var(--line-strong);
-  color: var(--text-soft);
-}
-
-.ops {
-  margin-top: 10px;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 10px;
-}
-
-.panel {
-  border: 1px solid var(--line);
+  padding: 6px 8px;
   border-radius: 10px;
-  background: #f8f8f3;
-  padding: 10px;
+  transition: background-color 160ms ease;
+}
+
+.option-item:hover {
+  background: #f5f8fc;
+}
+
+.advanced-grid {
   display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  background: #fcfdff;
+}
+
+.status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
 
-.panel p {
+.status-strip p {
   margin: 0;
-  color: var(--text-soft);
-  font-size: 0.82rem;
+  font-size: 0.9rem;
 }
 
-.tally {
+.status-pill {
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  background: #ffffff;
+}
+
+.status-pill.done {
+  border: 1px solid rgba(22, 163, 74, 0.45);
+  color: #0a7e45;
+}
+
+.status-pill.todo {
+  border: 1px solid var(--line-strong);
+  color: var(--text-soft);
+}
+
+.flow-form {
+  gap: 10px;
+}
+
+.flow-step-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-strong);
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.flow-submit {
+  background: linear-gradient(180deg, #f8fff9 0%, #f0fff4 100%);
+  border-color: rgba(22, 163, 74, 0.36);
+}
+
+.mobile-vote-dock {
+  display: none;
+}
+
+.mobile-vote-meta {
+  margin: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 0.79rem;
+}
+
+.mobile-vote-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.step-kicker {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #30527c;
+}
+
+.step-head-inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.advanced-tools {
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.action-row.compact {
+  grid-template-columns: repeat(auto-fit, minmax(126px, 1fr));
+}
+
+.ops-stepper {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+}
+
+.ops-step-btn {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-strong);
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
+}
+
+.ops-step-btn:hover {
+  border-color: var(--line-strong);
+  background: #ffffff;
+}
+
+.ops-step-btn.active {
+  border-color: var(--cta);
+  background: #f4fdf7;
+  box-shadow: 0 10px 20px rgba(22, 163, 74, 0.15);
+}
+
+.ops-step-order {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: #e7eef9;
+  color: #2c4363;
+  font-weight: 800;
+  font-size: 0.82rem;
+  flex-shrink: 0;
+}
+
+.ops-step-content {
+  display: grid;
+  gap: 2px;
+}
+
+.ops-step-content small {
+  color: var(--text-soft);
+}
+
+.ops-stage {
+  display: grid;
+}
+
+.ops-card {
+  display: grid;
+  gap: 10px;
+}
+
+.ops-card-main {
+  border-radius: 16px;
+  padding: 14px;
+}
+
+.time-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.result-list {
+  list-style: none;
   margin: 0;
   padding: 0;
-  list-style: none;
   display: grid;
-  gap: 4px;
+  gap: 6px;
 }
 
-.tally li {
+.result-list li {
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 4px 7px;
+  border-radius: 9px;
+  padding: 6px 8px;
   display: flex;
   justify-content: space-between;
 }
 
-.anchors {
-  display: grid;
-  gap: 7px;
-}
-
-.anchors article {
-  border: 1px dashed var(--line-strong);
-  border-radius: 8px;
-  padding: 7px;
-}
-
-.anchors p {
-  margin: 0 0 3px;
-}
-
-.side {
+.anchor-list {
   display: grid;
   gap: 8px;
-  align-content: start;
-  max-height: 82vh;
-  overflow: auto;
 }
 
-.history {
+.credential-status-list {
   display: grid;
-  gap: 7px;
+  gap: 8px;
 }
 
-.notice {
+.credential-status-card {
   border: 1px solid var(--line);
-  border-radius: 9px;
-  padding: 8px;
-  background: #f8f8f3;
+  border-radius: 10px;
+  padding: 9px;
+  background: #ffffff;
   display: grid;
   gap: 4px;
 }
 
-.notice h3 {
-  font-size: 0.92rem;
+.credential-status-card p {
+  margin: 0;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
-.notice p {
+.anchor-list article {
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  padding: 8px;
+  background: #ffffff;
+}
+
+.anchor-list p {
+  margin: 0 0 4px;
+}
+
+.activity-panel {
+  display: grid;
+  gap: 10px;
+  position: sticky;
+  top: 16px;
+}
+
+.activity-panel h2 {
+  font-size: 1.06rem;
+}
+
+.notice-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  background: #ffffff;
+  display: grid;
+  gap: 5px;
+}
+
+.notice-card p {
   margin: 0;
   color: var(--text-soft);
-  font-size: 0.82rem;
 }
 
-.notice time {
-  font-size: 0.74rem;
+.notice-card time {
+  font-size: 0.78rem;
   color: var(--text-soft);
 }
 
-.notice.success {
-  border-color: rgba(73, 131, 105, 0.35);
+.notice-card.success {
+  border-color: rgba(22, 163, 74, 0.42);
 }
 
-.notice.error {
-  border-color: rgba(188, 79, 64, 0.35);
+.notice-card.error {
+  border-color: rgba(220, 74, 47, 0.45);
 }
 
-.notice.info {
-  border-color: rgba(92, 126, 153, 0.35);
+.notice-card.info {
+  border-color: rgba(37, 99, 235, 0.42);
 }
 
-input,
-textarea {
-  width: 100%;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  padding: 9px 10px;
-  color: var(--text-main);
-  font: inherit;
-  background: #f8f8f3;
-}
-
-input:focus,
-textarea:focus {
-  outline: none;
-  border-color: var(--brand);
-}
-
-button {
-  border: none;
-  border-radius: 9px;
-  padding: 9px 12px;
-  background: linear-gradient(130deg, var(--brand), var(--brand-deep));
-  color: #f8fcfc;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-button.secondary {
-  background: transparent;
-  border: 1px solid var(--line-strong);
-  color: var(--text-main);
-}
-
-button:disabled {
-  opacity: 0.62;
-  cursor: not-allowed;
-}
-
-.row {
+.history-list {
   display: grid;
-  gap: 7px;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+  max-height: 52vh;
+  overflow: auto;
+  padding-right: 2px;
 }
 
-.mono {
-  font-family: 'Consolas', 'Courier New', monospace;
-  word-break: break-all;
+.empty-state {
+  margin: 0;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  padding: 14px;
+  color: var(--text-soft);
 }
 
 .hidden-input {
   display: none;
 }
 
-@media (max-width: 1140px) {
-  .layout {
-    grid-template-columns: 1fr;
+.muted {
+  margin: 0;
+  color: var(--text-soft);
+}
+
+.action-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.btn {
+  border: 1px solid transparent;
+  border-radius: 11px;
+  padding: 9px 12px;
+  background: linear-gradient(135deg, var(--cta), var(--cta-strong));
+  color: #ffffff;
+  font-weight: 700;
+  cursor: pointer;
+  transition: box-shadow 160ms ease, opacity 160ms ease, filter 160ms ease, border-color 160ms ease;
+}
+
+.btn:hover {
+  filter: brightness(1.03);
+  box-shadow: 0 10px 20px rgba(22, 163, 74, 0.22);
+}
+
+.btn:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+  box-shadow: none;
+  filter: none;
+}
+
+.btn-secondary {
+  background: #ffffff;
+  border: 1px solid var(--line-strong);
+  color: var(--text-main);
+}
+
+.btn-secondary:hover {
+  box-shadow: 0 8px 16px rgba(15, 23, 42, 0.08);
+}
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-main);
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, var(--cta), var(--cta-strong));
+  color: #ffffff;
+}
+
+:where(button, input, textarea, a, [role='tab']):focus-visible {
+  outline: 3px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.panel,
+.activity-panel,
+.alert-banner {
+  animation: panel-enter 260ms ease both;
+}
+
+@keyframes panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
   }
 
-  .side {
-    max-height: none;
-  }
-
-  .tabs {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
-@media (max-width: 860px) {
+@media (max-width: 1240px) {
   .hero {
     grid-template-columns: 1fr;
+  }
+
+  .main-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .activity-panel {
+    position: static;
+  }
+
+  .history-list {
+    max-height: none;
+  }
+}
+
+@media (max-width: 780px) {
+  .app-shell {
+    padding-inline: 12px;
+    gap: 14px;
+  }
+
+  .workspace-tabs {
+    grid-template-columns: 1fr;
+  }
+
+  .section-tabs {
+    display: flex;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    scrollbar-width: thin;
+  }
+
+  .section-tabs {
+    grid-template-columns: none;
+  }
+
+  .section-btn {
+    min-width: 220px;
+    flex: 0 0 auto;
+  }
+
+  .time-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .status-strip {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .chip-row {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .chip {
+    flex: 0 0 auto;
+  }
+
+  #section-panel-vote {
+    padding-bottom: 126px;
+  }
+
+  .flow-form {
+    padding-bottom: 96px;
+  }
+
+  .flow-submit {
+    display: none;
+  }
+
+  .mobile-vote-dock {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    z-index: 180;
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    background: rgba(248, 252, 255, 0.94);
+    backdrop-filter: blur(9px);
+    box-shadow: 0 16px 28px rgba(15, 23, 42, 0.2);
+    padding: 10px;
+    display: grid;
+    gap: 8px;
+  }
+
+  .btn,
+  .chip,
+  .section-btn,
+  .workspace-btn,
+  .ops-step-btn {
+    min-height: 44px;
+  }
+
+  .header-actions {
+    width: 100%;
+  }
+
+  .header-actions > * {
+    flex: 1 1 auto;
+  }
+}
+
+@media (max-width: 520px) {
+  .mobile-vote-dock {
+    left: 10px;
+    right: 10px;
+    padding: 8px;
+  }
+
+  .mobile-vote-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .action-row,
+  .action-row.compact {
+    grid-template-columns: 1fr;
+  }
+
+  .panel {
+    padding: 13px;
+  }
+
+  .ops-step-btn {
+    padding: 9px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 </style>

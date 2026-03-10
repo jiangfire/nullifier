@@ -8,4 +8,5 @@ var (
 	ErrCredentialAlreadyIssued = errors.New("credential already issued")
 	ErrUserAlreadyVoted        = errors.New("user already voted")
 	ErrInvalidCredential       = errors.New("invalid credential")
+	ErrUnauthorized            = errors.New("unauthorized")
 )

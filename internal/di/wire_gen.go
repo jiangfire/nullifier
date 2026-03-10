@@ -30,11 +30,20 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		return nil, err
 	}
 	encrypter := NewEncrypter()
-	votingUseCase := NewVotingUseCase(voteRepository, participationRepository, credentialRepository, proofVerifier, encrypter, logger)
+	votingUseCase := NewVotingUseCase(
+		voteRepository,
+		participationRepository,
+		credentialRepository,
+		proposalRepository,
+		decryptionSessionRepository,
+		proofVerifier,
+		encrypter,
+		logger,
+	)
 	credentialIssuer := NewCredentialIssuer(cfg)
 	registerUseCase := NewRegisterUseCase(credentialRepository, credentialIssuer, logger)
 	proposalUseCase := NewProposalUseCase(proposalRepository, logger)
-	participationUseCase := NewParticipationUseCase(participationRepository, logger)
+	participationUseCase := NewParticipationUseCase(participationRepository, credentialRepository, logger)
 	thresholdCrypto := NewThresholdCrypto()
 	merkleRootBuilder := NewMerkleRootBuilder()
 	tallyUseCase := NewTallyUseCase(voteRepository, proposalRepository, decryptionSessionRepository, tallyResultRepository, auditAnchorRepository, thresholdCrypto, merkleRootBuilder, logger)

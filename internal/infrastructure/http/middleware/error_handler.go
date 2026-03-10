@@ -30,8 +30,9 @@ func ErrorHandler(logger *zap.Logger) gin.HandlerFunc {
 		logger.Error("request failed", zap.Error(err))
 
 		status, code := mapError(err)
+		message := publicErrorMessage(code)
 		c.JSON(status, gin.H{
-			"error": err.Error(),
+			"error": message,
 			"code":  code,
 		})
 	}
@@ -49,9 +50,32 @@ func mapError(err error) (int, string) {
 		return http.StatusConflict, "USER_ALREADY_VOTED"
 	case errors.Is(err, usecase.ErrInvalidCredential):
 		return http.StatusUnauthorized, "INVALID_CREDENTIAL"
+	case errors.Is(err, usecase.ErrUnauthorized):
+		return http.StatusUnauthorized, "UNAUTHORIZED"
 	case errors.Is(err, repository.ErrNotFound):
 		return http.StatusNotFound, "NOT_FOUND"
 	default:
 		return http.StatusInternalServerError, "INTERNAL_ERROR"
+	}
+}
+
+func publicErrorMessage(code string) string {
+	switch code {
+	case "INVALID_REQUEST":
+		return "invalid request"
+	case "DOUBLE_VOTING":
+		return "double voting"
+	case "CREDENTIAL_EXISTS":
+		return "credential already issued"
+	case "USER_ALREADY_VOTED":
+		return "user already voted"
+	case "INVALID_CREDENTIAL":
+		return "invalid credential"
+	case "UNAUTHORIZED":
+		return "unauthorized"
+	case "NOT_FOUND":
+		return "resource not found"
+	default:
+		return "internal server error"
 	}
 }

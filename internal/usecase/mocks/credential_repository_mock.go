@@ -35,19 +35,34 @@ func (m *MockCredentialRepository) EXPECT() *MockCredentialRepositoryMockRecorde
 	return m.recorder
 }
 
-// GetByUserID mocks base method.
-func (m *MockCredentialRepository) GetByUserID(ctx context.Context, userID string) (*entity.Credential, error) {
+// GetByProposalAndUserID mocks base method.
+func (m *MockCredentialRepository) GetByProposalAndUserID(ctx context.Context, proposalID, userID string) (*entity.Credential, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetByUserID", ctx, userID)
+	ret := m.ctrl.Call(m, "GetByProposalAndUserID", ctx, proposalID, userID)
 	ret0, _ := ret[0].(*entity.Credential)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
-// GetByUserID indicates an expected call of GetByUserID.
-func (mr *MockCredentialRepositoryMockRecorder) GetByUserID(ctx, userID interface{}) *gomock.Call {
+// GetByProposalAndUserID indicates an expected call of GetByProposalAndUserID.
+func (mr *MockCredentialRepositoryMockRecorder) GetByProposalAndUserID(ctx, proposalID, userID interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetByUserID", reflect.TypeOf((*MockCredentialRepository)(nil).GetByUserID), ctx, userID)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetByProposalAndUserID", reflect.TypeOf((*MockCredentialRepository)(nil).GetByProposalAndUserID), ctx, proposalID, userID)
+}
+
+// ListByProposal mocks base method.
+func (m *MockCredentialRepository) ListByProposal(ctx context.Context, proposalID string) ([]*entity.Credential, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListByProposal", ctx, proposalID)
+	ret0, _ := ret[0].([]*entity.Credential)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListByProposal indicates an expected call of ListByProposal.
+func (mr *MockCredentialRepositoryMockRecorder) ListByProposal(ctx, proposalID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListByProposal", reflect.TypeOf((*MockCredentialRepository)(nil).ListByProposal), ctx, proposalID)
 }
 
 // Save mocks base method.

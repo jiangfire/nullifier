@@ -1,6 +1,8 @@
 server:
   address: ":8080"
   mode: "release"
+  admin_bearer_token: ""
+  cors_allowed_origins: []
 
 crypto:
   vk_path: "./keys/verifying.key"

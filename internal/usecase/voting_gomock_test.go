@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"testing"
+	"time"
 
 	"anonvote/internal/domain/entity"
 	"anonvote/internal/usecase/mocks"
@@ -19,10 +20,21 @@ func TestVotingUseCase_Submit_WithGoMock(t *testing.T) {
 	voteRepo := mocks.NewMockVoteRepository(ctrl)
 	participationRepo := mocks.NewMockParticipationRepository(ctrl)
 	credentialRepo := mocks.NewMockCredentialRepository(ctrl)
+	proposalRepo := mocks.NewMockProposalRepository(ctrl)
+	sessionRepo := mocks.NewMockDecryptionSessionRepository(ctrl)
 	verifier := mocks.NewMockProofVerifier(ctrl)
 	encrypter := mocks.NewMockEncrypter(ctrl)
 
-	uc := NewVotingUseCase(voteRepo, participationRepo, credentialRepo, verifier, encrypter, zap.NewNop())
+	uc := NewVotingUseCase(
+		voteRepo,
+		participationRepo,
+		credentialRepo,
+		proposalRepo,
+		sessionRepo,
+		verifier,
+		encrypter,
+		zap.NewNop(),
+	)
 	req := &SubmitVoteRequest{
 		ProposalID:          "proposal-1",
 		EncryptedVote:       []byte("cipher"),
@@ -34,9 +46,22 @@ func TestVotingUseCase_Submit_WithGoMock(t *testing.T) {
 	}
 
 	gomock.InOrder(
+		proposalRepo.EXPECT().GetByID(gomock.Any(), "proposal-1").Return(&entity.Proposal{
+			ID:       "proposal-1",
+			Status:   "open",
+			StartsAt: time.Now().UTC().Add(-1 * time.Hour),
+			EndsAt:   time.Now().UTC().Add(1 * time.Hour),
+		}, nil),
+		sessionRepo.EXPECT().GetByProposal(gomock.Any(), "proposal-1").Return(&entity.DecryptionSession{
+			ProposalID: "proposal-1",
+			Threshold:  1,
+			Trustees:   1,
+			SharesJSON: `["c2hhcmUtMQ=="]`,
+		}, nil),
 		verifier.EXPECT().Verify(req.Proof, gomock.Any()).Return(nil),
 		encrypter.EXPECT().ValidateCiphertext(req.EncryptedVote).Return(nil),
-		credentialRepo.EXPECT().GetByUserID(gomock.Any(), "u-1").Return(&entity.Credential{
+		credentialRepo.EXPECT().GetByProposalAndUserID(gomock.Any(), "proposal-1", "u-1").Return(&entity.Credential{
+			ProposalID: "proposal-1",
 			UserID:     "u-1",
 			UserPubKey: []byte("pub"),
 			Signature:  []byte("sig"),

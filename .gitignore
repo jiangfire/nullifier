@@ -30,4 +30,5 @@ $Profile
 # local build/module caches used in sandbox
 .gocache/
 .gomodcache/
-
+web/.pnpm-store/
+.codex/

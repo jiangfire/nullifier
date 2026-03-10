@@ -64,10 +64,19 @@ func TestProviders_WiringSmoke(t *testing.T) {
 	require.NotNil(t, merkleBuilder)
 	require.NotNil(t, credentialIssuer)
 
-	votingUC := NewVotingUseCase(voteRepo, participationRepo, credentialRepo, proofVerifier, encrypter, logger)
+	votingUC := NewVotingUseCase(
+		voteRepo,
+		participationRepo,
+		credentialRepo,
+		proposalRepo,
+		sessionRepo,
+		proofVerifier,
+		encrypter,
+		logger,
+	)
 	registerUC := NewRegisterUseCase(credentialRepo, credentialIssuer, logger)
 	proposalUC := NewProposalUseCase(proposalRepo, logger)
-	participationUC := NewParticipationUseCase(participationRepo, logger)
+	participationUC := NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := NewTallyUseCase(voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo, thresholdCrypto, merkleBuilder, logger)
 	require.NotNil(t, votingUC)
 	require.NotNil(t, registerUC)

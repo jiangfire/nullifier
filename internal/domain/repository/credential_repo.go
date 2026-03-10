@@ -8,5 +8,6 @@ import (
 
 type CredentialRepository interface {
 	Save(ctx context.Context, credential *entity.Credential) error
-	GetByUserID(ctx context.Context, userID string) (*entity.Credential, error)
+	GetByProposalAndUserID(ctx context.Context, proposalID string, userID string) (*entity.Credential, error)
+	ListByProposal(ctx context.Context, proposalID string) ([]*entity.Credential, error)
 }
