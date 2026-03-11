@@ -29,7 +29,7 @@ func TestProviders_WiringSmoke(t *testing.T) {
 		},
 	}
 
-	logger, err := NewLogger()
+	logger, err := NewLogger(cfg)
 	require.NoError(t, err)
 
 	db, err := NewDB(cfg)

@@ -10,7 +10,7 @@ import (
 )
 
 func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
-	logger, err := NewLogger()
+	logger, err := NewLogger(cfg)
 	if err != nil {
 		return nil, err
 	}

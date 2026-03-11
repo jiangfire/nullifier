@@ -98,6 +98,13 @@ CRYPTO_VK_PATH=./keys/verifying.key
   - Bash：`./scripts/check-coverage.sh`
 - PostgreSQL 集成（testcontainers）在 Docker 不可用时会自动跳过
 
+## 日志规范
+
+- 服务端运行期日志统一使用 `zap`，包括启动日志、HTTP 请求日志、错误日志和 panic recovery。
+- 不要在服务端代码路径继续引入 `log.Printf`、`fmt.Println` 这类运行期日志输出；需要记录运行状态时统一走注入的 `*zap.Logger`。
+- Gin 默认的 debug/route/listen 输出已关闭，避免和业务日志混杂。
+- CLI 保留纯文本或 JSON 结果输出，这些属于命令结果，不属于服务端运行日志；不要把 CLI 用户输出和服务端日志规则混为一谈。
+
 ## 目录
 
 ```text

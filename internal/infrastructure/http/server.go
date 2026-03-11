@@ -3,6 +3,7 @@ package httpapi
 import (
 	"anonvote/internal/config"
 	"anonvote/internal/infrastructure/http/middleware"
+	"io"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -26,9 +27,13 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 	}
 
 	gin.SetMode(cfg.GinMode)
+	gin.DefaultWriter = io.Discard
+	gin.DefaultErrorWriter = io.Discard
+	gin.DebugPrintRouteFunc = func(string, string, string, int) {}
 	engine := gin.New()
 	engine.Use(middleware.CORS(cfg.CORSAllowedOrigins))
-	engine.Use(gin.Recovery())
+	engine.Use(middleware.RequestLogger(logger))
+	engine.Use(middleware.Recovery(logger))
 	engine.Use(middleware.ErrorHandler(logger))
 
 	engine.GET("/healthz", func(c *gin.Context) {

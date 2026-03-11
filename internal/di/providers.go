@@ -10,10 +10,19 @@ import (
 	"anonvote/internal/usecase"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
 )
 
-func NewLogger() (*zap.Logger, error) {
+func NewLogger(cfg *config.Config) (*zap.Logger, error) {
+	if cfg != nil {
+		switch cfg.GinMode {
+		case "debug", "test":
+			loggerCfg := zap.NewDevelopmentConfig()
+			loggerCfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+			return loggerCfg.Build()
+		}
+	}
 	return zap.NewProduction()
 }
 

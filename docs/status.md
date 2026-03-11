@@ -1,13 +1,14 @@
 # 项目状态（交接）
 
-更新时间：2026-03-10 22:46:27 +08:00  
-当前分支：`feat/concurrency-hardening-and-prod-config`
+更新时间：2026-03-11 21:57:00 +08:00  
+当前分支：`main`
 
 ## 总体结论
 
 - 后端主流程可用：提案创建、按提案签发匿名凭证、匿名投票、防重投、防冒充、参与状态查询、阈值解密计票、结果发布、审计锚点。
 - 前端同时覆盖用户端与运营端流程；CLI 已补齐主要管理与投票命令，可脱离网页完成联调。
 - 之前 review 指出的三个安全问题已修复：管理面已鉴权、解密份额不再明文持久化/整包泄露、投票开放期间禁止 setup。
+- 服务端运行期日志已统一到 `zap`，Gin 默认 debug 输出已静音。
 
 ## 本轮关键变更
 
@@ -16,11 +17,13 @@
    - `release/prod/production` 模式强制要求 `server.admin_bearer_token`
    - 解密 session 仅持久化 share hash，不再落库明文份额
    - `decryption/setup` 恢复为仅允许在提案关闭后执行
+   - 凭证签发改为管理员接口，投票状态查询改为凭证校验式接口
 2. 提案内凭证台账
    - `Credential` 绑定 `proposal_id`
    - 签发凭证必须显式指定提案
    - 投票校验改为按 `proposal_id + user_id` 查凭证
    - 新增管理员接口：列出某提案下所有凭证及 `has_voted`
+   - 提案 `options` 升级为正式字段，草稿生成和计票都会校验候选项合法性
 3. 前端运营补齐
    - 顶部支持输入 `Admin Token`
    - 新增“凭证状态”面板
@@ -35,7 +38,7 @@
 - `POST /api/v1/proposals`
 - `GET /api/v1/proposals/open`
 - `POST /api/v1/votes`
-- `GET /api/v1/proposals/:proposal_id/vote-status?user_id=...`
+- `POST /api/v1/proposals/:proposal_id/vote-status`
 - `GET /api/v1/proposals/:proposal_id/credentials`
 - `POST /api/v1/proposals/:proposal_id/ballot-draft`
 - `POST /api/v1/proposals/:proposal_id/decryption/setup`
@@ -67,9 +70,10 @@
 
 - `go test ./...` 通过
 - `pnpm --dir web exec tsc --noEmit` 通过
+- `go run ./cmd/server` 启动后仅输出 `zap` 风格服务日志
 
 ## 仍需注意
 
 - `ballot-draft` 仍是开发联调接口，生产应由真实钱包/客户端生成 proof 与密文。
 - CLI 目前是标准库版，适合联调和脚本化；若后续追求更顺手的终端交互，可继续补交互式向导、表格输出和批量命令。
-- 工作区当前仍有本地改动与数据库文件 `anonvote.db`，退出前无需处理；下次继续时先看 `git status` 即可。
+- 服务端日志规范已固定为 `zap`；后续若新增运行期日志，默认要求复用注入的 `*zap.Logger`，不要重新引入 `log.Printf`。
