@@ -178,6 +178,7 @@ func (c *cli) cmdCreateProposal(args []string) error {
 	body := map[string]any{
 		"title":       strings.TrimSpace(*title),
 		"description": desc,
+		"options":     splitCSV(*options),
 		"starts_at":   strings.TrimSpace(*start),
 		"ends_at":     strings.TrimSpace(*end),
 	}
@@ -216,7 +217,7 @@ func (c *cli) cmdIssueCredential(args []string) error {
 		"user_pub_key": userPubKey,
 	}
 	var out credentialFile
-	if err := c.postJSON("/api/v1/credentials", body, false, &out); err != nil {
+	if err := c.postJSON("/api/v1/credentials", body, true, &out); err != nil {
 		return err
 	}
 	out.Version = 1
@@ -340,17 +341,25 @@ func (c *cli) cmdVoteStatus(args []string) error {
 	fs := flag.NewFlagSet("vote-status", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	proposalID := fs.String("proposal", "", "proposal id")
-	userID := fs.String("user", "", "user id")
+	credentialPath := fs.String("credential-file", "", "credential json file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*proposalID) == "" || strings.TrimSpace(*userID) == "" {
-		return errors.New("必须提供 -proposal -user")
+	if strings.TrimSpace(*proposalID) == "" || strings.TrimSpace(*credentialPath) == "" {
+		return errors.New("必须提供 -proposal -credential-file")
+	}
+	var credential credentialFile
+	if err := readJSON(*credentialPath, &credential); err != nil {
+		return err
 	}
 	var out map[string]any
-	if err := c.getJSON(
+	if err := c.postJSON(
 		fmt.Sprintf("/api/v1/proposals/%s/vote-status", url.PathEscape(strings.TrimSpace(*proposalID))),
-		map[string]string{"user_id": strings.TrimSpace(*userID)},
+		map[string]any{
+			"user_id":              credential.UserID,
+			"user_pub_key":         credential.UserPubKey,
+			"credential_signature": credential.Signature,
+		},
 		false,
 		&out,
 	); err != nil {
@@ -691,11 +700,11 @@ func printRootUsage() {
   health
   proposals-open
   proposal-create   -title -description -options -start -end
-  credential-issue  -proposal -user [-pubkey] [-out]
+  credential-issue  -proposal -user [-pubkey] [-out]  (需要 admin token)
   credential-show   -file
   ballot-draft      -proposal -option [-out]
   vote-submit       -credential-file -ballot-file
-  vote-status       -proposal -user
+  vote-status       -proposal -credential-file
   credentials-list  -proposal
   decrypt-setup     -proposal [-threshold 2] [-trustees 3] [-out]
   result-publish    -proposal (-shares a,b | -shares-file file)
@@ -704,7 +713,7 @@ func printRootUsage() {
 
 示例:
   go run ./cmd/cli -admin-token dev-admin-token proposal-create -title "Board" -options "A,B" -start 2026-03-10T10:00:00Z -end 2026-03-10T12:00:00Z
-  go run ./cmd/cli credential-issue -proposal p-1 -user u-1001 -out cred-u1001.json
+  go run ./cmd/cli -admin-token dev-admin-token credential-issue -proposal p-1 -user u-1001 -out cred-u1001.json
   go run ./cmd/cli ballot-draft -proposal p-1 -option A -out ballot.json
   go run ./cmd/cli vote-submit -credential-file cred-u1001.json -ballot-file ballot.json
   go run ./cmd/cli -admin-token dev-admin-token credentials-list -proposal p-1`)

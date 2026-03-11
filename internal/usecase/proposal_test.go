@@ -43,6 +43,7 @@ func TestProposalUseCase_Create(t *testing.T) {
 	req := &CreateProposalRequest{
 		Title:       "Board Election",
 		Description: "Choose one board member",
+		Options:     []string{"A", "B"},
 		StartsAt:    time.Now().UTC().Add(1 * time.Hour),
 		EndsAt:      time.Now().UTC().Add(2 * time.Hour),
 	}
@@ -54,6 +55,7 @@ func TestProposalUseCase_Create(t *testing.T) {
 	assert.NotNil(t, proposal)
 	assert.NotEmpty(t, proposal.ID)
 	assert.Equal(t, "open", proposal.Status)
+	assert.Equal(t, []string{"A", "B"}, proposal.Options)
 }
 
 func TestProposalUseCase_Create_InvalidTimeRange(t *testing.T) {
@@ -63,6 +65,7 @@ func TestProposalUseCase_Create_InvalidTimeRange(t *testing.T) {
 	req := &CreateProposalRequest{
 		Title:       "Board Election",
 		Description: "Choose one board member",
+		Options:     []string{"A", "B"},
 		StartsAt:    time.Now().UTC().Add(2 * time.Hour),
 		EndsAt:      time.Now().UTC().Add(1 * time.Hour),
 	}

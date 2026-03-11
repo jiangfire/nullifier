@@ -19,7 +19,7 @@ pnpm run dev
 3. `POST /api/v1/proposals`
 4. `GET /api/v1/proposals/open`
 5. `POST /api/v1/votes`
-6. `GET /api/v1/proposals/:proposal_id/vote-status`
+6. `POST /api/v1/proposals/:proposal_id/vote-status`
 7. `GET /api/v1/proposals/:proposal_id/credentials`
 8. `POST /api/v1/proposals/:proposal_id/ballot-draft`
 9. `POST /api/v1/proposals/:proposal_id/decryption/setup`
@@ -30,7 +30,7 @@ pnpm run dev
 ## 页面模块
 
 1. `投票大厅`：查看开放提案并进入投票
-2. `我的身份`：签发匿名凭证（user_id + user_pub_key），支持凭证文件导入/导出
+2. `我的身份`：领取或导入匿名凭证；领取接口需要管理员令牌，支持凭证文件导入/导出
 3. `参与投票`：按提案选项选择投票意向，支持“一键生成投票凭据”或导入投票凭据 JSON 后提交
 4. `计票与审计`：创建提案（支持多选项）、初始化解密、发布结果、查询结果、查看审计锚点
 5. `凭证状态`：管理员查看某提案下所有凭证的 `has_voted` 状态
@@ -47,8 +47,8 @@ pnpm run dev
 
 ## 鉴权说明
 
-- 用户接口不需要管理员令牌。
-- 管理接口需要在页面顶部填写 `Admin Token`，前端会自动附带 `Authorization: Bearer <token>`。
+- 投票状态查询不再接受裸 `user_id` 枚举，前端会使用当前凭证材料发起校验式查询。
+- 凭证签发和所有管理接口都需要在页面顶部填写 `Admin Token`，前端会自动附带 `Authorization: Bearer <token>`。
 - 凭证状态面板只显示某提案下哪些凭证已投票，不显示具体投票内容。
 
 提示：在 `参与投票` 中可使用“按选项生成投票凭据”，该能力依赖后端

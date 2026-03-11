@@ -103,10 +103,11 @@ func NewVotingUseCase(
 
 func NewRegisterUseCase(
 	repo repository.CredentialRepository,
+	proposalRepo repository.ProposalRepository,
 	issuer domaincrypto.CredentialIssuer,
 	logger *zap.Logger,
 ) *usecase.RegisterUseCase {
-	return usecase.NewRegisterUseCase(repo, issuer, logger)
+	return usecase.NewRegisterUseCase(repo, proposalRepo, issuer, logger)
 }
 
 func NewProposalUseCase(

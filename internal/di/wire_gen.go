@@ -41,7 +41,7 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		logger,
 	)
 	credentialIssuer := NewCredentialIssuer(cfg)
-	registerUseCase := NewRegisterUseCase(credentialRepository, credentialIssuer, logger)
+	registerUseCase := NewRegisterUseCase(credentialRepository, proposalRepository, credentialIssuer, logger)
 	proposalUseCase := NewProposalUseCase(proposalRepository, logger)
 	participationUseCase := NewParticipationUseCase(participationRepository, credentialRepository, logger)
 	thresholdCrypto := NewThresholdCrypto()

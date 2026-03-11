@@ -215,9 +215,16 @@ function handleTabKeydown(event: KeyboardEvent, group: 'workspace' | 'section', 
           <header class="panel-head">
             <div>
               <h2>我的身份</h2>
-              <p class="panel-tip">领取匿名凭证后，投票步骤会自动复用该凭证。</p>
+              <p class="panel-tip">这里展示的是提案内匿名凭证。当前版本需要管理员令牌代为签发，投票步骤会自动复用该凭证。</p>
             </div>
           </header>
+
+          <article class="callout-card" :class="portal.adminTokenReady ? 'success' : 'warn'">
+            <strong>{{ portal.adminTokenReady ? 'Admin Token 已就绪' : '领取前需要 Admin Token' }}</strong>
+            <p>
+              {{ portal.adminTokenReady ? '可以为当前 proposal 申领凭证。' : '请先在页面顶部填写 Admin Token，否则凭证签发会被后端拒绝。' }}
+            </p>
+          </article>
 
           <form class="form-grid" @submit.prevent="portal.issueCredential">
             <label class="field" for="identity-proposal-id">
@@ -278,7 +285,7 @@ function handleTabKeydown(event: KeyboardEvent, group: 'workspace' | 'section', 
             <input ref="credentialFileInput" class="hidden-input" type="file" accept="application/json" @change="portal.importCredentialFile" />
 
             <button class="btn" :disabled="portal.credentialLoading">
-              {{ portal.credentialLoading ? '签发中...' : '领取匿名凭证' }}
+              {{ portal.credentialLoading ? '签发中...' : '管理员代发凭证' }}
             </button>
           </form>
 
@@ -321,10 +328,15 @@ function handleTabKeydown(event: KeyboardEvent, group: 'workspace' | 'section', 
                 同步提案
               </button>
               <button class="btn btn-secondary" type="button" :disabled="portal.voteStatusLoading || !portal.walletReady" @click="portal.fetchVoteStatus()">
-                {{ portal.voteStatusLoading ? '查询中...' : '查询投票状态' }}
+                {{ portal.voteStatusLoading ? '查询中...' : '基于当前凭证校验状态' }}
               </button>
             </div>
           </header>
+
+          <article class="callout-card info">
+            <strong>状态查询不接受裸 user_id 枚举</strong>
+            <p>系统会使用当前已加载的凭证材料校验归属后再返回 `has_voted`，只有持有这份凭证的人才能查询自己的状态。</p>
+          </article>
 
           <div class="status-strip">
             <p>当前提案：{{ portal.voteForm.proposalId || '-' }}</p>
@@ -1248,6 +1260,7 @@ textarea[aria-invalid='true'] {
 
 .inline-card,
 .wallet-card,
+.callout-card,
 .ops-card,
 .activity-panel,
 .status-strip {
@@ -1260,6 +1273,31 @@ textarea[aria-invalid='true'] {
 .wallet-card.ready {
   border-color: rgba(22, 163, 74, 0.55);
   background: #f7fff9;
+}
+
+.callout-card {
+  display: grid;
+  gap: 4px;
+}
+
+.callout-card p {
+  margin: 0;
+  color: var(--text-soft);
+}
+
+.callout-card.warn {
+  border-color: rgba(217, 119, 6, 0.4);
+  background: #fffaf1;
+}
+
+.callout-card.success {
+  border-color: rgba(22, 163, 74, 0.4);
+  background: #f4fff7;
+}
+
+.callout-card.info {
+  border-color: rgba(37, 99, 235, 0.28);
+  background: #f7fbff;
 }
 
 .wallet-list,

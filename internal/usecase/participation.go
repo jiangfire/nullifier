@@ -1,6 +1,7 @@
 package usecase
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -58,6 +59,39 @@ func (uc *ParticipationUseCase) HasVoted(ctx context.Context, proposalID string,
 		return false, fmt.Errorf("check participation: %w", err)
 	}
 	return hasVoted, nil
+}
+
+func (uc *ParticipationUseCase) HasVotedWithCredential(
+	ctx context.Context,
+	proposalID string,
+	userID string,
+	userPubKey []byte,
+	credentialSignature []byte,
+) (bool, error) {
+	if uc.credentialRepo == nil {
+		return false, fmt.Errorf("credential repository is not configured")
+	}
+	if proposalID == "" {
+		return false, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
+	}
+	if userID == "" {
+		return false, fmt.Errorf("%w: user_id is required", ErrInvalidRequest)
+	}
+	if len(userPubKey) == 0 {
+		return false, fmt.Errorf("%w: user_pub_key is required", ErrInvalidRequest)
+	}
+	if len(credentialSignature) == 0 {
+		return false, fmt.Errorf("%w: credential_signature is required", ErrInvalidRequest)
+	}
+
+	credential, err := uc.credentialRepo.GetByProposalAndUserID(ctx, proposalID, userID)
+	if err != nil {
+		return false, fmt.Errorf("load credential: %w", err)
+	}
+	if !bytes.Equal(credential.UserPubKey, userPubKey) || !bytes.Equal(credential.Signature, credentialSignature) {
+		return false, ErrInvalidCredential
+	}
+	return uc.HasVoted(ctx, proposalID, userID)
 }
 
 func (uc *ParticipationUseCase) ListCredentialStatuses(

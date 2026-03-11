@@ -67,9 +67,8 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 		body   any
 	}{
 		{method: http.MethodPost, path: "/api/v1/votes", body: map[string]any{}},
-		{method: http.MethodPost, path: "/api/v1/credentials", body: map[string]any{}},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/open"},
-		{method: http.MethodGet, path: "/api/v1/proposals/p1/vote-status?user_id=u1"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/results"},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/audit-anchors"},
@@ -87,6 +86,7 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 		path   string
 		body   any
 	}{
+		{method: http.MethodPost, path: "/api/v1/credentials", body: map[string]any{}},
 		{method: http.MethodPost, path: "/api/v1/proposals", body: map[string]any{}},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/decryption/setup", body: map[string]any{}},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/results/publish", body: map[string]any{}},
@@ -102,7 +102,7 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 func TestHandler_InvalidPayload(t *testing.T) {
 	handler := NewHandlerWithTally(
 		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
-		usecase.NewRegisterUseCase(nil, nil, zap.NewNop()),
+		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
 		usecase.NewProposalUseCase(nil, zap.NewNop()),
 		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
 		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
@@ -160,13 +160,19 @@ func TestHandler_InvalidPayload(t *testing.T) {
 			path:   "/api/v1/proposals",
 			body: map[string]any{
 				"title":     "x",
+				"options":   []string{"A", "B"},
 				"starts_at": "bad-time",
 				"ends_at":   "bad-time",
 			},
 		},
 		{
-			method: http.MethodGet,
+			method: http.MethodPost,
 			path:   "/api/v1/proposals/p1/vote-status",
+			body: map[string]any{
+				"user_id":              "u1",
+				"user_pub_key":         "%%%invalid-base64%%%",
+				"credential_signature": base64.StdEncoding.EncodeToString([]byte("sig")),
+			},
 		},
 		{
 			method: http.MethodPost,
@@ -195,9 +201,9 @@ func TestHandler_InvalidPayload(t *testing.T) {
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
 		req := jsonRequest(t, tc.method, tc.path, tc.body)
-		if tc.path == "/api/v1/proposals" || tc.path == "/api/v1/proposals/p1/decryption/setup" || tc.path == "/api/v1/proposals/p1/results/publish" {
-			req.Header.Set("Authorization", "Bearer secret")
-		}
+			if tc.path == "/api/v1/credentials" || tc.path == "/api/v1/proposals" || tc.path == "/api/v1/proposals/p1/decryption/setup" || tc.path == "/api/v1/proposals/p1/results/publish" {
+				req.Header.Set("Authorization", "Bearer secret")
+			}
 		engine.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	}
@@ -206,7 +212,7 @@ func TestHandler_InvalidPayload(t *testing.T) {
 func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 	handler := NewHandlerWithTally(
 		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
-		usecase.NewRegisterUseCase(nil, nil, zap.NewNop()),
+		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
 		usecase.NewProposalUseCase(nil, zap.NewNop()),
 		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
 		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
@@ -224,18 +230,19 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 		raw    string
 	}{
 		{method: http.MethodPost, path: "/api/v1/votes", raw: "{"},
-		{method: http.MethodPost, path: "/api/v1/credentials", raw: "{"},
-		{method: http.MethodPost, path: "/api/v1/proposals", raw: "{"},
-		{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", raw: "{"},
+			{method: http.MethodPost, path: "/api/v1/credentials", raw: "{"},
+			{method: http.MethodPost, path: "/api/v1/proposals", raw: "{"},
+			{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", raw: "{"},
+			{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/decryption/setup", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/results/publish", raw: "{"},
 	}
 	for _, tc := range malformedCases {
 		rec := httptest.NewRecorder()
 		req := rawRequest(tc.method, tc.path, tc.raw)
-		if tc.path == "/api/v1/proposals" || tc.path == "/api/v1/proposals/p1/decryption/setup" || tc.path == "/api/v1/proposals/p1/results/publish" {
-			req.Header.Set("Authorization", "Bearer secret")
-		}
+			if tc.path == "/api/v1/credentials" || tc.path == "/api/v1/proposals" || tc.path == "/api/v1/proposals/p1/decryption/setup" || tc.path == "/api/v1/proposals/p1/results/publish" {
+				req.Header.Set("Authorization", "Bearer secret")
+			}
 		engine.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	}
@@ -284,22 +291,32 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 				"credential_signature": "%%%invalid-base64%%%",
 			},
 		},
-		{
-			method: http.MethodPost,
-			path:   "/api/v1/proposals",
-			body: map[string]any{
-				"title":     "x",
-				"starts_at": time.Now().UTC().Format(time.RFC3339),
-				"ends_at":   "bad-time",
+			{
+				method: http.MethodPost,
+				path:   "/api/v1/proposals",
+				body: map[string]any{
+					"title":     "x",
+					"options":   []string{"A", "B"},
+					"starts_at": time.Now().UTC().Format(time.RFC3339),
+					"ends_at":   "bad-time",
+				},
 			},
-		},
-	}
-	for _, tc := range invalidDecodeCases {
-		rec := httptest.NewRecorder()
-		req := jsonRequest(t, tc.method, tc.path, tc.body)
-		if tc.path == "/api/v1/proposals" {
-			req.Header.Set("Authorization", "Bearer secret")
+			{
+				method: http.MethodPost,
+				path:   "/api/v1/proposals/p1/vote-status",
+				body: map[string]any{
+					"user_id":              "u1",
+					"user_pub_key":         "%%%invalid-base64%%%",
+					"credential_signature": base64.StdEncoding.EncodeToString([]byte("sig")),
+				},
+			},
 		}
+		for _, tc := range invalidDecodeCases {
+			rec := httptest.NewRecorder()
+			req := jsonRequest(t, tc.method, tc.path, tc.body)
+			if tc.path == "/api/v1/proposals" {
+				req.Header.Set("Authorization", "Bearer secret")
+			}
 		engine.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	}
@@ -307,15 +324,20 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 	runtimeErrorCases := []struct {
 		method string
 		path   string
+		body   any
 	}{
 		{method: http.MethodGet, path: "/api/v1/proposals/open"},
-		{method: http.MethodGet, path: "/api/v1/proposals/p1/vote-status?user_id=u1"},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", body: map[string]any{
+			"user_id":              "u1",
+			"user_pub_key":         base64.StdEncoding.EncodeToString([]byte("pub")),
+			"credential_signature": base64.StdEncoding.EncodeToString([]byte("sig")),
+		}},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/results"},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/audit-anchors"},
 	}
 	for _, tc := range runtimeErrorCases {
 		rec := httptest.NewRecorder()
-		req := jsonRequest(t, tc.method, tc.path, nil)
+		req := jsonRequest(t, tc.method, tc.path, tc.body)
 		engine.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusInternalServerError, rec.Code)
 	}
@@ -343,6 +365,7 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	proposalReq := map[string]any{
 		"title":       "Board Election",
 		"description": "Vote",
+		"options":     []string{"candidate-A", "candidate-B"},
 		"starts_at":   time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339),
 		"ends_at":     time.Now().UTC().Add(90 * time.Minute).Format(time.RFC3339),
 	}
@@ -355,7 +378,7 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	_ = resp.Body.Close()
 
 	credentialReq["proposal_id"] = proposalResp.ID
-	resp = doPostJSON(t, ts.URL+"/api/v1/credentials", credentialReq)
+	resp = doPostAdminJSON(t, ts.URL+"/api/v1/credentials", "secret", credentialReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var credentialResp struct {
 		UserPubKey string `json:"user_pub_key"`
@@ -400,8 +423,11 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.NotEmpty(t, draftResp.Nullifier)
 
 	var err error
-	resp, err = http.Get(ts.URL + "/api/v1/proposals/" + proposalResp.ID + "/vote-status?user_id=u-1")
-	require.NoError(t, err)
+	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/vote-status", map[string]any{
+		"user_id":              "u-1",
+		"user_pub_key":         credentialResp.UserPubKey,
+		"credential_signature": credentialResp.Signature,
+	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_ = resp.Body.Close()
 
@@ -418,8 +444,11 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	_ = resp.Body.Close()
 
-	resp, err = http.Get(ts.URL + "/api/v1/proposals/" + proposalResp.ID + "/vote-status?user_id=u-1")
-	require.NoError(t, err)
+	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/vote-status", map[string]any{
+		"user_id":              "u-1",
+		"user_pub_key":         credentialResp.UserPubKey,
+		"credential_signature": credentialResp.Signature,
+	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_ = resp.Body.Close()
 
@@ -488,7 +517,7 @@ func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.KyberElGamal,
 		encrypter,
 		logger,
 	)
-	registerUC := usecase.NewRegisterUseCase(credentialRepo, issuer, logger)
+	registerUC := usecase.NewRegisterUseCase(credentialRepo, proposalRepo, issuer, logger)
 	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo, encrypter, merkleBuilder, logger)

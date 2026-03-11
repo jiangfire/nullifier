@@ -97,10 +97,6 @@ function normalizeOptions(raw: string): string[] {
     .filter((item, index, array) => array.indexOf(item) === index);
 }
 
-function encodeProposalDescription(summary: string, options: string[]): string {
-  return JSON.stringify({ summary: summary.trim(), options });
-}
-
 function decodeProposalDescription(raw: string): { description: string; options: string[] } {
   const text = raw.trim();
   if (text === '') {
@@ -226,6 +222,7 @@ export function useVotePortal() {
 
   const currentPubKey = computed(() => (useCustomPubKey.value ? identityForm.customPubKey.trim() : generatedPubKey.value));
   const walletReady = computed(() => wallet.userId !== '' && wallet.userPubKey !== '' && wallet.signature !== '');
+  const adminTokenReady = computed(() => adminBearerToken.value.trim() !== '');
   const latestNotice = computed(() => notices.value[0] ?? null);
   const noticeHistory = computed(() => notices.value.slice(1));
   const selectedProposal = computed(() => {
@@ -347,6 +344,7 @@ export function useVotePortal() {
     }
     const payload = {
       version: 1,
+      proposal_id: voteForm.proposalId.trim(),
       user_id: wallet.userId,
       user_pub_key: wallet.userPubKey,
       signature: wallet.signature,
@@ -580,11 +578,18 @@ export function useVotePortal() {
           return null;
         }
         const parsedDescription = decodeProposalDescription(textOf(object, 'description'));
+        const rawOptions = object.options;
+        const options = Array.isArray(rawOptions)
+          ? rawOptions
+              .filter((item): item is string => typeof item === 'string')
+              .map((item) => item.trim())
+              .filter((item) => item !== '')
+          : parsedDescription.options;
         return {
           id,
           title: textOf(object, 'title'),
           description: parsedDescription.description,
-          options: parsedDescription.options,
+          options,
           status: textOf(object, 'status'),
           startsAt: textOf(object, 'starts_at'),
           endsAt: textOf(object, 'ends_at'),
@@ -609,6 +614,10 @@ export function useVotePortal() {
       addNotice('error', '签发失败', identityErrors.userId);
       return;
     }
+    if (!adminTokenReady.value) {
+      addNotice('error', '签发失败', '领取凭证需要先填写 Admin Token');
+      return;
+    }
     if (identityForm.userId.trim() === '') {
       identityErrors.userId = '请输入 user_id';
       addNotice('error', '签发失败', identityErrors.userId);
@@ -630,6 +639,7 @@ export function useVotePortal() {
       baseUrl: apiBaseUrl.value,
       path: '/api/v1/credentials',
       method: 'POST',
+      headers: adminHeaders(),
       body: {
         proposal_id: voteForm.proposalId.trim(),
         user_id: identityForm.userId.trim(),
@@ -721,7 +731,12 @@ export function useVotePortal() {
     const result = await apiCall({
       baseUrl: apiBaseUrl.value,
       path: `/api/v1/proposals/${encodeURIComponent(voteForm.proposalId.trim())}/vote-status`,
-      query: { user_id: wallet.userId },
+      method: 'POST',
+      body: {
+        user_id: wallet.userId,
+        user_pub_key: wallet.userPubKey,
+        credential_signature: wallet.signature,
+      },
     });
     voteStatusLoading.value = false;
 
@@ -741,6 +756,10 @@ export function useVotePortal() {
 
   async function createProposal(): Promise<void> {
     clearErrorGroup(createProposalErrors);
+    if (!adminTokenReady.value) {
+      addNotice('error', '创建失败', '创建提案需要先填写 Admin Token');
+      return;
+    }
 
     if (createProposalForm.title.trim() === '') {
       createProposalErrors.title = '请填写标题';
@@ -776,7 +795,8 @@ export function useVotePortal() {
       headers: adminHeaders(),
       body: {
         title: createProposalForm.title.trim(),
-        description: encodeProposalDescription(createProposalForm.description, options),
+        description: createProposalForm.description.trim(),
+        options,
         starts_at: startsAt,
         ends_at: endsAt,
       },
@@ -799,6 +819,10 @@ export function useVotePortal() {
 
   async function setupDecryptionSession(): Promise<void> {
     clearErrorGroup(decryptErrors);
+    if (!adminTokenReady.value) {
+      addNotice('error', '初始化失败', '初始化解密会话需要先填写 Admin Token');
+      return;
+    }
 
     if (decryptForm.proposalId.trim() === '') {
       decryptErrors.proposalId = 'proposal_id 不能为空';
@@ -843,6 +867,10 @@ export function useVotePortal() {
 
   async function publishResult(): Promise<void> {
     clearErrorGroup(publishErrors);
+    if (!adminTokenReady.value) {
+      addNotice('error', '发布失败', '发布结果需要先填写 Admin Token');
+      return;
+    }
     if (publishForm.proposalId.trim() === '') {
       publishErrors.proposalId = 'proposal_id 不能为空';
     }
@@ -966,6 +994,10 @@ export function useVotePortal() {
 
   async function fetchCredentialStatuses(): Promise<void> {
     clearErrorGroup(credentialStatusErrors);
+    if (!adminTokenReady.value) {
+      addNotice('error', '查询失败', '查询凭证状态需要先填写 Admin Token');
+      return;
+    }
     if (credentialStatusForm.proposalId.trim() === '') {
       credentialStatusErrors.proposalId = 'proposal_id 不能为空';
       addNotice('error', '查询失败', credentialStatusErrors.proposalId);
@@ -1113,6 +1145,7 @@ export function useVotePortal() {
     credentialLoading,
     wallet,
     walletReady,
+    adminTokenReady,
     credentialFileInput,
     identityErrors,
     issueCredential,

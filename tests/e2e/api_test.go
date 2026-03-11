@@ -76,7 +76,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 		encrypter,
 		logger,
 	)
-	registerUC := usecase.NewRegisterUseCase(credentialRepo, issuer, logger)
+	registerUC := usecase.NewRegisterUseCase(credentialRepo, proposalRepo, issuer, logger)
 	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(
@@ -113,6 +113,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	proposalReq := map[string]any{
 		"title":       "Board Election",
 		"description": "Vote for one candidate",
+		"options":     []string{"candidate-A", "candidate-B"},
 		"starts_at":   startAt,
 		"ends_at":     endAt,
 	}
@@ -126,7 +127,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	require.NotEmpty(t, proposalResp.ID)
 
 	credentialReq["proposal_id"] = proposalResp.ID
-	resp = postJSON(t, ts.URL+"/api/v1/credentials", credentialReq)
+	resp = postAdminJSON(t, ts.URL+"/api/v1/credentials", adminToken, credentialReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var credentialResp struct {
 		UserPubKey string `json:"user_pub_key"`
@@ -178,8 +179,11 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	}
 
 	// 4.1) 投票前状态为 false
-	resp, err = http.Get(ts.URL + "/api/v1/proposals/" + proposalResp.ID + "/vote-status?user_id=u-1")
-	require.NoError(t, err)
+	resp = postJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/vote-status", map[string]any{
+		"user_id":              "u-1",
+		"user_pub_key":         credentialResp.UserPubKey,
+		"credential_signature": credentialResp.Signature,
+	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var statusBefore struct {
 		HasVoted bool `json:"has_voted"`
@@ -213,8 +217,11 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	resp.Body.Close()
 
 	// 6) 投票后状态为 true
-	resp, err = http.Get(ts.URL + "/api/v1/proposals/" + proposalResp.ID + "/vote-status?user_id=u-1")
-	require.NoError(t, err)
+	resp = postJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/vote-status", map[string]any{
+		"user_id":              "u-1",
+		"user_pub_key":         credentialResp.UserPubKey,
+		"credential_signature": credentialResp.Signature,
+	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var statusAfter struct {
 		HasVoted bool `json:"has_voted"`
@@ -316,7 +323,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 		encrypter,
 		logger,
 	)
-	registerUC := usecase.NewRegisterUseCase(credentialRepo, issuer, logger)
+	registerUC := usecase.NewRegisterUseCase(credentialRepo, proposalRepo, issuer, logger)
 	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(
@@ -349,6 +356,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 	proposalReq := map[string]any{
 		"title":       "Concurrent Vote Test",
 		"description": "Same user concurrent vote requests",
+		"options":     []string{"candidate-concurrent", "candidate-other"},
 		"starts_at":   time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339),
 		"ends_at":     time.Now().UTC().Add(90 * time.Minute).Format(time.RFC3339),
 	}
@@ -361,7 +369,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 	_ = resp.Body.Close()
 
 	credentialReq["proposal_id"] = proposalResp.ID
-	resp = postJSON(t, ts.URL+"/api/v1/credentials", credentialReq)
+	resp = postAdminJSON(t, ts.URL+"/api/v1/credentials", adminToken, credentialReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	var credentialResp struct {
 		UserPubKey string `json:"user_pub_key"`
@@ -463,8 +471,11 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 
-	resp, err = http.Get(ts.URL + "/api/v1/proposals/" + proposalResp.ID + "/vote-status?user_id=u-concurrent")
-	require.NoError(t, err)
+	resp = postJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/vote-status", map[string]any{
+		"user_id":              "u-concurrent",
+		"user_pub_key":         credentialResp.UserPubKey,
+		"credential_signature": credentialResp.Signature,
+	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var statusResp struct {
 		HasVoted bool `json:"has_voted"`

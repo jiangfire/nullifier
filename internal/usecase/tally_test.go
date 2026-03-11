@@ -42,6 +42,7 @@ func TestTallyUseCase_SetupAndPublishResult(t *testing.T) {
 	proposal := &entity.Proposal{
 		ID:        "proposal-1",
 		Title:     "Election",
+		Options:   []string{"candidate-A", "candidate-B"},
 		Status:    "closed",
 		StartsAt:  now.Add(-2 * time.Hour),
 		EndsAt:    now.Add(-1 * time.Hour),
@@ -111,6 +112,7 @@ func TestTallyUseCase_PublishResult_RejectsInsufficientShares(t *testing.T) {
 
 	proposal := &entity.Proposal{
 		ID:        "proposal-1",
+		Options:   []string{"candidate-A", "candidate-B"},
 		Status:    "closed",
 		StartsAt:  time.Now().UTC().Add(-2 * time.Hour),
 		EndsAt:    time.Now().UTC().Add(-1 * time.Hour),
@@ -129,6 +131,7 @@ func TestTallyUseCase_SetupThresholdSession_RejectsOpenProposal(t *testing.T) {
 	proposalRepo.items = map[string]*entity.Proposal{}
 	proposalRepo.items["proposal-1"] = &entity.Proposal{
 		ID:        "proposal-1",
+		Options:   []string{"candidate-A", "candidate-B"},
 		Status:    "open",
 		StartsAt:  time.Now().UTC().Add(-1 * time.Hour),
 		EndsAt:    time.Now().UTC().Add(1 * time.Hour),
@@ -155,6 +158,7 @@ func TestTallyUseCase_PublishResult_RejectOpenProposal(t *testing.T) {
 	proposalRepo.items = map[string]*entity.Proposal{
 		"proposal-1": {
 			ID:        "proposal-1",
+			Options:   []string{"candidate-A", "candidate-B"},
 			Status:    "open",
 			StartsAt:  time.Now().UTC().Add(-1 * time.Hour),
 			EndsAt:    time.Now().UTC().Add(1 * time.Hour),
@@ -264,6 +268,7 @@ func TestTallyUseCase_PublishResult_InvalidShareFormat(t *testing.T) {
 	proposalRepo.items = map[string]*entity.Proposal{
 		"proposal-1": {
 			ID:        "proposal-1",
+			Options:   []string{"candidate-A", "candidate-B"},
 			Status:    "closed",
 			StartsAt:  time.Now().UTC().Add(-2 * time.Hour),
 			EndsAt:    time.Now().UTC().Add(-1 * time.Hour),
@@ -408,6 +413,13 @@ func TestTallyUseCase_GetResult_Invalid(t *testing.T) {
 
 func TestTallyUseCase_EncryptVoteOption(t *testing.T) {
 	sessionRepo := new(inMemoryDecryptionSessionRepo)
+	proposalRepo := new(inMemoryProposalRepo)
+	proposalRepo.items = map[string]*entity.Proposal{
+		"proposal-1": {
+			ID:      "proposal-1",
+			Options: []string{"candidate-A", "candidate-B"},
+		},
+	}
 	require.NoError(t, sessionRepo.Save(context.Background(), &entity.DecryptionSession{
 		ID:         "s1",
 		ProposalID: "proposal-1",
@@ -418,7 +430,7 @@ func TestTallyUseCase_EncryptVoteOption(t *testing.T) {
 
 	uc := NewTallyUseCase(
 		new(inMemoryVoteRepo),
-		new(inMemoryProposalRepo),
+		proposalRepo,
 		sessionRepo,
 		new(inMemoryTallyResultRepo),
 		new(inMemoryAuditAnchorRepo),

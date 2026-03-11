@@ -15,13 +15,15 @@ import (
 )
 
 type RegisterUseCase struct {
-	repo   repository.CredentialRepository
-	issuer domaincrypto.CredentialIssuer
-	logger *zap.Logger
+	repo        repository.CredentialRepository
+	proposalRepo repository.ProposalRepository
+	issuer      domaincrypto.CredentialIssuer
+	logger      *zap.Logger
 }
 
 func NewRegisterUseCase(
 	repo repository.CredentialRepository,
+	proposalRepo repository.ProposalRepository,
 	issuer domaincrypto.CredentialIssuer,
 	logger *zap.Logger,
 ) *RegisterUseCase {
@@ -29,9 +31,10 @@ func NewRegisterUseCase(
 		logger = zap.NewNop()
 	}
 	return &RegisterUseCase{
-		repo:   repo,
-		issuer: issuer,
-		logger: logger,
+		repo:        repo,
+		proposalRepo: proposalRepo,
+		issuer:      issuer,
+		logger:      logger,
 	}
 }
 
@@ -47,6 +50,9 @@ func (uc *RegisterUseCase) IssueCredential(
 	if uc.issuer == nil {
 		return nil, errors.New("credential issuer is not configured")
 	}
+	if uc.proposalRepo == nil {
+		return nil, errors.New("proposal repository is not configured")
+	}
 	if proposalID == "" {
 		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
 	}
@@ -55,6 +61,9 @@ func (uc *RegisterUseCase) IssueCredential(
 	}
 	if len(userPubKey) == 0 {
 		return nil, fmt.Errorf("%w: user_pub_key is required", ErrInvalidRequest)
+	}
+	if _, err := uc.proposalRepo.GetByID(ctx, proposalID); err != nil {
+		return nil, fmt.Errorf("load proposal: %w", err)
 	}
 
 	existing, err := uc.repo.GetByProposalAndUserID(ctx, proposalID, userID)

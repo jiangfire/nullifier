@@ -15,7 +15,7 @@ import (
 
 func TestConstructors_DefaultLogger(t *testing.T) {
 	require.NotNil(t, NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil))
-	require.NotNil(t, NewRegisterUseCase(nil, nil, nil))
+	require.NotNil(t, NewRegisterUseCase(nil, nil, nil, nil))
 	require.NotNil(t, NewProposalUseCase(nil, nil))
 	require.NotNil(t, NewParticipationUseCase(nil, nil, nil))
 	require.NotNil(t, NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil))
@@ -44,6 +44,7 @@ func TestCreateProposalRequest_Validate(t *testing.T) {
 
 	req = &CreateProposalRequest{
 		Title:    "title",
+		Options:  []string{"A", "B"},
 		StartsAt: time.Now().UTC(),
 		EndsAt:   time.Now().UTC().Add(-time.Minute),
 	}
@@ -51,21 +52,23 @@ func TestCreateProposalRequest_Validate(t *testing.T) {
 }
 
 func TestRegisterUseCase_IssueCredential_InvalidAndMissingDeps(t *testing.T) {
-	uc := NewRegisterUseCase(nil, nil, nil)
+	uc := NewRegisterUseCase(nil, nil, nil, nil)
 	_, err := uc.IssueCredential(context.Background(), "p1", "u1", []byte("pub"))
 	require.Error(t, err)
 
 	repo := new(credentialRepositoryMock)
-	uc = NewRegisterUseCase(repo, nil, nil)
+	uc = NewRegisterUseCase(repo, nil, nil, nil)
 	_, err = uc.IssueCredential(context.Background(), "", "", []byte("pub"))
 	require.Error(t, err)
 }
 
 func TestRegisterUseCase_IssueCredential_CheckExistingError(t *testing.T) {
 	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
 	issuer := new(credentialIssuerMock)
-	uc := NewRegisterUseCase(repo, issuer, nil)
+	uc := NewRegisterUseCase(repo, proposalRepo, issuer, nil)
 
+	proposalRepo.On("GetByID", mock.Anything, "p1").Return(&entity.Proposal{ID: "p1"}, nil).Once()
 	repo.On("GetByProposalAndUserID", mock.Anything, "p1", "u1").Return((*entity.Credential)(nil), errors.New("db down")).Once()
 	_, err := uc.IssueCredential(context.Background(), "p1", "u1", []byte("pub"))
 	require.Error(t, err)

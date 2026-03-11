@@ -50,9 +50,11 @@ var _ domaincrypto.CredentialIssuer = (*credentialIssuerMock)(nil)
 
 func TestRegisterUseCase_IssueCredential(t *testing.T) {
 	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
 	issuer := new(credentialIssuerMock)
-	uc := NewRegisterUseCase(repo, issuer, zap.NewNop())
+	uc := NewRegisterUseCase(repo, proposalRepo, issuer, zap.NewNop())
 
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
 	repo.On("GetByProposalAndUserID", mock.Anything, "p-1", "u-1").Return((*entity.Credential)(nil), repository.ErrNotFound).Once()
 	issuer.On("Issue", mock.Anything, "u-1", []byte("pub")).Return(&entity.Credential{
 		ProposalID: "p-1",
@@ -70,9 +72,11 @@ func TestRegisterUseCase_IssueCredential(t *testing.T) {
 
 func TestRegisterUseCase_IssueCredential_AlreadyIssued(t *testing.T) {
 	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
 	issuer := new(credentialIssuerMock)
-	uc := NewRegisterUseCase(repo, issuer, zap.NewNop())
+	uc := NewRegisterUseCase(repo, proposalRepo, issuer, zap.NewNop())
 
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
 	repo.On("GetByProposalAndUserID", mock.Anything, "p-1", "u-1").Return(&entity.Credential{ID: "cred-1"}, nil).Once()
 
 	credential, err := uc.IssueCredential(context.Background(), "p-1", "u-1", []byte("pub"))

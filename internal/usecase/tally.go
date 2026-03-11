@@ -209,6 +209,9 @@ func (uc *TallyUseCase) PublishResult(
 		if candidate == "" {
 			return nil, fmt.Errorf("%w: empty candidate in vote %s", ErrInvalidRequest, vote.ID)
 		}
+		if !proposalAllowsOption(proposal, candidate) {
+			return nil, fmt.Errorf("%w: option %q in vote %s is not defined for proposal", ErrInvalidRequest, candidate, vote.ID)
+		}
 		tally[candidate]++
 		leaves = append(leaves, buildVoteLeaf(vote))
 	}
@@ -317,6 +320,16 @@ func (uc *TallyUseCase) EncryptVoteOption(
 	candidate := strings.TrimSpace(option)
 	if candidate == "" {
 		return nil, fmt.Errorf("%w: option is required", ErrInvalidRequest)
+	}
+	if uc.proposalRepo == nil {
+		return nil, errors.New("proposal repository is not configured")
+	}
+	proposal, err := uc.proposalRepo.GetByID(ctx, proposalID)
+	if err != nil {
+		return nil, fmt.Errorf("load proposal: %w", err)
+	}
+	if !proposalAllowsOption(proposal, candidate) {
+		return nil, fmt.Errorf("%w: option %q is not defined for proposal", ErrInvalidRequest, candidate)
 	}
 
 	session, err := uc.sessionRepo.GetByProposal(ctx, proposalID)
@@ -475,4 +488,20 @@ func cloneTallyMap(in map[string]int) map[string]int {
 		out[k] = v
 	}
 	return out
+}
+
+func proposalAllowsOption(proposal *entity.Proposal, candidate string) bool {
+	if proposal == nil {
+		return false
+	}
+	normalized := strings.TrimSpace(candidate)
+	if normalized == "" {
+		return false
+	}
+	for _, option := range proposal.Options {
+		if strings.TrimSpace(option) == normalized {
+			return true
+		}
+	}
+	return false
 }

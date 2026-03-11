@@ -53,11 +53,11 @@ CRYPTO_VK_PATH=./keys/verifying.key
 
 ## API（v1）
 
-- `POST /api/v1/credentials`：签发匿名凭证（RFC9474 RSA blind signature）
+- `POST /api/v1/credentials`：管理员签发匿名凭证（RFC9474 RSA blind signature）
 - `POST /api/v1/proposals`：创建提案
 - `GET /api/v1/proposals/open`：查询开放提案
 - `POST /api/v1/votes`：提交匿名投票（含 `user_id + user_pub_key + credential_signature`，服务端校验防冒充）
-- `GET /api/v1/proposals/:proposal_id/vote-status?user_id=...`：查询该用户是否已投票
+- `POST /api/v1/proposals/:proposal_id/vote-status`：持凭证材料查询该用户是否已投票
 - `GET /api/v1/proposals/:proposal_id/credentials`：管理员查询该提案下所有凭证及 `has_voted`
 - `POST /api/v1/proposals/:proposal_id/ballot-draft`：按选项生成投票草稿（开发联调）
 - `POST /api/v1/proposals/:proposal_id/decryption/setup`：初始化阈值解密会话（threshold/trustees）
@@ -70,7 +70,8 @@ CRYPTO_VK_PATH=./keys/verifying.key
 - 票据表仅存匿名投票数据（不含用户标识）。
 - “已投票状态”单独存储为用户标识哈希，可用于“知道你是否投过票”，但不直接关联具体票内容。
 - 匿名凭证按 `proposal_id` 绑定，管理员可看到某提案下哪些凭证已投票，但看不到凭证对应的投票内容。
-- 管理面接口（创建提案、凭证状态、解密 setup、发布结果）都需要 `Authorization: Bearer <admin token>`。
+- 提案创建时必须显式提供 `options`，后端会把它作为正式计票口径保存并在草稿生成/计票时校验。
+- 管理面接口（凭证签发、创建提案、凭证状态、解密 setup、发布结果）都需要 `Authorization: Bearer <admin token>`。
 - 开发模式内置 CORS（支持 `http://localhost:3000` 本地前端跨域访问）。
 - `ballot-draft` 用于开发联调；生产模式应使用真实钱包/客户端生成 proof 与密文。
 

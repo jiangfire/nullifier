@@ -74,7 +74,7 @@ func TestProviders_WiringSmoke(t *testing.T) {
 		encrypter,
 		logger,
 	)
-	registerUC := NewRegisterUseCase(credentialRepo, credentialIssuer, logger)
+	registerUC := NewRegisterUseCase(credentialRepo, proposalRepo, credentialIssuer, logger)
 	proposalUC := NewProposalUseCase(proposalRepo, logger)
 	participationUC := NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := NewTallyUseCase(voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo, thresholdCrypto, merkleBuilder, logger)

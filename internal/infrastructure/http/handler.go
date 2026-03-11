@@ -59,9 +59,8 @@ func NewHandlerWithTally(
 
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.POST("/votes", h.SubmitVote)
-	r.POST("/credentials", h.IssueCredential)
 	r.GET("/proposals/open", h.ListOpenProposals)
-	r.GET("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
+	r.POST("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
 	r.POST("/proposals/:proposal_id/ballot-draft", h.PrepareBallotDraft)
 	r.GET("/proposals/:proposal_id/results", h.GetResult)
 	r.GET("/proposals/:proposal_id/audit-anchors", h.ListAuditAnchors)
@@ -149,6 +148,12 @@ type issueCredentialPayload struct {
 	UserPubKey string `json:"user_pub_key" validate:"required,base64"`
 }
 
+type voteStatusPayload struct {
+	UserID              string `json:"user_id" validate:"required"`
+	UserPubKey          string `json:"user_pub_key" validate:"required,base64"`
+	CredentialSignature string `json:"credential_signature" validate:"required,base64"`
+}
+
 func (h *Handler) IssueCredential(c *gin.Context) {
 	if h.registerUC == nil {
 		c.Error(fmt.Errorf("register usecase is not configured"))
@@ -191,6 +196,7 @@ func (h *Handler) IssueCredential(c *gin.Context) {
 type createProposalPayload struct {
 	Title       string `json:"title" validate:"required"`
 	Description string `json:"description"`
+	Options     []string `json:"options" validate:"required,min=2,dive,required"`
 	StartsAt    string `json:"starts_at" validate:"required"`
 	EndsAt      string `json:"ends_at" validate:"required"`
 }
@@ -225,6 +231,7 @@ func (h *Handler) CreateProposal(c *gin.Context) {
 	req := &usecase.CreateProposalRequest{
 		Title:       payload.Title,
 		Description: payload.Description,
+		Options:     payload.Options,
 		StartsAt:    startsAt,
 		EndsAt:      endsAt,
 	}
@@ -238,6 +245,7 @@ func (h *Handler) CreateProposal(c *gin.Context) {
 		"id":          proposal.ID,
 		"title":       proposal.Title,
 		"description": proposal.Description,
+		"options":     proposal.Options,
 		"status":      proposal.Status,
 		"starts_at":   proposal.StartsAt.Format(time.RFC3339),
 		"ends_at":     proposal.EndsAt.Format(time.RFC3339),
@@ -263,6 +271,7 @@ func (h *Handler) ListOpenProposals(c *gin.Context) {
 			"id":          proposal.ID,
 			"title":       proposal.Title,
 			"description": proposal.Description,
+			"options":     proposal.Options,
 			"status":      proposal.Status,
 			"starts_at":   proposal.StartsAt.Format(time.RFC3339),
 			"ends_at":     proposal.EndsAt.Format(time.RFC3339),
@@ -475,13 +484,39 @@ func (h *Handler) GetVoteStatus(c *gin.Context) {
 	}
 
 	proposalID := c.Param("proposal_id")
-	userID := c.Query("user_id")
-	if proposalID == "" || userID == "" {
-		c.Error(fmt.Errorf("%w: proposal_id and user_id are required", usecase.ErrInvalidRequest))
+	if proposalID == "" {
+		c.Error(fmt.Errorf("%w: proposal_id is required", usecase.ErrInvalidRequest))
 		return
 	}
 
-	hasVoted, err := h.participationUC.HasVoted(c.Request.Context(), proposalID, userID)
+	var payload voteStatusPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+	if err := h.validate.Struct(payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+
+	userPubKey, err := base64.StdEncoding.DecodeString(payload.UserPubKey)
+	if err != nil {
+		c.Error(fmt.Errorf("%w: user_pub_key must be base64", usecase.ErrInvalidRequest))
+		return
+	}
+	credentialSignature, err := base64.StdEncoding.DecodeString(payload.CredentialSignature)
+	if err != nil {
+		c.Error(fmt.Errorf("%w: credential_signature must be base64", usecase.ErrInvalidRequest))
+		return
+	}
+
+	hasVoted, err := h.participationUC.HasVotedWithCredential(
+		c.Request.Context(),
+		proposalID,
+		payload.UserID,
+		userPubKey,
+		credentialSignature,
+	)
 	if err != nil {
 		c.Error(err)
 		return
@@ -489,7 +524,7 @@ func (h *Handler) GetVoteStatus(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"proposal_id": proposalID,
-		"user_id":     userID,
+		"user_id":     payload.UserID,
 		"has_voted":   hasVoted,
 	})
 }
