@@ -5,7 +5,7 @@
 ## 项目状态
 
 - 最新交接状态见：`docs/status.md`
-- 截止 2026-03-10，后端主流程、前端运营面板、CLI 工作流已打通，覆盖率 gate（80%）已启用并通过。
+- 截止 2026-03-18，后端主流程、前端门户、CLI 工作流已打通；当前主要工作是持续保持文档与实现同步。
 
 ## 快速开始
 
@@ -20,11 +20,11 @@ go run ./cmd/server
 ```bash
 go run ./cmd/cli health
 go run ./cmd/cli -admin-token dev-admin-token proposal-create -title "Board" -options "A,B" -start 2026-03-10T10:00:00Z -end 2026-03-10T12:00:00Z
-go run ./cmd/cli credential-issue -proposal p-1 -user u-1001 -out cred-u1001.json
+go run ./cmd/cli -admin-token dev-admin-token credential-issue -proposal p-1 -user u-1001 -out cred-u1001.json
+go run ./cmd/cli -admin-token dev-admin-token decrypt-setup -proposal p-1 -threshold 2 -trustees 3 -out shares.json
 go run ./cmd/cli ballot-draft -proposal p-1 -option A -out ballot.json
 go run ./cmd/cli vote-submit -credential-file cred-u1001.json -ballot-file ballot.json
 go run ./cmd/cli -admin-token dev-admin-token credentials-list -proposal p-1
-go run ./cmd/cli -admin-token dev-admin-token decrypt-setup -proposal p-1 -threshold 2 -trustees 3 -out shares.json
 go run ./cmd/cli -admin-token dev-admin-token result-publish -proposal p-1 -shares-file shares.json
 ```
 
@@ -46,7 +46,7 @@ CRYPTO_VK_PATH=./keys/verifying.key
 也可使用 `configs/config.yaml` 覆盖默认配置。
 其中 `crypto.issuer_key_path` 和 `crypto.issuer_rotate_days` 用于凭证签发密钥持久化与自动轮换。
 当 `server.mode` 为 `release/prod/production` 时，必须设置 `crypto.vk_path`（或环境变量 `CRYPTO_VK_PATH`），否则服务会启动失败。
-管理面接口使用 `server.admin_bearer_token` 鉴权；在 `release/prod/production` 下该值不能为空，否则服务会启动失败。
+管理面接口使用 `server.admin_bearer_token` 鉴权；若未配置，服务启动时会自动生成一个临时 token，并打印到控制台日志中。
 生产部署可参考：
 - `configs/config.production.yaml`（`server.mode=release`）
 - `configs/production.env.example`（显式设置 `CRYPTO_VK_PATH` 等环境变量）
@@ -72,6 +72,7 @@ CRYPTO_VK_PATH=./keys/verifying.key
 - 匿名凭证按 `proposal_id` 绑定，管理员可看到某提案下哪些凭证已投票，但看不到凭证对应的投票内容。
 - 提案创建时必须显式提供 `options`，后端会把它作为正式计票口径保存并在草稿生成/计票时校验。
 - 管理面接口（凭证签发、创建提案、凭证状态、解密 setup、发布结果）都需要 `Authorization: Bearer <admin token>`。
+- `decryption/setup` 会拒绝“投票开放中”的提案；实际联调和运营应在 `starts_at` 之前完成初始化。
 - 开发模式内置 CORS（支持 `http://localhost:3000` 本地前端跨域访问）。
 - `ballot-draft` 用于开发联调；生产模式应使用真实钱包/客户端生成 proof 与密文。
 

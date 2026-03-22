@@ -1,7 +1,12 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { apiCall } from '../lib/api';
 import { localInputToRfc3339, toLocalDateTimeInput } from '../lib/datetime';
-import { buildPortalSearch, getDefaultSection, isSectionAllowed, parsePortalRoute } from '../lib/navigation';
+import {
+  buildPortalSearch,
+  getDefaultSection,
+  isSectionAllowed,
+  parsePortalRoute,
+} from '../lib/navigation';
 import type {
   AnchorItem,
   CredentialStatusItem,
@@ -19,6 +24,7 @@ import type {
 const baseUrlStorageKey = 'anonvote.front.base_url';
 const adminTokenStorageKey = 'anonvote.front.admin_token';
 const navStorageKey = 'anonvote.front.nav';
+const onboardingStorageKey = 'anonvote.front.onboarding_seen';
 
 const workspaces: WorkspaceMeta[] = [
   { id: 'user', title: '用户端', description: '领取凭证并完成匿名投票' },
@@ -26,10 +32,48 @@ const workspaces: WorkspaceMeta[] = [
 ];
 
 const sections: SectionMeta[] = [
-  { id: 'hall', workspace: 'user', title: '投票大厅', description: '浏览可参与提案' },
-  { id: 'identity', workspace: 'user', title: '我的身份', description: '领取或导入匿名凭证' },
-  { id: 'vote', workspace: 'user', title: '参与投票', description: '按步骤生成并提交选票' },
-  { id: 'ops', workspace: 'admin', title: '计票与审计', description: '提案管理与结果发布' },
+  {
+    id: 'overview',
+    workspace: 'shared',
+    title: '系统概览',
+    description: '先看状态、路径和当前上下文',
+  },
+  {
+    id: 'setup',
+    workspace: 'shared',
+    title: '连接配置',
+    description: '配置后端地址、令牌和联调前检查',
+  },
+  {
+    id: 'guide',
+    workspace: 'shared',
+    title: '使用教程',
+    description: '先看流程与术语说明',
+  },
+  {
+    id: 'hall',
+    workspace: 'user',
+    title: '投票大厅',
+    description: '浏览可参与提案',
+  },
+  {
+    id: 'identity',
+    workspace: 'user',
+    title: '我的身份',
+    description: '领取或导入匿名凭证',
+  },
+  {
+    id: 'vote',
+    workspace: 'user',
+    title: '参与投票',
+    description: '按步骤生成并提交选票',
+  },
+  {
+    id: 'ops',
+    workspace: 'admin',
+    title: '计票与审计',
+    description: '提案管理与结果发布',
+  },
 ];
 
 function clearErrorGroup(group: FormErrorMap): void {
@@ -78,7 +122,9 @@ function regenerateBase64Key(): string {
 function newNullifier(): string {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
-  const suffix = Array.from(bytes, (item) => item.toString(16).padStart(2, '0')).join('');
+  const suffix = Array.from(bytes, (item) =>
+    item.toString(16).padStart(2, '0'),
+  ).join('');
   return `null-${Date.now()}-${suffix}`;
 }
 
@@ -97,7 +143,10 @@ function normalizeOptions(raw: string): string[] {
     .filter((item, index, array) => array.indexOf(item) === index);
 }
 
-function decodeProposalDescription(raw: string): { description: string; options: string[] } {
+function decodeProposalDescription(raw: string): {
+  description: string;
+  options: string[];
+} {
   const text = raw.trim();
   if (text === '') {
     return { description: '', options: [] };
@@ -109,7 +158,9 @@ function decodeProposalDescription(raw: string): { description: string; options:
     }
     const summary = textOf(parsed, 'summary') || textOf(parsed, 'description');
     const optionField = parsed.options;
-    const options = Array.isArray(optionField) ? optionField.filter((item): item is string => typeof item === 'string') : [];
+    const options = Array.isArray(optionField)
+      ? optionField.filter((item): item is string => typeof item === 'string')
+      : [];
     return { description: summary, options };
   } catch {
     return { description: raw, options: [] };
@@ -132,13 +183,22 @@ function parseStoredRoute(raw: string | null): PortalRouteState | null {
     const workspace = parsed.workspace === 'admin' ? 'admin' : 'user';
     const sectionCandidate = parsed.section;
     const section: SectionId =
-      sectionCandidate === 'hall' || sectionCandidate === 'identity' || sectionCandidate === 'vote' || sectionCandidate === 'ops'
+      sectionCandidate === 'overview' ||
+      sectionCandidate === 'setup' ||
+      sectionCandidate === 'guide' ||
+      sectionCandidate === 'hall' ||
+      sectionCandidate === 'identity' ||
+      sectionCandidate === 'vote' ||
+      sectionCandidate === 'ops'
         ? sectionCandidate
         : getDefaultSection(workspace);
-    const proposalId = typeof parsed.proposalId === 'string' ? parsed.proposalId.trim() : '';
+    const proposalId =
+      typeof parsed.proposalId === 'string' ? parsed.proposalId.trim() : '';
     return {
       workspace,
-      section: isSectionAllowed(workspace, section) ? section : getDefaultSection(workspace),
+      section: isSectionAllowed(workspace, section)
+        ? section
+        : getDefaultSection(workspace),
       proposalId,
     };
   } catch {
@@ -147,22 +207,40 @@ function parseStoredRoute(raw: string | null): PortalRouteState | null {
 }
 
 export function useVotePortal() {
-  const apiBaseUrl = ref(localStorage.getItem(baseUrlStorageKey) ?? 'http://localhost:8080');
-  const adminBearerToken = ref(localStorage.getItem(adminTokenStorageKey) ?? '');
+  const apiBaseUrl = ref(
+    localStorage.getItem(baseUrlStorageKey) ?? 'http://localhost:8080',
+  );
+  const adminBearerToken = ref(
+    localStorage.getItem(adminTokenStorageKey) ?? '',
+  );
   const workspace = ref<WorkspaceId>('user');
-  const activeSection = ref<SectionId>('hall');
+  const activeSection = ref<SectionId>('overview');
   const selectedProposalId = ref('');
 
   const notices = ref<Notice[]>([]);
-  const activeAlert = ref<Notice | null>(null);
+  const guideModeVisible = ref(false);
 
-  const healthState = reactive({ loading: false, ok: false, text: '未检测', checkedAt: '' });
-  const hallState = reactive({ loading: false, proposals: [] as ProposalItem[] });
+  const healthState = reactive({
+    loading: false,
+    ok: false,
+    text: '未检测',
+    checkedAt: '',
+  });
+  const hallState = reactive({
+    loading: false,
+    proposals: [] as ProposalItem[],
+  });
 
   const identityForm = reactive({ userId: '', customPubKey: '' });
   const useCustomPubKey = ref(false);
   const generatedPubKey = ref(randomBase64(32));
-  const wallet = reactive({ userId: '', userPubKey: '', signature: '', issuerKeyVersion: '', issuedAt: '' });
+  const wallet = reactive({
+    userId: '',
+    userPubKey: '',
+    signature: '',
+    issuerKeyVersion: '',
+    issuedAt: '',
+  });
   const credentialLoading = ref(false);
   const credentialFileInput = ref<HTMLInputElement | null>(null);
 
@@ -180,7 +258,13 @@ export function useVotePortal() {
   const selectedVoteOption = ref('');
   const showAdvancedVoteFields = ref(false);
 
-  const createProposalForm = reactive({ title: '', description: '', optionsText: '', startsAtLocal: '', endsAtLocal: '' });
+  const createProposalForm = reactive({
+    title: '',
+    description: '',
+    optionsText: '',
+    startsAtLocal: '',
+    endsAtLocal: '',
+  });
   const createProposalLoading = ref(false);
 
   const decryptForm = reactive({ proposalId: '', threshold: 2, trustees: 3 });
@@ -204,7 +288,10 @@ export function useVotePortal() {
   const credentialStatusLoading = ref(false);
   const credentialStatuses = ref<CredentialStatusItem[]>([]);
 
-  const identityErrors = reactive<FormErrorMap>({ userId: '', customPubKey: '' });
+  const identityErrors = reactive<FormErrorMap>({
+    userId: '',
+    customPubKey: '',
+  });
   const voteErrors = reactive<FormErrorMap>({
     proposalId: '',
     option: '',
@@ -213,18 +300,34 @@ export function useVotePortal() {
     proof: '',
     nullifier: '',
   });
-  const createProposalErrors = reactive<FormErrorMap>({ title: '', options: '', startsAt: '', endsAt: '' });
-  const decryptErrors = reactive<FormErrorMap>({ proposalId: '', threshold: '', trustees: '' });
+  const createProposalErrors = reactive<FormErrorMap>({
+    title: '',
+    options: '',
+    startsAt: '',
+    endsAt: '',
+  });
+  const decryptErrors = reactive<FormErrorMap>({
+    proposalId: '',
+    threshold: '',
+    trustees: '',
+  });
   const publishErrors = reactive<FormErrorMap>({ proposalId: '', shares: '' });
   const resultErrors = reactive<FormErrorMap>({ proposalId: '' });
   const anchorErrors = reactive<FormErrorMap>({ proposalId: '' });
   const credentialStatusErrors = reactive<FormErrorMap>({ proposalId: '' });
 
-  const currentPubKey = computed(() => (useCustomPubKey.value ? identityForm.customPubKey.trim() : generatedPubKey.value));
-  const walletReady = computed(() => wallet.userId !== '' && wallet.userPubKey !== '' && wallet.signature !== '');
+  const currentPubKey = computed(() =>
+    useCustomPubKey.value
+      ? identityForm.customPubKey.trim()
+      : generatedPubKey.value,
+  );
+  const walletReady = computed(
+    () =>
+      wallet.userId !== '' &&
+      wallet.userPubKey !== '' &&
+      wallet.signature !== '',
+  );
   const adminTokenReady = computed(() => adminBearerToken.value.trim() !== '');
-  const latestNotice = computed(() => notices.value[0] ?? null);
-  const noticeHistory = computed(() => notices.value.slice(1));
   const selectedProposal = computed(() => {
     const byVoteForm = voteForm.proposalId.trim();
     const bySelection = selectedProposalId.value.trim();
@@ -234,30 +337,88 @@ export function useVotePortal() {
       null
     );
   });
-  const visibleSections = computed(() => sections.filter((section) => section.workspace === workspace.value));
+  const visibleSections = computed(() =>
+    sections.filter(
+      (section) =>
+        section.workspace === 'shared' || section.workspace === workspace.value,
+    ),
+  );
 
   let routeReady = false;
-  let alertTimer: number | undefined;
+  const noticeTimers = new Map<string, number>();
 
-  function addNotice(level: Notice['level'], title: string, detail: string): void {
-    const notice: Notice = { level, title, detail, at: nowLabel() };
+  function addNotice(
+    level: Notice['level'],
+    title: string,
+    detail: string,
+  ): void {
+    const notice: Notice = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      level,
+      title,
+      detail,
+      at: nowLabel(),
+    };
     notices.value.unshift(notice);
-    if (notices.value.length > 12) {
-      notices.value.length = 12;
-    }
-    activeAlert.value = notice;
-    if (alertTimer !== undefined) {
-      window.clearTimeout(alertTimer);
-    }
-    alertTimer = window.setTimeout(() => {
-      if (activeAlert.value === notice) {
-        activeAlert.value = null;
+    if (notices.value.length > 4) {
+      const removed = notices.value.splice(4);
+      for (const item of removed) {
+        const timer = noticeTimers.get(item.id);
+        if (timer !== undefined) {
+          window.clearTimeout(timer);
+          noticeTimers.delete(item.id);
+        }
       }
-    }, 5500);
+    }
+    const timer = window.setTimeout(() => {
+      dismissNotice(notice.id);
+    }, 4200);
+    noticeTimers.set(notice.id, timer);
   }
 
-  function dismissActiveAlert(): void {
-    activeAlert.value = null;
+  function dismissNotice(id: string): void {
+    notices.value = notices.value.filter((item) => item.id !== id);
+    const timer = noticeTimers.get(id);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      noticeTimers.delete(id);
+    }
+  }
+
+  function markOnboardingSeen(): void {
+    localStorage.setItem(onboardingStorageKey, '1');
+  }
+
+  function openGuideMode(): void {
+    setActiveSection('guide');
+    guideModeVisible.value = true;
+  }
+
+  function closeGuideMode(): void {
+    guideModeVisible.value = false;
+    markOnboardingSeen();
+  }
+
+  function startGuideJourney(target: WorkspaceId): void {
+    guideModeVisible.value = false;
+    markOnboardingSeen();
+    if (target === 'admin') {
+      setWorkspace('admin');
+      setActiveSection('ops');
+      addNotice(
+        'info',
+        '已切到运营引导',
+        '先创建未开始的提案，再初始化解密，最后等投票结束后发布结果。',
+      );
+      return;
+    }
+    setWorkspace('user');
+    setActiveSection('hall');
+    addNotice(
+      'info',
+      '已切到用户引导',
+      '先选提案，再领取匿名凭证，最后生成投票材料并提交。',
+    );
   }
 
   function adminHeaders(): Record<string, string> {
@@ -280,7 +441,11 @@ export function useVotePortal() {
     const current = new URL(window.location.href);
     const rendered = nextSearch === '' ? '' : `?${nextSearch}`;
     if (current.search !== rendered) {
-      history.replaceState({}, '', `${current.pathname}${rendered}${current.hash}`);
+      history.replaceState(
+        {},
+        '',
+        `${current.pathname}${rendered}${current.hash}`,
+      );
     }
   }
 
@@ -307,14 +472,31 @@ export function useVotePortal() {
     activeSection.value = next;
   }
 
-  function setProposalWindow(mode: 'active' | 'closed'): void {
-    if (mode === 'active') {
-      createProposalForm.startsAtLocal = toLocalDateTimeInput(new Date(Date.now() - 5 * 60 * 1000));
-      createProposalForm.endsAtLocal = toLocalDateTimeInput(new Date(Date.now() + 60 * 60 * 1000));
+  function setProposalWindow(mode: 'scheduled' | 'active' | 'closed'): void {
+    if (mode === 'scheduled') {
+      createProposalForm.startsAtLocal = toLocalDateTimeInput(
+        new Date(Date.now() + 15 * 60 * 1000),
+      );
+      createProposalForm.endsAtLocal = toLocalDateTimeInput(
+        new Date(Date.now() + 75 * 60 * 1000),
+      );
       return;
     }
-    createProposalForm.startsAtLocal = toLocalDateTimeInput(new Date(Date.now() - 2 * 60 * 60 * 1000));
-    createProposalForm.endsAtLocal = toLocalDateTimeInput(new Date(Date.now() - 60 * 1000));
+    if (mode === 'active') {
+      createProposalForm.startsAtLocal = toLocalDateTimeInput(
+        new Date(Date.now() - 5 * 60 * 1000),
+      );
+      createProposalForm.endsAtLocal = toLocalDateTimeInput(
+        new Date(Date.now() + 60 * 60 * 1000),
+      );
+      return;
+    }
+    createProposalForm.startsAtLocal = toLocalDateTimeInput(
+      new Date(Date.now() - 2 * 60 * 60 * 1000),
+    );
+    createProposalForm.endsAtLocal = toLocalDateTimeInput(
+      new Date(Date.now() - 60 * 1000),
+    );
   }
 
   function regeneratePubKey(): void {
@@ -352,7 +534,9 @@ export function useVotePortal() {
       issued_at: wallet.issuedAt,
       exported_at: new Date().toISOString(),
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: 'application/json',
+    });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = `credential-${wallet.userId || 'user'}.json`;
@@ -367,7 +551,11 @@ export function useVotePortal() {
 
   async function importCredentialFile(event: Event): Promise<void> {
     const target = event.target;
-    if (!(target instanceof HTMLInputElement) || !target.files || target.files.length === 0) {
+    if (
+      !(target instanceof HTMLInputElement) ||
+      !target.files ||
+      target.files.length === 0
+    ) {
       return;
     }
     const file = target.files[0];
@@ -416,7 +604,10 @@ export function useVotePortal() {
 
   function applySelectedOptionToBallot(): void {
     clearErrorGroup(voteErrors);
-    if (!selectedProposal.value || selectedProposal.value.options.length === 0) {
+    if (
+      !selectedProposal.value ||
+      selectedProposal.value.options.length === 0
+    ) {
       voteErrors.option = '当前提案没有可选项';
       addNotice('error', '填充失败', voteErrors.option);
       return;
@@ -428,14 +619,17 @@ export function useVotePortal() {
     }
     try {
       const current = voteForm.ballotJson.trim();
-      const base = current === '' ? {} : toObject(JSON.parse(current)) ?? {};
+      const base = current === '' ? {} : (toObject(JSON.parse(current)) ?? {});
       const payload: JsonMap = {
         ...base,
         selected_option: selectedVoteOption.value,
-        encrypted_vote: textOf(base, 'encrypted_vote') || voteForm.encryptedVote,
+        encrypted_vote:
+          textOf(base, 'encrypted_vote') || voteForm.encryptedVote,
         proof: textOf(base, 'proof') || voteForm.proof,
-        nullifier: textOf(base, 'nullifier') || voteForm.nullifier || newNullifier(),
-        public_witness: textOf(base, 'public_witness') || voteForm.publicWitness,
+        nullifier:
+          textOf(base, 'nullifier') || voteForm.nullifier || newNullifier(),
+        public_witness:
+          textOf(base, 'public_witness') || voteForm.publicWitness,
       };
       voteForm.encryptedVote = textOf(payload, 'encrypted_vote');
       voteForm.proof = textOf(payload, 'proof');
@@ -469,11 +663,14 @@ export function useVotePortal() {
         addNotice('error', '导入失败', voteErrors.ballotJson);
         return;
       }
-      voteForm.encryptedVote = textOf(parsed, 'encrypted_vote') || textOf(parsed, 'encryptedVote');
+      voteForm.encryptedVote =
+        textOf(parsed, 'encrypted_vote') || textOf(parsed, 'encryptedVote');
       voteForm.proof = textOf(parsed, 'proof');
       voteForm.nullifier = textOf(parsed, 'nullifier');
-      voteForm.publicWitness = textOf(parsed, 'public_witness') || textOf(parsed, 'publicWitness');
-      const chosenOption = textOf(parsed, 'selected_option') || textOf(parsed, 'option');
+      voteForm.publicWitness =
+        textOf(parsed, 'public_witness') || textOf(parsed, 'publicWitness');
+      const chosenOption =
+        textOf(parsed, 'selected_option') || textOf(parsed, 'option');
       if (chosenOption !== '') {
         selectedVoteOption.value = chosenOption;
       }
@@ -484,21 +681,21 @@ export function useVotePortal() {
     }
   }
 
-  async function prepareBallotByOption(): Promise<void> {
+  async function prepareBallotByOption(): Promise<boolean> {
     clearErrorGroup(voteErrors);
     if (!walletReady.value) {
       addNotice('error', '生成失败', '请先领取或导入匿名凭证');
-      return;
+      return false;
     }
     if (voteForm.proposalId.trim() === '') {
       voteErrors.proposalId = '请先选择 proposal_id';
       addNotice('error', '生成失败', voteErrors.proposalId);
-      return;
+      return false;
     }
     if (selectedVoteOption.value.trim() === '') {
       voteErrors.option = '请先选择投票选项';
       addNotice('error', '生成失败', voteErrors.option);
-      return;
+      return false;
     }
 
     voteLoading.value = true;
@@ -511,8 +708,12 @@ export function useVotePortal() {
     voteLoading.value = false;
 
     if (!result.ok) {
-      addNotice('error', '生成失败', result.error ?? '无法根据选项生成投票凭据');
-      return;
+      addNotice(
+        'error',
+        '生成失败',
+        result.error ?? '无法根据选项生成投票凭据',
+      );
+      return false;
     }
 
     const payload = toObject(result.data);
@@ -525,11 +726,15 @@ export function useVotePortal() {
     }
     updateBallotJson(selectedVoteOption.value);
     addNotice('success', '生成成功', '已根据选项生成可提交的投票凭据');
+    return true;
   }
 
   async function checkHealth(showNotice = true): Promise<void> {
     healthState.loading = true;
-    const result = await apiCall({ baseUrl: apiBaseUrl.value, path: '/healthz' });
+    const result = await apiCall({
+      baseUrl: apiBaseUrl.value,
+      path: '/healthz',
+    });
     healthState.loading = false;
     healthState.checkedAt = nowLabel();
     if (result.ok) {
@@ -547,9 +752,15 @@ export function useVotePortal() {
     }
   }
 
-  async function loadOpenProposals(showNotice = true): Promise<void> {
+  async function loadOpenProposals(
+    showNotice = true,
+    preserveSelection = false,
+  ): Promise<void> {
     hallState.loading = true;
-    const result = await apiCall({ baseUrl: apiBaseUrl.value, path: '/api/v1/proposals/open' });
+    const result = await apiCall({
+      baseUrl: apiBaseUrl.value,
+      path: '/api/v1/proposals/open',
+    });
     hallState.loading = false;
     if (!result.ok) {
       hallState.proposals = [];
@@ -577,7 +788,9 @@ export function useVotePortal() {
         if (id === '') {
           return null;
         }
-        const parsedDescription = decodeProposalDescription(textOf(object, 'description'));
+        const parsedDescription = decodeProposalDescription(
+          textOf(object, 'description'),
+        );
         const rawOptions = object.options;
         const options = Array.isArray(rawOptions)
           ? rawOptions
@@ -599,39 +812,43 @@ export function useVotePortal() {
 
     const selected = selectedProposalId.value.trim();
     const exists = hallState.proposals.some((item) => item.id === selected);
-    if (!exists && hallState.proposals.length > 0) {
+    if (!preserveSelection && !exists && hallState.proposals.length > 0) {
       adoptProposal(hallState.proposals[0].id);
     }
     if (showNotice) {
-      addNotice('success', '提案已刷新', `共 ${hallState.proposals.length} 个提案`);
+      addNotice(
+        'success',
+        '提案已刷新',
+        `共 ${hallState.proposals.length} 个提案`,
+      );
     }
   }
 
-  async function issueCredential(): Promise<void> {
+  async function issueCredential(): Promise<boolean> {
     clearErrorGroup(identityErrors);
     if (voteForm.proposalId.trim() === '') {
       identityErrors.userId = '请先选择 proposal_id，再领取该提案的凭证';
       addNotice('error', '签发失败', identityErrors.userId);
-      return;
+      return false;
     }
     if (!adminTokenReady.value) {
       addNotice('error', '签发失败', '领取凭证需要先填写 Admin Token');
-      return;
+      return false;
     }
     if (identityForm.userId.trim() === '') {
       identityErrors.userId = '请输入 user_id';
       addNotice('error', '签发失败', identityErrors.userId);
-      return;
+      return false;
     }
     if (useCustomPubKey.value && identityForm.customPubKey.trim() === '') {
       identityErrors.customPubKey = '启用手动公钥后不能为空';
       addNotice('error', '签发失败', identityErrors.customPubKey);
-      return;
+      return false;
     }
     if (currentPubKey.value === '') {
       identityErrors.customPubKey = '公钥不能为空';
       addNotice('error', '签发失败', identityErrors.customPubKey);
-      return;
+      return false;
     }
 
     credentialLoading.value = true;
@@ -650,7 +867,7 @@ export function useVotePortal() {
 
     if (!result.ok) {
       addNotice('error', '签发失败', result.error ?? '后端未返回凭证');
-      return;
+      return false;
     }
     const payload = toObject(result.data);
     wallet.userId = textOf(payload, 'user_id') || identityForm.userId.trim();
@@ -660,23 +877,28 @@ export function useVotePortal() {
     wallet.issuedAt = textOf(payload, 'issued_at');
     hasVoted.value = null;
     addNotice('success', '凭证已领取', '你已可以进行匿名投票');
+    return true;
   }
 
-  async function submitVote(): Promise<void> {
+  async function submitVote(): Promise<boolean> {
     clearErrorGroup(voteErrors);
     if (!walletReady.value) {
       addNotice('error', '提交失败', '请先领取或导入凭证');
-      return;
+      return false;
     }
     if (voteForm.proposalId.trim() === '') {
       voteErrors.proposalId = '请选择 proposal_id';
       addNotice('error', '提交失败', voteErrors.proposalId);
-      return;
+      return false;
     }
-    if (selectedProposal.value && selectedProposal.value.options.length > 0 && selectedVoteOption.value.trim() === '') {
+    if (
+      selectedProposal.value &&
+      selectedProposal.value.options.length > 0 &&
+      selectedVoteOption.value.trim() === ''
+    ) {
       voteErrors.option = '请选择一个投票选项';
       addNotice('error', '提交失败', voteErrors.option);
-      return;
+      return false;
     }
     if (voteForm.encryptedVote.trim() === '') {
       voteErrors.encryptedVote = 'encrypted_vote 不能为空';
@@ -689,7 +911,7 @@ export function useVotePortal() {
     }
     if (voteErrors.encryptedVote || voteErrors.proof || voteErrors.nullifier) {
       addNotice('error', '提交失败', '请先生成或导入完整投票凭据');
-      return;
+      return false;
     }
 
     const body: JsonMap = {
@@ -709,16 +931,22 @@ export function useVotePortal() {
     }
 
     voteLoading.value = true;
-    const result = await apiCall({ baseUrl: apiBaseUrl.value, path: '/api/v1/votes', method: 'POST', body });
+    const result = await apiCall({
+      baseUrl: apiBaseUrl.value,
+      path: '/api/v1/votes',
+      method: 'POST',
+      body,
+    });
     voteLoading.value = false;
 
     if (!result.ok) {
       addNotice('error', '投票失败', result.error ?? '请检查投票凭据');
-      return;
+      return false;
     }
 
     addNotice('success', '投票成功', '匿名选票已提交');
     await fetchVoteStatus(false);
+    return true;
   }
 
   async function fetchVoteStatus(showNotice = true): Promise<void> {
@@ -750,15 +978,19 @@ export function useVotePortal() {
     const payload = toObject(result.data);
     hasVoted.value = boolOf(payload, 'has_voted');
     if (showNotice) {
-      addNotice('success', '查询完成', hasVoted.value ? '你已投票' : '你还未投票');
+      addNotice(
+        'success',
+        '查询完成',
+        hasVoted.value ? '你已投票' : '你还未投票',
+      );
     }
   }
 
-  async function createProposal(): Promise<void> {
+  async function createProposal(): Promise<boolean> {
     clearErrorGroup(createProposalErrors);
     if (!adminTokenReady.value) {
       addNotice('error', '创建失败', '创建提案需要先填写 Admin Token');
-      return;
+      return false;
     }
 
     if (createProposalForm.title.trim() === '') {
@@ -778,13 +1010,22 @@ export function useVotePortal() {
     if (endsAt === null) {
       createProposalErrors.endsAt = '请填写有效的结束时间';
     }
-    if (startsAt && endsAt && new Date(startsAt).getTime() >= new Date(endsAt).getTime()) {
+    if (
+      startsAt &&
+      endsAt &&
+      new Date(startsAt).getTime() >= new Date(endsAt).getTime()
+    ) {
       createProposalErrors.endsAt = '结束时间必须晚于开始时间';
     }
 
-    if (createProposalErrors.title || createProposalErrors.options || createProposalErrors.startsAt || createProposalErrors.endsAt) {
+    if (
+      createProposalErrors.title ||
+      createProposalErrors.options ||
+      createProposalErrors.startsAt ||
+      createProposalErrors.endsAt
+    ) {
       addNotice('error', '创建失败', '请先修复表单中的错误');
-      return;
+      return false;
     }
 
     createProposalLoading.value = true;
@@ -805,7 +1046,7 @@ export function useVotePortal() {
 
     if (!result.ok) {
       addNotice('error', '创建失败', result.error ?? '提案创建失败');
-      return;
+      return false;
     }
 
     const payload = toObject(result.data);
@@ -813,15 +1054,20 @@ export function useVotePortal() {
     if (id !== '') {
       adoptProposal(id);
     }
-    addNotice('success', '提案创建成功', id === '' ? '已创建提案' : `提案编号：${id}`);
-    await loadOpenProposals(false);
+    addNotice(
+      'success',
+      '提案创建成功',
+      id === '' ? '已创建提案' : `提案编号：${id}`,
+    );
+    await loadOpenProposals(false, true);
+    return true;
   }
 
-  async function setupDecryptionSession(): Promise<void> {
+  async function setupDecryptionSession(): Promise<boolean> {
     clearErrorGroup(decryptErrors);
     if (!adminTokenReady.value) {
       addNotice('error', '初始化失败', '初始化解密会话需要先填写 Admin Token');
-      return;
+      return false;
     }
 
     if (decryptForm.proposalId.trim() === '') {
@@ -837,9 +1083,13 @@ export function useVotePortal() {
       decryptErrors.threshold = 'threshold 不能大于 trustees';
     }
 
-    if (decryptErrors.proposalId || decryptErrors.threshold || decryptErrors.trustees) {
+    if (
+      decryptErrors.proposalId ||
+      decryptErrors.threshold ||
+      decryptErrors.trustees
+    ) {
       addNotice('error', '初始化失败', '请先修复表单中的错误');
-      return;
+      return false;
     }
 
     decryptLoading.value = true;
@@ -848,28 +1098,43 @@ export function useVotePortal() {
       path: `/api/v1/proposals/${encodeURIComponent(decryptForm.proposalId.trim())}/decryption/setup`,
       method: 'POST',
       headers: adminHeaders(),
-      body: { threshold: Number(decryptForm.threshold), trustees: Number(decryptForm.trustees) },
+      body: {
+        threshold: Number(decryptForm.threshold),
+        trustees: Number(decryptForm.trustees),
+      },
     });
     decryptLoading.value = false;
 
     if (!result.ok) {
-      addNotice('error', '初始化失败', result.error ?? '无法初始化解密会话');
-      return;
+      const detail = result.error?.includes(
+        'proposal decryption must be prepared before voting opens',
+      )
+        ? '当前提案已经进入投票窗口。请把 starts_at 设为未来时间后再初始化解密，或新建一个“待开始”的提案。'
+        : (result.error ?? '无法初始化解密会话');
+      addNotice('error', '初始化失败', detail);
+      return false;
     }
 
     const payload = toObject(result.data);
     decryptPublicKey.value = textOf(payload, 'public_key');
     const shares = payload?.shares;
-    decryptShares.value = Array.isArray(shares) ? shares.filter((item): item is string => typeof item === 'string') : [];
+    decryptShares.value = Array.isArray(shares)
+      ? shares.filter((item): item is string => typeof item === 'string')
+      : [];
     publishForm.sharesText = decryptShares.value.join('\n');
-    addNotice('success', '会话已初始化', `已生成 ${decryptShares.value.length} 份解密份额`);
+    addNotice(
+      'success',
+      '会话已初始化',
+      `已生成 ${decryptShares.value.length} 份解密份额`,
+    );
+    return true;
   }
 
-  async function publishResult(): Promise<void> {
+  async function publishResult(): Promise<boolean> {
     clearErrorGroup(publishErrors);
     if (!adminTokenReady.value) {
       addNotice('error', '发布失败', '发布结果需要先填写 Admin Token');
-      return;
+      return false;
     }
     if (publishForm.proposalId.trim() === '') {
       publishErrors.proposalId = 'proposal_id 不能为空';
@@ -880,7 +1145,7 @@ export function useVotePortal() {
     }
     if (publishErrors.proposalId || publishErrors.shares) {
       addNotice('error', '发布失败', '请先修复表单中的错误');
-      return;
+      return false;
     }
 
     publishLoading.value = true;
@@ -895,7 +1160,7 @@ export function useVotePortal() {
 
     if (!result.ok) {
       addNotice('error', '发布失败', result.error ?? '发布结果失败');
-      return;
+      return false;
     }
 
     const payload = toObject(result.data);
@@ -903,14 +1168,15 @@ export function useVotePortal() {
     const anchorHash = textOf(payload, 'anchor_hash');
     publishedSummary.value = `总票数 ${typeof votes === 'number' ? votes : '-'}，Anchor ${anchorHash || '-'}`;
     addNotice('success', '发布成功', publishedSummary.value);
+    return true;
   }
 
-  async function fetchResult(): Promise<void> {
+  async function fetchResult(): Promise<boolean> {
     clearErrorGroup(resultErrors);
     if (resultForm.proposalId.trim() === '') {
       resultErrors.proposalId = 'proposal_id 不能为空';
       addNotice('error', '查询失败', resultErrors.proposalId);
-      return;
+      return false;
     }
 
     resultLoading.value = true;
@@ -924,7 +1190,7 @@ export function useVotePortal() {
       resultSummary.value = '';
       resultTally.value = [];
       addNotice('error', '查询失败', result.error ?? '无法获取计票结果');
-      return;
+      return false;
     }
 
     const payload = toObject(result.data);
@@ -935,11 +1201,15 @@ export function useVotePortal() {
     const tally = toObject(payload?.tally);
     resultTally.value = tally
       ? Object.entries(tally)
-          .map(([option, value]) => ({ option, count: typeof value === 'number' ? value : 0 }))
+          .map(([option, value]) => ({
+            option,
+            count: typeof value === 'number' ? value : 0,
+          }))
           .sort((a, b) => b.count - a.count)
       : [];
 
     addNotice('success', '查询完成', resultSummary.value);
+    return true;
   }
 
   async function fetchAnchors(): Promise<void> {
@@ -989,19 +1259,23 @@ export function useVotePortal() {
         };
       })
       .filter((item): item is AnchorItem => item !== null);
-    addNotice('success', '查询完成', `获取到 ${anchors.value.length} 条审计锚点`);
+    addNotice(
+      'success',
+      '查询完成',
+      `获取到 ${anchors.value.length} 条审计锚点`,
+    );
   }
 
-  async function fetchCredentialStatuses(): Promise<void> {
+  async function fetchCredentialStatuses(): Promise<boolean> {
     clearErrorGroup(credentialStatusErrors);
     if (!adminTokenReady.value) {
       addNotice('error', '查询失败', '查询凭证状态需要先填写 Admin Token');
-      return;
+      return false;
     }
     if (credentialStatusForm.proposalId.trim() === '') {
       credentialStatusErrors.proposalId = 'proposal_id 不能为空';
       addNotice('error', '查询失败', credentialStatusErrors.proposalId);
-      return;
+      return false;
     }
 
     credentialStatusLoading.value = true;
@@ -1015,7 +1289,7 @@ export function useVotePortal() {
     if (!result.ok) {
       credentialStatuses.value = [];
       addNotice('error', '查询失败', result.error ?? '无法获取凭证状态');
-      return;
+      return false;
     }
 
     const payload = toObject(result.data);
@@ -1023,7 +1297,7 @@ export function useVotePortal() {
     if (!Array.isArray(items)) {
       credentialStatuses.value = [];
       addNotice('info', '查询完成', '暂无凭证状态记录');
-      return;
+      return true;
     }
 
     credentialStatuses.value = items
@@ -1048,7 +1322,12 @@ export function useVotePortal() {
       })
       .filter((item): item is CredentialStatusItem => item !== null);
 
-    addNotice('success', '查询完成', `获取到 ${credentialStatuses.value.length} 条凭证状态`);
+    addNotice(
+      'success',
+      '查询完成',
+      `获取到 ${credentialStatuses.value.length} 条凭证状态`,
+    );
+    return true;
   }
 
   watch(apiBaseUrl, (value) => {
@@ -1072,7 +1351,11 @@ export function useVotePortal() {
     credentialStatusForm.proposalId = id;
 
     const proposal = hallState.proposals.find((item) => item.id === id);
-    if (proposal && proposal.options.length > 0 && !proposal.options.includes(selectedVoteOption.value)) {
+    if (
+      proposal &&
+      proposal.options.length > 0 &&
+      !proposal.options.includes(selectedVoteOption.value)
+    ) {
       selectedVoteOption.value = proposal.options[0];
     }
   });
@@ -1093,17 +1376,30 @@ export function useVotePortal() {
 
   onMounted(async () => {
     const routeFromUrl = parsePortalRoute(window.location.search);
-    const routeFromStorage = parseStoredRoute(localStorage.getItem(navStorageKey));
-    const effectiveRoute = window.location.search.trim() === '' && routeFromStorage ? routeFromStorage : routeFromUrl;
+    const routeFromStorage = parseStoredRoute(
+      localStorage.getItem(navStorageKey),
+    );
+    const effectiveRoute =
+      window.location.search.trim() === '' && routeFromStorage
+        ? routeFromStorage
+        : routeFromUrl;
+    const hasSeenOnboarding =
+      localStorage.getItem(onboardingStorageKey) === '1';
 
     workspace.value = effectiveRoute.workspace;
     activeSection.value = effectiveRoute.section;
     selectedProposalId.value = effectiveRoute.proposalId;
 
+    if (!hasSeenOnboarding) {
+      workspace.value = 'user';
+      activeSection.value = 'overview';
+      guideModeVisible.value = true;
+    }
+
     routeReady = true;
     syncRouteToUrl();
 
-    setProposalWindow('active');
+    setProposalWindow('scheduled');
     createProposalForm.optionsText = '候选人 A\n候选人 B';
     voteForm.nullifier = newNullifier();
 
@@ -1112,9 +1408,10 @@ export function useVotePortal() {
   });
 
   onUnmounted(() => {
-    if (alertTimer !== undefined) {
-      window.clearTimeout(alertTimer);
+    for (const timer of noticeTimers.values()) {
+      window.clearTimeout(timer);
     }
+    noticeTimers.clear();
   });
 
   return {
@@ -1207,9 +1504,10 @@ export function useVotePortal() {
     fetchCredentialStatuses,
 
     notices,
-    latestNotice,
-    noticeHistory,
-    activeAlert,
-    dismissActiveAlert,
+    guideModeVisible,
+    openGuideMode,
+    closeGuideMode,
+    startGuideJourney,
+    dismissNotice,
   };
 }

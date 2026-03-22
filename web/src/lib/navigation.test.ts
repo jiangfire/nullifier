@@ -10,6 +10,14 @@ describe('navigation utilities', () => {
     });
   });
 
+  it('defaults blank route to overview', () => {
+    expect(parsePortalRoute('')).toEqual({
+      workspace: 'user',
+      section: 'overview',
+      proposalId: '',
+    });
+  });
+
   it('normalizes invalid section to workspace default', () => {
     expect(parsePortalRoute('?ws=admin&tab=vote')).toEqual({
       workspace: 'admin',
@@ -19,7 +27,11 @@ describe('navigation utilities', () => {
   });
 
   it('builds stable query string from state', () => {
-    const query = buildPortalSearch({ workspace: 'user', section: 'vote', proposalId: 'abc' });
-    expect(query).toBe('ws=user&tab=vote&proposal=abc');
+    const query = buildPortalSearch({
+      workspace: 'user',
+      section: 'overview',
+      proposalId: 'abc',
+    });
+    expect(query).toBe('ws=user&tab=overview&proposal=abc');
   });
 });

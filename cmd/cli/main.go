@@ -40,12 +40,12 @@ type credentialFile struct {
 }
 
 type ballotFile struct {
-	ProposalID    string `json:"proposal_id,omitempty"`
+	ProposalID     string `json:"proposal_id,omitempty"`
 	SelectedOption string `json:"selected_option,omitempty"`
-	EncryptedVote string `json:"encrypted_vote"`
-	Proof         string `json:"proof"`
-	Nullifier     string `json:"nullifier"`
-	PublicWitness string `json:"public_witness,omitempty"`
+	EncryptedVote  string `json:"encrypted_vote"`
+	Proof          string `json:"proof"`
+	Nullifier      string `json:"nullifier"`
+	PublicWitness  string `json:"public_witness,omitempty"`
 }
 
 func main() {
@@ -165,16 +165,6 @@ func (c *cli) cmdCreateProposal(args []string) error {
 		return errors.New("必须提供 -title -start -end")
 	}
 	desc := strings.TrimSpace(*description)
-	if optList := splitCSV(*options); len(optList) > 0 {
-		raw, err := json.Marshal(map[string]any{
-			"summary": desc,
-			"options": optList,
-		})
-		if err != nil {
-			return err
-		}
-		desc = string(raw)
-	}
 	body := map[string]any{
 		"title":       strings.TrimSpace(*title),
 		"description": desc,
@@ -212,8 +202,8 @@ func (c *cli) cmdIssueCredential(args []string) error {
 		userPubKey = generated
 	}
 	body := map[string]any{
-		"proposal_id": strings.TrimSpace(*proposalID),
-		"user_id":     strings.TrimSpace(*userID),
+		"proposal_id":  strings.TrimSpace(*proposalID),
+		"user_id":      strings.TrimSpace(*userID),
 		"user_pub_key": userPubKey,
 	}
 	var out credentialFile
@@ -273,12 +263,12 @@ func (c *cli) cmdBallotDraft(args []string) error {
 		return err
 	}
 	ballot := ballotFile{
-		ProposalID:    stringify(raw["proposal_id"]),
+		ProposalID:     stringify(raw["proposal_id"]),
 		SelectedOption: stringify(raw["option"]),
-		EncryptedVote: stringify(raw["encrypted_vote"]),
-		Proof:         stringify(raw["proof"]),
-		Nullifier:     stringify(raw["nullifier"]),
-		PublicWitness: stringify(raw["public_witness"]),
+		EncryptedVote:  stringify(raw["encrypted_vote"]),
+		Proof:          stringify(raw["proof"]),
+		Nullifier:      stringify(raw["nullifier"]),
+		PublicWitness:  stringify(raw["public_witness"]),
 	}
 	if *outFile != "" {
 		if err := writeJSON(*outFile, ballot); err != nil {

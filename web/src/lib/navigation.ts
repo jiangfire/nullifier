@@ -2,6 +2,8 @@ import type { PortalRouteState, SectionId, WorkspaceId } from '../types/portal';
 
 export const DEFAULT_WORKSPACE: WorkspaceId = 'user';
 
+const sharedSections: SectionId[] = ['overview', 'setup', 'guide'];
+
 const workspaceSectionMap: Record<WorkspaceId, SectionId[]> = {
   user: ['hall', 'identity', 'vote'],
   admin: ['ops'],
@@ -15,8 +17,14 @@ export function isWorkspace(value: string): value is WorkspaceId {
   return value === 'user' || value === 'admin';
 }
 
-export function isSectionAllowed(workspace: WorkspaceId, section: SectionId): boolean {
-  return workspaceSectionMap[workspace].includes(section);
+export function isSectionAllowed(
+  workspace: WorkspaceId,
+  section: SectionId,
+): boolean {
+  return (
+    sharedSections.includes(section) ||
+    workspaceSectionMap[workspace].includes(section)
+  );
 }
 
 function normalizeWorkspace(value: string | null | undefined): WorkspaceId {
@@ -26,8 +34,22 @@ function normalizeWorkspace(value: string | null | undefined): WorkspaceId {
   return DEFAULT_WORKSPACE;
 }
 
-function normalizeSection(value: string | null | undefined, workspace: WorkspaceId): SectionId {
-  if (value === 'hall' || value === 'identity' || value === 'vote' || value === 'ops') {
+function normalizeSection(
+  value: string | null | undefined,
+  workspace: WorkspaceId,
+): SectionId {
+  if (!value) {
+    return 'overview';
+  }
+  if (
+    value === 'overview' ||
+    value === 'setup' ||
+    value === 'guide' ||
+    value === 'hall' ||
+    value === 'identity' ||
+    value === 'vote' ||
+    value === 'ops'
+  ) {
     if (isSectionAllowed(workspace, value)) {
       return value;
     }

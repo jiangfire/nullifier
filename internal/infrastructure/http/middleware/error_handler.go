@@ -30,7 +30,7 @@ func ErrorHandler(logger *zap.Logger) gin.HandlerFunc {
 		logger.Error("request failed", zap.Error(err))
 
 		status, code := mapError(err)
-		message := publicErrorMessage(code)
+		message := publicErrorMessage(err, code)
 		c.JSON(status, gin.H{
 			"error": message,
 			"code":  code,
@@ -59,10 +59,10 @@ func mapError(err error) (int, string) {
 	}
 }
 
-func publicErrorMessage(code string) string {
+func publicErrorMessage(err error, code string) string {
 	switch code {
 	case "INVALID_REQUEST":
-		return "invalid request"
+		return err.Error()
 	case "DOUBLE_VOTING":
 		return "double voting"
 	case "CREDENTIAL_EXISTS":

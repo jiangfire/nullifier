@@ -25,10 +25,10 @@ go.work.sum
 # env file
 .env
 issuer_keys.json
-$Profile
 
 # local build/module caches used in sandbox
 .gocache/
 .gomodcache/
 web/.pnpm-store/
 .codex/
+*.db

@@ -57,7 +57,7 @@ func TestLoad_RequiresVKInReleaseMode(t *testing.T) {
 	require.Contains(t, err.Error(), "crypto.vk_path is required")
 }
 
-func TestLoad_RequiresAdminTokenInReleaseMode(t *testing.T) {
+func TestLoad_AllowsMissingAdminTokenInReleaseMode(t *testing.T) {
 	oldWD, err := os.Getwd()
 	require.NoError(t, err)
 
@@ -71,9 +71,27 @@ func TestLoad_RequiresAdminTokenInReleaseMode(t *testing.T) {
 	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
 	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
 
-	_, err = Load()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "server.admin_bearer_token is required")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, "", cfg.AdminBearerToken)
+}
+
+func TestEnsureAdminBearerToken_GeneratesWhenMissing(t *testing.T) {
+	cfg := &Config{}
+
+	generated, err := EnsureAdminBearerToken(cfg)
+	require.NoError(t, err)
+	require.True(t, generated)
+	require.NotEmpty(t, cfg.AdminBearerToken)
+}
+
+func TestEnsureAdminBearerToken_KeepsConfiguredValue(t *testing.T) {
+	cfg := &Config{AdminBearerToken: "  fixed-token  "}
+
+	generated, err := EnsureAdminBearerToken(cfg)
+	require.NoError(t, err)
+	require.False(t, generated)
+	require.Equal(t, "fixed-token", cfg.AdminBearerToken)
 }
 
 func TestLoad_FromConfigFile(t *testing.T) {

@@ -64,7 +64,26 @@ func TestErrorHandler(t *testing.T) {
 	require.Equal(t, "invalid request", body["error"])
 
 	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/bad", nil)
+	engine = gin.New()
+	engine.Use(ErrorHandler(nil))
+	engine.GET("/bad", func(c *gin.Context) {
+		c.Error(errors.Join(usecase.ErrInvalidRequest, errors.New("starts_at must be in the future")))
+	})
+	engine.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	body = map[string]any{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "INVALID_REQUEST", body["code"])
+	require.Contains(t, body["error"], "starts_at must be in the future")
+
+	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/boom", nil)
+	engine = gin.New()
+	engine.Use(ErrorHandler(nil))
+	engine.GET("/boom", func(c *gin.Context) {
+		c.Error(errors.New("sql: connection refused"))
+	})
 	engine.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	body = map[string]any{}
@@ -74,6 +93,11 @@ func TestErrorHandler(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/ok", nil)
+	engine = gin.New()
+	engine.Use(ErrorHandler(nil))
+	engine.GET("/ok", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 	engine.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 }

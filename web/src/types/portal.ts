@@ -1,9 +1,17 @@
 export type WorkspaceId = 'user' | 'admin';
-export type SectionId = 'hall' | 'identity' | 'vote' | 'ops';
+export type SectionScope = WorkspaceId | 'shared';
+export type SectionId =
+  | 'overview'
+  | 'setup'
+  | 'guide'
+  | 'hall'
+  | 'identity'
+  | 'vote'
+  | 'ops';
 
 export interface SectionMeta {
   id: SectionId;
-  workspace: WorkspaceId;
+  workspace: SectionScope;
   title: string;
   description: string;
 }
@@ -25,6 +33,7 @@ export interface ProposalItem {
 }
 
 export interface Notice {
+  id: string;
   level: 'success' | 'error' | 'info';
   title: string;
   detail: string;

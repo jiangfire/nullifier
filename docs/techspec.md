@@ -1,564 +1,269 @@
-## 1. 架构设计（Clean Architecture）
+# 技术说明（当前实现）
+
+本文档描述的是仓库当前已经落地的实现，不再保留目标态伪代码。
+
+## 1. 代码结构
+
+```text
+cmd/
+├── cli/                    # 命令行客户端，复用 HTTP API
+└── server/                 # 服务启动入口
+
+internal/
+├── config/                 # 配置加载与校验
+├── di/                     # Wire/provider 组装
+├── domain/
+│   ├── crypto/             # 密码学接口
+│   ├── entity/             # 领域实体
+│   └── repository/         # 仓储接口与领域错误
+├── infrastructure/
+│   ├── crypto/             # gnark / kyber / kryptology 实现
+│   ├── http/               # Gin handler / server / middleware
+│   └── persistence/        # GORM 仓储、迁移、DB 配置
+└── usecase/                # 业务编排
 
-```
-anonvote/
-├── internal/
-│   ├── domain/              # 实体与接口（零外部依赖，纯Go标准库）
-│   │   ├── entity/          # 聚合根（Vote, Proposal, Credential）
-│   │   └── repository/      # 仓储接口（依赖倒置）
-│   ├── usecase/             # 应用层（业务逻辑，依赖domain接口）
-│   ├── infrastructure/      # 基础设施（具体实现，可替换）
-│   │   ├── crypto/          # gnark/kyber封装
-│   │   ├── persistence/     # gorm实现
-│   │   └── http/            # gin handler
-│   └── di/                  # wire依赖注入容器
-├── cmd/server/              # 启动入口
-├── tests/integration/       # 集成测试（docker-compose）
-└── web/                     # Vue3前端
-```
-
-**核心原则**：
-- **SOLID**：`domain`层定义接口，`infrastructure`层实现，通过`wire`注入
-- **KISS**：单体应用，无需消息队列，PostgreSQL存储所有状态
-- **DRY**：通用错误处理、通用CRUD基类、共享的gnark电路配置
-
-## 2. 多环境数据库架构
-
-### 环境配置策略
-
-| 环境 | 数据库 | 用途 | 配置方式 |
-|------|--------|------|----------|
-| **测试** | SQLite3 (:memory:) | 单元测试、快速反馈 | 代码自动选择 |
-| **开发** | SQLite3 (file) | 本地开发、无需Docker | 默认配置 |
-| **生产** | PostgreSQL | 高并发、数据持久化 | 环境变量覆盖 |
-
-### GORM多驱动配置
-
-```go
-// internal/infrastructure/persistence/db.go
-package persistence
-
-import (
-    "fmt"
-    "os"
-
-    "gorm.io/driver/postgres"
-    "gorm.io/driver/sqlite"
-    "gorm.io/gorm"
-    "gorm.io/gorm/logger"
-)
-
-// DBConfig 数据库配置
-type DBConfig struct {
-    Driver   string // "sqlite" | "postgres"
-    Host     string
-    Port     int
-    Database string
-    Username string
-    Password string
-    SSLMode  string
-}
-
-// NewDB 根据配置创建对应的数据库连接
-func NewDB(cfg *DBConfig) (*gorm.DB, error) {
-    switch cfg.Driver {
-    case "postgres":
-        return newPostgresDB(cfg)
-    case "sqlite":
-        return newSQLiteDB(cfg)
-    default:
-        return nil, fmt.Errorf("unsupported driver: %s", cfg.Driver)
-    }
-}
-
-func newPostgresDB(cfg *DBConfig) (*gorm.DB, error) {
-    dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-        cfg.Host, cfg.Port, cfg.Username, cfg.Password, cfg.Database, cfg.SSLMode)
-
-    return gorm.Open(postgres.Open(dsn), &gorm.Config{
-        Logger: logger.Default.LogMode(logger.Silent),
-    })
-}
-
-func newSQLiteDB(cfg *DBConfig) (*gorm.DB, error) {
-    // :memory: 用于测试，文件用于开发
-    dsn := cfg.Database
-    if dsn == "" {
-        dsn = ":memory:"
-    }
-
-    return gorm.Open(sqlite.Open(dsn), &gorm.Config{
-        Logger: logger.Default.LogMode(logger.Silent),
-    })
-}
-```
-
-### 环境检测工具函数
-
-```go
-// internal/infrastructure/persistence/db_env.go
-package persistence
-
-import "os"
-
-// GetDBConfigFromEnv 从环境变量读取数据库配置
-func GetDBConfigFromEnv() *DBConfig {
-    driver := os.Getenv("DB_DRIVER")
-    if driver == "" {
-        // 默认使用SQLite3（开发环境）
-        driver = "sqlite"
-    }
-
-    cfg := &DBConfig{Driver: driver}
-
-    switch driver {
-    case "postgres":
-        cfg.Host = getEnv("DB_HOST", "localhost")
-        cfg.Port = getEnvInt("DB_PORT", 5432)
-        cfg.Database = getEnv("DB_NAME", "anonvote")
-        cfg.Username = getEnv("DB_USER", "postgres")
-        cfg.Password = getEnv("DB_PASSWORD", "")
-        cfg.SSLMode = getEnv("DB_SSLMODE", "disable")
-    case "sqlite":
-        cfg.Database = getEnv("DB_PATH", "anonvote.db")
-        // 测试环境使用 :memory:
-        if os.Getenv("GO_ENV") == "test" {
-            cfg.Database = ":memory:"
-        }
-    }
-
-    return cfg
-}
-
-func getEnv(key, defaultVal string) string { /* ... */ }
-func getEnvInt(key string, defaultVal int) int { /* ... */ }
-```
-
-### 迁移兼容性
-
-```go
-// internal/infrastructure/persistence/migration.go
-package persistence
-
-import (
-    "gorm.io/gorm"
-    "anonvote/internal/domain/entity"
-)
-
-// AutoMigrate 自动迁移所有实体（支持SQLite和PostgreSQL）
-func AutoMigrate(db *gorm.DB) error {
-    return db.AutoMigrate(
-        &entity.Vote{},
-        &entity.Proposal{},
-        &entity.Credential{},
-    )
-}
-
-// 注意：SQLite部分字段类型有差异，GORM已处理大部分兼容性问题
-// 如需原生SQL，使用db.Dialector.Name()判断数据库类型
-```
-
-## 4. 技术栈（全部选成熟工业级库）
-
-| 用途 | 库 | 理由 |
-|------|----|----|
-| **ZKP** | `github.com/consensys/gnark` | Consensys官方，性能最优，支持Groth16/PLONK |
-| **高级密码学** | `github.com/drand/kyber` | DEDIS实验室出品，支持ElGamal、阈值加密 |
-| **盲签名** | `github.com/coinbase/kryptology` | Coinbase开源，生产级盲RSA实现（RFC 9474） |
-| **HTTP** | `github.com/gin-gonic/gin` | 性能强，中间件生态成熟 |
-| **ORM** | `gorm.io/gorm` | 支持PostgreSQL/SQLite，迁移方便 |
-| **数据库驱动** | `gorm.io/driver/postgres` + `gorm.io/driver/sqlite` | PostgreSQL生产环境，SQLite3测试/开发环境 |
-| **配置** | `github.com/spf13/viper` | 支持YAML/ENV，热加载 |
-| **日志** | `go.uber.org/zap` | 结构化日志，性能极致 |
-| **测试** | `github.com/stretchr/testify` + `gomock` | 断言、Mock、Suite测试 |
-| **DI** | `github.com/google/wire` | 编译期依赖注入，零运行时开销 |
-| **验证** | `github.com/go-playground/validator/v10` | 结构体验证，标签驱动 |
-
-**绝不自研**：
-- 不自己写ZKP电路算法（用gnark标准库）
-- 不自己写盲签名（用kryptology）
-- 不自己写Merkle树（用gnark标准库merkle包）
-
-## 5. TDD实现流程（红-绿-重构）
-
-### 步骤1：先写接口与测试（红）
-```go
-// internal/domain/repository/vote_repo.go
-package repository
-
-import "context"
-
-type VoteRepository interface {
-    Save(ctx context.Context, vote *entity.Vote) error
-    ExistsByNullifier(ctx context.Context, nullifier string) (bool, error)
-    GetByProposal(ctx context.Context, proposalID string) ([]*entity.Vote, error)
-}
-
-// internal/usecase/voting_test.go（TDD先行）
-package usecase
-
-import (
-    "testing"
-    "github.com/stretchr/testify/assert"
-    "github.com/stretchr/testify/mock"
-)
-
-func TestVotingUseCase_Submit(t *testing.T) {
-    // Arrange
-    mockRepo := new(mock.VoteRepositoryMock)
-    mockVerifier := new(mock.ProofVerifierMock)
-    mockEncrypter := new(mock.EncrypterMock)
-    
-    uc := NewVotingUseCase(mockRepo, mockVerifier, mockEncrypter, zap.NewNop())
-    
-    // 输入数据
-    req := &SubmitVoteRequest{
-        ProposalID:    "prop-001",
-        EncryptedVote: []byte("encrypted"),
-        Proof:         &entity.Proof{Data: []byte("proof")},
-        Nullifier:     "null-123",
-    }
-    
-    // 期望行为（Mock）
-    mockVerifier.On("Verify", req.Proof, mock.Anything).Return(nil)
-    mockRepo.On("ExistsByNullifier", mock.Anything, "null-123").Return(false, nil)
-    mockRepo.On("Save", mock.Anything, mock.AnythingOfType("*entity.Vote")).Return(nil)
-    
-    // Act
-    err := uc.Submit(context.Background(), req)
-    
-    // Assert
-    assert.NoError(t, err)
-    mockRepo.AssertExpectations(t)
-}
-```
-
-### 步骤2：实现业务逻辑（绿）
-```go
-// internal/usecase/voting.go
-package usecase
-
-type VotingUseCase struct {
-    repo      repository.VoteRepository
-    verifier  crypto.ProofVerifier
-    encrypter crypto.Encrypter
-    logger    *zap.Logger
-}
-
-// 构造函数（依赖注入，SOLID的D原则）
-func NewVotingUseCase(
-    repo repository.VoteRepository,
-    verifier crypto.ProofVerifier,
-    encrypter crypto.Encrypter,
-    logger *zap.Logger,
-) *VotingUseCase {
-    return &VotingUseCase{
-        repo:      repo,
-        verifier:  verifier,
-        encrypter: encrypter,
-        logger:    logger,
-    }
-}
-
-func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) error {
-    // 1. 验证ZKP证明（接口抽象，可替换实现）
-    if err := uc.verifier.Verify(req.Proof, req.PublicInputs()); err != nil {
-        return fmt.Errorf("invalid proof: %w", err)
-    }
-    
-    // 2. 检查重复投票（单一职责，S原则）
-    exists, err := uc.repo.ExistsByNullifier(ctx, req.Nullifier)
-    if err != nil {
-        return err
-    }
-    if exists {
-        return ErrDoubleVoting
-    }
-    
-    // 3. 存储（开闭原则，O：以后换存储只需改repo实现）
-    vote := &entity.Vote{
-        ID:        uuid.New().String(),
-        ProposalID: req.ProposalID,
-        Nullifier: req.Nullifier,
-        Cipher:    req.EncryptedVote,
-        CreatedAt: time.Now(),
-    }
-    
-    return uc.repo.Save(ctx, vote)
-}
-```
-
-### 步骤3：基础设施实现（隔离具体技术）
-```go
-// internal/infrastructure/crypto/gnark_prover.go
-package crypto
-
-import (
-    "github.com/consensys/gnark/backend"
-    "github.com/consensys/gnark/backend/groth16"
-    "github.com/consensys/gnark/frontend"
-)
-
-// GnarkProofVerifier 具体实现（符合接口即可替换）
-type GnarkProofVerifier struct {
-    verifyingKey groth16.VerifyingKey
-}
-
-// 构造函数（工厂模式）
-func NewGnarkProofVerifier(vkPath string) (*GnarkProofVerifier, error) {
-    vk := groth16.NewVerifyingKey(ecc.BN254)
-    // 从文件加载vk...
-    return &GnarkProofVerifier{verifyingKey: vk}, nil
-}
-
-// Verify 实现domain接口（Liskov替换，L原则）
-func (v *GnarkProofVerifier) Verify(proof *domain.Proof, inputs domain.PublicInputs) error {
-    // 使用gnark标准库验证，不自研算法（KISS）
-    grothProof := groth16.NewProof(ecc.BN254)
-    // 反序列化...
-    return groth16.Verify(grothProof, v.verifyingKey, inputs.ToAssignment())
-}
-```
-
-## 6. DRY原则落地（通用抽象）
-
-### 通用CRUD基类（避免重复数据库代码）
-```go
-// internal/infrastructure/persistence/base.go
-package persistence
-
-import (
-    "gorm.io/gorm"
-    "context"
-)
-
-// BaseRepository 泛型基类（DRY）
-type BaseRepository[T any] struct {
-    db *gorm.DB
-}
-
-func NewBaseRepository[T any](db *gorm.DB) *BaseRepository[T] {
-    return &BaseRepository[T]{db: db}
-}
-
-func (r *BaseRepository[T]) Create(ctx context.Context, entity *T) error {
-    return r.db.WithContext(ctx).Create(entity).Error
-}
-
-func (r *BaseRepository[T]) GetByID(ctx context.Context, id string) (*T, error) {
-    var entity T
-    err := r.db.WithContext(ctx).First(&entity, "id = ?", id).Error
-    return &entity, err
-}
-
-// VoteRepository 继承基类，只写特有逻辑
-type VoteRepository struct {
-    *BaseRepository[entity.Vote]  // 嵌入（Go的组合代替继承）
-    db *gorm.DB
-}
-
-func (r *VoteRepository) ExistsByNullifier(ctx context.Context, nullifier string) (bool, error) {
-    var count int64
-    err := r.db.WithContext(ctx).Model(&entity.Vote{}).
-        Where("nullifier = ?", nullifier).Count(&count).Error
-    return count > 0, err
-}
-```
-
-### 通用错误处理中间件（DRY）
-```go
-// internal/infrastructure/http/middleware/error_handler.go
-func ErrorHandler(logger *zap.Logger) gin.HandlerFunc {
-    return func(c *gin.Context) {
-        c.Next()
-        
-        if len(c.Errors) > 0 {
-            err := c.Errors.Last().Err
-            logger.Error("request failed", zap.Error(err))
-            
-            // 统一错误格式
-            c.JSON(500, gin.H{
-                "error": err.Error(),
-                "code":  "INTERNAL_ERROR",
-            })
-        }
-    }
-}
-```
-
-## 7. KISS简化策略
-
-**数据库选型原则**：
-- **开发/测试**：SQLite3（零配置，开箱即用）
-- **生产**：PostgreSQL（高性能、ACID、并发安全）
-- **代码层无差异**：GORM抽象所有差异，业务代码无需关心底层数据库
-
-**极简密码学方案**：
-- **无需完整ZKP电路**：使用**zk-SNARKs**证明"我持有盲签名"，而非复杂成员证明
-- **简化加密**：使用ElGamal（kyber实现），无需同态加密，投票结束阈值解密即可
-- **无需区块链**：PostgreSQL + 定期导出的**Merkle树根哈希**（作为审计锚点）足够满足大多数企业场景
-
-**盲签名流程（极简3步）**：
-```go
-// internal/usecase/registration.go
-// 使用kryptology库，不自己实现RSA盲签名（KISS）
-
-func (uc *RegisterUseCase) IssueCredential(ctx context.Context, userID string) (*entity.Credential, error) {
-    // 1. 验证用户身份（调用HR系统SSO，此处省略）
-    
-    // 2. 生成盲化因子（使用kryptology/blindsig）
-    blindedMsg, secretFactor, err := blindsig.Blind(userPubKey)
-    if err != nil {
-        return nil, err
-    }
-    
-    // 3. 管理员签名（使用kryptology的RSA私钥）
-    blindSig, err := uc.issuer.Sign(blindedMsg) // 调用kryptology API
-    
-    // 4. 去盲化（本地完成，管理员无法关联）
-    clearSig, err := blindsig.Unblind(blindSig, secretFactor)
-    
-    return &entity.Credential{
-        UserPubKey: userPubKey,
-        Signature:  clearSig,
-    }, nil
-}
-```
-
-## 8. 依赖注入配置
-
-```go
-// internal/di/wire.go
-//go:build wireinject
-// +build wireinject
-
-package di
-
-import (
-    "github.com/google/wire"
-)
-
-func InitializeServer(cfg *config.Config) (*http.Server, error) {
-    wire.Build(
-        // 基础设施层
-        persistence.NewDB,                    // GORM连接
-        persistence.NewVoteRepository,        // 仓储实现
-        crypto.NewGnarkProofVerifier,         // ZKP验证器
-        crypto.NewKryptologyCredentialIssuer, // 盲签名颁发
-        
-        // 应用层
-        usecase.NewVotingUseCase,
-        usecase.NewRegisterUseCase,
-        
-        // 接口层
-        http.NewHandler,
-        http.NewServer,
-        
-        // 第三方库
-        zap.NewProduction,
-    )
-    return &http.Server{}, nil
-}
-```
-
-**生成命令**：
-```bash
-wire ./internal/di
-```
-
-## 9. 测试策略
-
-### 测试数据库选择
-
-| 测试类型 | 数据库 | 理由 |
-|----------|--------|------|
-| **单元测试** | SQLite3 :memory: | 速度快，无外部依赖 |
-| **集成测试** | testcontainers(PostgreSQL) | 验证真实PG行为 |
-| **E2E测试** | 可配置（默认SQLite） | 简化CI/CD |
-
-### 测试工具函数
-
-```go
-// tests/testutil/db.go
-package testutil
-
-import (
-    "testing"
-    "anonvote/internal/infrastructure/persistence"
-)
-
-// SetupTestDB 为测试创建内存数据库
-func SetupTestDB(t *testing.T) *gorm.DB {
-    cfg := &persistence.DBConfig{
-        Driver:   "sqlite",
-        Database: ":memory:",
-    }
-
-    db, err := persistence.NewDB(cfg)
-    if err != nil {
-        t.Fatalf("failed to create test db: %v", err)
-    }
-
-    // 自动迁移
-    if err := persistence.AutoMigrate(db); err != nil {
-        t.Fatalf("failed to migrate: %v", err)
-    }
-
-    return db
-}
-```
-
-### 目录结构
-
-```
 tests/
-├── unit/                    # 单元测试（80%）
-│   ├── domain/              # 实体业务规则（纯Go，无依赖）
-│   └── usecase/             # 用例层（使用gomock + SQLite内存DB）
-├── integration/             # 集成测试（15%）
-│   ├── crypto_test.go       # 测试gnark电路（真实证明/验证）
-│   └── persistence_test.go  # 测试GORM+PG（testcontainers）
-├── testutil/                # 测试工具
-│   └── db.go                # 数据库测试辅助函数
-└── e2e/                     # 端到端测试（5%）
-    └── api_test.go          # 测试完整投票流程
+├── e2e/
+├── integration/
+└── testutil/
+
+web/                        # Vue 3 前端门户
 ```
 
-**集成测试示例**（使用`testcontainers-go`启动真实PG）：
-```go
-func TestVoteRepository_Postgres(t *testing.T) {
-    ctx := context.Background()
-    req := testcontainers.ContainerRequest{
-        Image:        "postgres:16-alpine",
-        ExposedPorts: []string{"5432/tcp"},
-        Env: map[string]string{
-            "POSTGRES_USER":     "test",
-            "POSTGRES_PASSWORD": "test",
-            "POSTGRES_DB":       "anonvote",
-        },
-        WaitingFor: wait.ForListeningPort("5432/tcp"),
-    }
-    pgC, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-        ContainerRequest: req,
-        Started:          true,
-    })
-    require.NoError(t, err)
-    defer pgC.Terminate(ctx)
-    
-    // 运行实际测试...
-}
-```
+## 2. 架构分层
 
-## 10. 开发Checklist
+- `domain`
+  - 只放实体、仓储接口、密码学接口和领域错误。
+  - 不依赖 HTTP、GORM 或具体密码学库。
+- `usecase`
+  - 编排业务流程，依赖 `domain` 接口。
+  - 当前核心用例：
+    - `ProposalUseCase`
+    - `RegisterUseCase`
+    - `VotingUseCase`
+    - `ParticipationUseCase`
+    - `TallyUseCase`
+- `infrastructure`
+  - `persistence`：GORM 仓储、SQLite/PostgreSQL 连接与迁移。
+  - `http`：Gin 路由、请求校验、中间件、错误映射。
+  - `crypto`：gnark proof verifier、kyber ElGamal/threshold、kryptology credential issuer、Merkle root builder。
+- `di`
+  - 通过 provider 和 Wire 组装依赖。
 
-**开发前必读**：
-- [ ] 所有密码学操作必须使用`kryptology`或`gnark`标准API，禁止自研算法
-- [ ] 所有数据访问必须通过`repository`接口，禁止在handler写SQL（SOLID）
-- [ ] 每个接口必须有Mock实现（使用`mockgen`），确保可测试
-- [ ] 业务逻辑必须先写`xxx_test.go`，覆盖率>80%才能合并（TDD）
-- [ ] 通用逻辑必须抽离到`pkg/`或基类（DRY）
+## 3. 当前业务模型
 
-**代码审查红线**：
-- 出现`import "crypto/rsa"` + 自定义盲签名逻辑 → **驳回**（必须用kryptology）
-- Handler直接调用`db.Create` → **驳回**（必须走repository接口）
-- 超过200行的函数 → **必须拆分**（KISS）
+### 3.1 Proposal
+
+- 关键字段：
+  - `id`
+  - `title`
+  - `description`
+  - `options_json`
+  - `status`
+  - `starts_at`
+  - `ends_at`
+- 说明：
+  - `options` 是正式业务字段，不再是描述里的附带信息。
+  - `ProposalUseCase.Create` 会去重、去空并校验至少两个选项。
+
+### 3.2 Credential
+
+- 凭证按 `proposal_id + user_id` 唯一。
+- 凭证包含：
+  - `user_id`
+  - `user_pub_key`
+  - `signature`
+  - `issuer_key_version`
+  - `issued_at`
+- 当前签发流程由管理员接口触发，并落库到提案内台账。
+
+### 3.3 Vote 与 Participation
+
+- `votes` 表只存匿名选票：
+  - `proposal_id`
+  - `nullifier`
+  - `cipher`
+- `vote_participations` 单独记录是否投过票：
+  - 使用 `hash(user_id)` 记录参与状态
+  - 不直接关联投票内容
+- `VotingUseCase` 会同时检查：
+  - `nullifier` 是否重复
+  - 该用户在该提案下是否已投票
+  - 提交的凭证材料是否与提案内凭证匹配
+
+### 3.4 解密会话、结果与审计锚点
+
+- `decryption_sessions`
+  - 保存门限参数、公钥和份额哈希
+  - 不落库明文 share
+- `tally_results`
+  - 保存 `total_votes`、规范化 `tally_json`、`merkle_root`、`anchor_hash`
+- `audit_anchors`
+  - 单独记录可导出的审计锚点
+
+## 4. 数据库与迁移
+
+### 4.1 环境策略
+
+| 环境 | 数据库 | 说明 |
+|------|--------|------|
+| 开发 | SQLite 文件库 | 默认 `anonvote.db` |
+| 测试 | SQLite 内存库 / PostgreSQL(testcontainers) | 单测快、集成验证真实 PG |
+| 生产 | PostgreSQL | 通过环境变量或配置覆盖 |
+
+### 4.2 配置来源
+
+- `internal/config.Load` 同时读取：
+  - `configs/config.yaml`
+  - 环境变量
+- 数据库优先来自 `internal/infrastructure/persistence/db_env.go`
+- 支持的关键配置：
+  - `server.address`
+  - `server.mode`
+  - `server.cors_allowed_origins`
+  - `server.admin_bearer_token`
+  - `crypto.vk_path`
+  - `crypto.issuer_key_path`
+  - `crypto.issuer_rotate_days`
+  - `db.driver`
+  - `db.path`
+  - `db.host`
+  - `db.port`
+  - `db.name`
+  - `db.user`
+  - `db.password`
+  - `db.sslmode`
+
+### 4.3 运行期校验
+
+- 当 `server.mode` 为 `release/prod/production` 时：
+  - `crypto.vk_path` 必填
+- `server.admin_bearer_token` 若为空，会在启动期自动生成并写回内存配置
+- 自动生成的 token 会通过启动日志打印到控制台，仅对当前进程实例有效
+
+### 4.4 自动迁移
+
+- 服务启动时自动执行 `persistence.AutoMigrate`
+- 当前会迁移这些实体：
+  - `Vote`
+  - `Proposal`
+  - `Credential`
+  - `VoteParticipation`
+  - `DecryptionSession`
+  - `TallyResult`
+  - `AuditAnchor`
+- 同时包含两类兼容迁移：
+  - 历史 `credentials` 表补 `proposal_id`
+  - 历史 `proposals` 表补 `options_json`
+
+## 5. HTTP API
+
+### 5.1 公共接口
+
+- `GET /healthz`
+- `GET /api/v1/proposals/open`
+- `POST /api/v1/votes`
+- `POST /api/v1/proposals/:proposal_id/vote-status`
+- `POST /api/v1/proposals/:proposal_id/ballot-draft`
+- `GET /api/v1/proposals/:proposal_id/results`
+- `GET /api/v1/proposals/:proposal_id/audit-anchors`
+
+### 5.2 管理接口
+
+以下接口统一走 Bearer Token 鉴权中间件：
+
+- `POST /api/v1/credentials`
+- `POST /api/v1/proposals`
+- `GET /api/v1/proposals/:proposal_id/credentials`
+- `POST /api/v1/proposals/:proposal_id/decryption/setup`
+- `POST /api/v1/proposals/:proposal_id/results/publish`
+
+### 5.3 关键约束
+
+- `POST /api/v1/votes`
+  - 要求 `proposal_id`、`encrypted_vote`、`proof`、`nullifier`
+  - 若提交了 `user_id`，则必须同时提交 `user_pub_key` 和 `credential_signature`
+  - 当前服务端会校验 proof、密文格式、凭证归属、防重投
+- `POST /api/v1/proposals/:proposal_id/vote-status`
+  - 必须带当前凭证材料，不接受裸 `user_id` 枚举
+- `POST /api/v1/proposals/:proposal_id/decryption/setup`
+  - 当前实现拒绝“投票开放中”的提案
+  - 实际运营应在投票开始前完成初始化
+- `POST /api/v1/proposals/:proposal_id/results/publish`
+  - 仅允许在提案关闭后执行
+  - share 会先校验是否属于当前 session
+
+## 6. 密码学实现边界
+
+- proof 验证：`gnark`
+- 凭证签发：`kryptology`
+- 选票加解密与门限恢复：`kyber` 封装
+- 审计根：Merkle root builder
+
+当前实现边界如下：
+
+- 后端负责验证 proof，不负责替用户端生成真实 proof。
+- `ballot-draft` 只用于开发联调，返回的是便于串流程的草稿数据。
+- 真实生产部署仍应由客户端自行生成密文和证明。
+
+## 7. 前端与 CLI
+
+### 7.1 前端门户
+
+- 单页 Vue 3 应用
+- 包含两个工作区：
+  - 用户端
+  - 运营端
+- 用户端能力：
+  - 查看开放提案
+  - 领取或导入凭证
+  - 按选项生成投票草稿
+  - 提交投票
+  - 查询是否已投票
+- 运营端能力：
+  - 创建提案
+  - 初始化解密会话
+  - 发布结果
+  - 查询结果
+  - 查看凭证状态
+  - 查看审计锚点
+
+### 7.2 CLI
+
+- CLI 直接复用 HTTP API，不绕过服务端校验。
+- 当前命令：
+  - `health`
+  - `proposals-open`
+  - `proposal-create`
+  - `credential-issue`
+  - `credential-show`
+  - `ballot-draft`
+  - `vote-submit`
+  - `vote-status`
+  - `credentials-list`
+  - `decrypt-setup`
+  - `result-publish`
+  - `result-get`
+  - `anchors-list`
+
+## 8. 测试策略
+
+- 后端统一使用 `go test ./...`
+- 当前覆盖：
+  - `usecase` 单元测试
+  - `persistence` 仓储测试
+  - `http` / middleware 测试
+  - `config` / `di` 测试
+  - `tests/integration` 集成测试
+  - `tests/e2e` 端到端流程测试
+- PostgreSQL 集成测试使用 `testcontainers`
+- 前端最小校验是：
+  - `pnpm --dir web exec tsc --noEmit`
+
+## 9. 当前已知限制
+
+- `ballot-draft` 仍是开发联调接口，不应被写成生产能力。
+- 解密会话的初始化时机是当前系统最容易被文档写错的点：
+  - 服务端禁止在投票开放中 setup
+  - 实际业务上应在开始前准备好 session
+- 前端仍保留对历史 JSON 描述字段的兼容解析，仅用于读取旧数据；新写路径已统一为纯文本 `description` + 独立 `options`。

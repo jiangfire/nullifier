@@ -99,7 +99,15 @@ func (uc *TallyUseCase) SetupThresholdSession(
 		return nil, fmt.Errorf("load proposal: %w", err)
 	}
 	if isProposalOpenForVoting(proposal, time.Now().UTC()) {
-		return nil, fmt.Errorf("%w: proposal decryption must be prepared before voting opens", ErrInvalidRequest)
+		return nil, fmt.Errorf(
+			"%w: proposal decryption must be prepared before voting opens (proposal_id=%s status=%s now=%s starts_at=%s ends_at=%s)",
+			ErrInvalidRequest,
+			proposalID,
+			strings.TrimSpace(proposal.Status),
+			time.Now().UTC().Format(time.RFC3339),
+			proposal.StartsAt.UTC().Format(time.RFC3339),
+			proposal.EndsAt.UTC().Format(time.RFC3339),
+		)
 	}
 
 	privateKey, publicKey, err := uc.crypto.GenerateKeyPair()

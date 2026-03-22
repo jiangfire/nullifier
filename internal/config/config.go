@@ -90,9 +90,6 @@ func Load() (*Config, error) {
 	if requiresVerifyingKey(cfg.GinMode) && strings.TrimSpace(cfg.VerifyingKeyPath) == "" {
 		return nil, fmt.Errorf("crypto.vk_path is required when server.mode=%q", cfg.GinMode)
 	}
-	if requiresVerifyingKey(cfg.GinMode) && cfg.AdminBearerToken == "" {
-		return nil, fmt.Errorf("server.admin_bearer_token is required when server.mode=%q", cfg.GinMode)
-	}
 
 	return cfg, nil
 }
