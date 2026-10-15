@@ -36,6 +36,12 @@
 8. 低：覆盖率门槛在 `main` 上本来就是红的（77.7% < 80%），CI 的 coverage gate 实际处于失败状态
    - 补齐了零覆盖的核心路径：`ParticipationUseCase.HasVotedWithCredential`、`GET /proposals/:id/credentials`、`Recovery`。
    - 现在总覆盖率为 81.4%，门槛重新变绿（余量不大，见"仍需注意"）。
+9. 低：换行符混乱导致格式化工具大面积误报
+   - 根因是全局 `core.autocrlf=true` 而仓库没有 `.gitattributes`：检出后 65 个文件是 CRLF、61 个 LF、5 个混合，`gofmt -l` 报 42 个文件、`prettier --check` 报 8 个文件，全是换行符误报。
+   - 仓库里的 blob 本来就是 LF，所以补 `.gitattributes`（`* text=auto eol=lf`）并把工作区换成 LF，不产生任何内容 diff。
+10. 低：上述换行符修好后暴露出的真实格式漂移，已用 `gofmt -w` / `prettier --write` 收掉 9 个文件
+    - Go 5 个：`tally_result.go`、`handler.go`、`participation.go`、`registration.go` 的字段对齐，以及 `server_test.go` 里既有测试代码的缩进（`git diff -w` 为空，纯空白）。
+    - web 4 个：`index.css`、`lib/api.ts`、`lib/datetime.test.ts` 的折行，以及无人引用的 `AppShell.vue` 末尾空行。
 
 ## 当前可用能力
 
@@ -140,11 +146,11 @@
   - `go test ./...` 通过（Windows 下需 `CGO_ENABLED=1`，`gorm.io/driver/sqlite` 依赖 cgo）
   - `./scripts/check-coverage.ps1` 通过：81.4% >= 80%（基线 77.7% 失败）
   - `pnpm --dir web exec tsc --noEmit` 通过
-  - `pnpm --dir web exec prettier --check src/App.vue src/composables/useVotePortal.ts` 通过
+  - `gofmt -l ./cmd ./internal ./tests` 无输出；`pnpm --dir web exec prettier --check src` 通过
   - `rsbuild build` 通过
   - `pnpm --dir web run lint` **失败**：`App.vue` 里 `workflowHeadline` 是历史遗留的未使用变量，属于本轮刻意未动的无关代码，见"仍需注意"
-  - `vitest` 未能在本次环境运行（esbuild 子进程 `spawn EPERM`，属于沙箱限制）；受影响的测试只覆盖 `lib/datetime`、`lib/navigation`，本轮未改动这两个模块
-  - 新增回归测试：keystream 长明文、Proposal JSON 单 `options`、重复 setup/publish 冲突、重复 share、投票凭证材料必填、管理令牌边界
+  - `vitest` 未能在本次环境运行（esbuild 子进程 `spawn EPERM`，属于沙箱限制）；受影响的测试只覆盖 `lib/datetime`、`lib/navigation`
+  - 新增回归测试：keystream 长明文、Proposal JSON 单 `options`、重复 setup/publish 冲突、重复 share、投票凭证材料必填、panic 恢复、凭证状态接口
 - 上一轮（2026-03-18）：
   - `go test ./...` 通过
   - `pnpm --dir web exec tsc --noEmit` 通过
@@ -160,5 +166,5 @@
   - `GET /api/v1/proposals/open` 只返回窗口内的提案，没有“列出全部提案”的接口，管理端只能靠手工填/留存 `proposal_id`。
   - `web/src/components/layout/AppShell.vue` 没有任何引用，是死代码。
   - `web/src/App.vue` 的 `workflowHeadline` 是未使用变量，`pnpm run lint` 因此长期失败；本轮按“无关死代码只提不删”的约定没有动它。
-  - 工作区没有 `.gitattributes`，而全局 `core.autocrlf=true`：部分文件是 CRLF 检出，导致 `gofmt -l` 与 `prettier --check` 在 Windows 上大面积误报。注意仓库里的 blob 本身是 LF，所以这纯粹是检出产物，修正方式是补 `.gitattributes` 并把工作区换成 LF，不会产生内容 diff。
+  - `web/.prettierignore` 只忽略了锁文件：在 `web/` 下执行 `pnpm run format`（`prettier --write .`）会去重写 `web/.pnpm-store/` 里 247 个本地包索引 JSON。加上 `node_modules`（prettier 默认已忽略）和 `.pnpm-store/` 即可。
   - 覆盖率余量只有 1.4 个百分点（81.4% / 80%），后续新增代码要注意补测，否则门槛会再次变红。
