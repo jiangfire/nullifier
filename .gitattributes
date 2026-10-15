@@ -1,0 +1,8 @@
+# Normalize line endings: LF in the repository and LF in the working tree.
+# Without this, a Windows checkout with core.autocrlf=true produces a mix of
+# CRLF and LF files, and `gofmt -l` / `prettier --check` then report failures
+# that are purely about line endings.
+* text=auto eol=lf
+
+# The only binary asset in the repository; keep it byte-for-byte.
+*.png binary
