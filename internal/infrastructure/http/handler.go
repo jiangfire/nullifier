@@ -194,11 +194,11 @@ func (h *Handler) IssueCredential(c *gin.Context) {
 }
 
 type createProposalPayload struct {
-	Title       string `json:"title" validate:"required"`
-	Description string `json:"description"`
+	Title       string   `json:"title" validate:"required"`
+	Description string   `json:"description"`
 	Options     []string `json:"options" validate:"required,min=2,dive,required"`
-	StartsAt    string `json:"starts_at" validate:"required"`
-	EndsAt      string `json:"ends_at" validate:"required"`
+	StartsAt    string   `json:"starts_at" validate:"required"`
+	EndsAt      string   `json:"ends_at" validate:"required"`
 }
 
 func (h *Handler) CreateProposal(c *gin.Context) {
@@ -550,13 +550,13 @@ func (h *Handler) ListProposalCredentialStatuses(c *gin.Context) {
 	out := make([]gin.H, 0, len(items))
 	for _, item := range items {
 		out = append(out, gin.H{
-			"credential_id":       item.CredentialID,
-			"proposal_id":         item.ProposalID,
-			"user_id":             item.UserID,
-			"user_pub_key":        base64.StdEncoding.EncodeToString(item.UserPubKey),
-			"issuer_key_version":  item.IssuerKeyVersion,
-			"issued_at":           item.IssuedAt.Format(time.RFC3339),
-			"has_voted":           item.HasVoted,
+			"credential_id":      item.CredentialID,
+			"proposal_id":        item.ProposalID,
+			"user_id":            item.UserID,
+			"user_pub_key":       base64.StdEncoding.EncodeToString(item.UserPubKey),
+			"issuer_key_version": item.IssuerKeyVersion,
+			"issued_at":          item.IssuedAt.Format(time.RFC3339),
+			"has_voted":          item.HasVoted,
 		})
 	}
 

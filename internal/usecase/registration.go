@@ -15,10 +15,10 @@ import (
 )
 
 type RegisterUseCase struct {
-	repo        repository.CredentialRepository
+	repo         repository.CredentialRepository
 	proposalRepo repository.ProposalRepository
-	issuer      domaincrypto.CredentialIssuer
-	logger      *zap.Logger
+	issuer       domaincrypto.CredentialIssuer
+	logger       *zap.Logger
 }
 
 func NewRegisterUseCase(
@@ -31,10 +31,10 @@ func NewRegisterUseCase(
 		logger = zap.NewNop()
 	}
 	return &RegisterUseCase{
-		repo:        repo,
+		repo:         repo,
 		proposalRepo: proposalRepo,
-		issuer:      issuer,
-		logger:      logger,
+		issuer:       issuer,
+		logger:       logger,
 	}
 }
 

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { localInputToRfc3339, rfc3339ToLocalInput, toLocalDateTimeInput } from './datetime';
+import {
+  localInputToRfc3339,
+  rfc3339ToLocalInput,
+  toLocalDateTimeInput,
+} from './datetime';
 
 describe('datetime utilities', () => {
   it('formats Date to datetime-local string', () => {

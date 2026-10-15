@@ -202,9 +202,9 @@ func TestHandler_InvalidPayload(t *testing.T) {
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
 		req := jsonRequest(t, tc.method, tc.path, tc.body)
-			if tc.path == "/api/v1/credentials" || tc.path == "/api/v1/proposals" || tc.path == "/api/v1/proposals/p1/decryption/setup" || tc.path == "/api/v1/proposals/p1/results/publish" {
-				req.Header.Set("Authorization", "Bearer secret")
-			}
+		if tc.path == "/api/v1/credentials" || tc.path == "/api/v1/proposals" || tc.path == "/api/v1/proposals/p1/decryption/setup" || tc.path == "/api/v1/proposals/p1/results/publish" {
+			req.Header.Set("Authorization", "Bearer secret")
+		}
 		engine.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	}
@@ -231,19 +231,19 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 		raw    string
 	}{
 		{method: http.MethodPost, path: "/api/v1/votes", raw: "{"},
-			{method: http.MethodPost, path: "/api/v1/credentials", raw: "{"},
-			{method: http.MethodPost, path: "/api/v1/proposals", raw: "{"},
-			{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", raw: "{"},
-			{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", raw: "{"},
+		{method: http.MethodPost, path: "/api/v1/credentials", raw: "{"},
+		{method: http.MethodPost, path: "/api/v1/proposals", raw: "{"},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", raw: "{"},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/decryption/setup", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/results/publish", raw: "{"},
 	}
 	for _, tc := range malformedCases {
 		rec := httptest.NewRecorder()
 		req := rawRequest(tc.method, tc.path, tc.raw)
-			if tc.path == "/api/v1/credentials" || tc.path == "/api/v1/proposals" || tc.path == "/api/v1/proposals/p1/decryption/setup" || tc.path == "/api/v1/proposals/p1/results/publish" {
-				req.Header.Set("Authorization", "Bearer secret")
-			}
+		if tc.path == "/api/v1/credentials" || tc.path == "/api/v1/proposals" || tc.path == "/api/v1/proposals/p1/decryption/setup" || tc.path == "/api/v1/proposals/p1/results/publish" {
+			req.Header.Set("Authorization", "Bearer secret")
+		}
 		engine.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	}
@@ -292,32 +292,32 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 				"credential_signature": "%%%invalid-base64%%%",
 			},
 		},
-			{
-				method: http.MethodPost,
-				path:   "/api/v1/proposals",
-				body: map[string]any{
-					"title":     "x",
-					"options":   []string{"A", "B"},
-					"starts_at": time.Now().UTC().Format(time.RFC3339),
-					"ends_at":   "bad-time",
-				},
+		{
+			method: http.MethodPost,
+			path:   "/api/v1/proposals",
+			body: map[string]any{
+				"title":     "x",
+				"options":   []string{"A", "B"},
+				"starts_at": time.Now().UTC().Format(time.RFC3339),
+				"ends_at":   "bad-time",
 			},
-			{
-				method: http.MethodPost,
-				path:   "/api/v1/proposals/p1/vote-status",
-				body: map[string]any{
-					"user_id":              "u1",
-					"user_pub_key":         "%%%invalid-base64%%%",
-					"credential_signature": base64.StdEncoding.EncodeToString([]byte("sig")),
-				},
+		},
+		{
+			method: http.MethodPost,
+			path:   "/api/v1/proposals/p1/vote-status",
+			body: map[string]any{
+				"user_id":              "u1",
+				"user_pub_key":         "%%%invalid-base64%%%",
+				"credential_signature": base64.StdEncoding.EncodeToString([]byte("sig")),
 			},
+		},
+	}
+	for _, tc := range invalidDecodeCases {
+		rec := httptest.NewRecorder()
+		req := jsonRequest(t, tc.method, tc.path, tc.body)
+		if tc.path == "/api/v1/proposals" {
+			req.Header.Set("Authorization", "Bearer secret")
 		}
-		for _, tc := range invalidDecodeCases {
-			rec := httptest.NewRecorder()
-			req := jsonRequest(t, tc.method, tc.path, tc.body)
-			if tc.path == "/api/v1/proposals" {
-				req.Header.Set("Authorization", "Bearer secret")
-			}
 		engine.ServeHTTP(rec, req)
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 	}
@@ -358,7 +358,7 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	defer ts.Close()
 
 	credentialReq := map[string]any{
-		"proposal_id": "",
+		"proposal_id":  "",
 		"user_id":      "u-1",
 		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key")),
 	}

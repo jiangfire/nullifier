@@ -35,10 +35,15 @@ function normalizePath(path: string): string {
   return `/${path}`;
 }
 
-function buildUrl(baseUrl: string, path: string, query?: Record<string, QueryValue>): string {
+function buildUrl(
+  baseUrl: string,
+  path: string,
+  query?: Record<string, QueryValue>,
+): string {
   const normalizedBase = normalizeBaseUrl(baseUrl);
   const normalizedPath = normalizePath(path);
-  const effectiveBase = normalizedBase.length > 0 ? normalizedBase : window.location.origin;
+  const effectiveBase =
+    normalizedBase.length > 0 ? normalizedBase : window.location.origin;
   const url = new URL(`${effectiveBase}${normalizedPath}`);
 
   if (query) {
@@ -56,18 +61,34 @@ function buildUrl(baseUrl: string, path: string, query?: Record<string, QueryVal
 function extractError(payload: unknown, status: number): string {
   if (typeof payload === 'object' && payload !== null) {
     const candidate = payload as Record<string, unknown>;
-    if (typeof candidate.error === 'string' && candidate.error.trim().length > 0) {
+    if (
+      typeof candidate.error === 'string' &&
+      candidate.error.trim().length > 0
+    ) {
       return candidate.error;
     }
-    if (typeof candidate.message === 'string' && candidate.message.trim().length > 0) {
+    if (
+      typeof candidate.message === 'string' &&
+      candidate.message.trim().length > 0
+    ) {
       return candidate.message;
     }
   }
   return `请求失败（HTTP ${status}）`;
 }
 
-export async function apiCall<T = unknown>(options: ApiCallOptions): Promise<ApiCallResult<T>> {
-  const { baseUrl, path, method = 'GET', query, body, headers: extraHeaders, signal } = options;
+export async function apiCall<T = unknown>(
+  options: ApiCallOptions,
+): Promise<ApiCallResult<T>> {
+  const {
+    baseUrl,
+    path,
+    method = 'GET',
+    query,
+    body,
+    headers: extraHeaders,
+    signal,
+  } = options;
   const url = buildUrl(baseUrl, path, query);
 
   const headers = new Headers();

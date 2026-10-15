@@ -19,13 +19,13 @@ type ParticipationUseCase struct {
 }
 
 type CredentialVoteStatus struct {
-	CredentialID      string    `json:"credential_id"`
-	ProposalID        string    `json:"proposal_id"`
-	UserID            string    `json:"user_id"`
-	UserPubKey        []byte    `json:"user_pub_key"`
-	IssuerKeyVersion  int       `json:"issuer_key_version"`
-	IssuedAt          time.Time `json:"issued_at"`
-	HasVoted          bool      `json:"has_voted"`
+	CredentialID     string    `json:"credential_id"`
+	ProposalID       string    `json:"proposal_id"`
+	UserID           string    `json:"user_id"`
+	UserPubKey       []byte    `json:"user_pub_key"`
+	IssuerKeyVersion int       `json:"issuer_key_version"`
+	IssuedAt         time.Time `json:"issued_at"`
+	HasVoted         bool      `json:"has_voted"`
 }
 
 func NewParticipationUseCase(

@@ -24,4 +24,3 @@ defineProps<{
     </main>
   </div>
 </template>
-
