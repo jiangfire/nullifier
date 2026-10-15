@@ -56,7 +56,7 @@ CRYPTO_VK_PATH=./keys/verifying.key
 - `POST /api/v1/credentials`：管理员签发匿名凭证（RFC9474 RSA blind signature）
 - `POST /api/v1/proposals`：创建提案
 - `GET /api/v1/proposals/open`：查询开放提案
-- `POST /api/v1/votes`：提交匿名投票（含 `user_id + user_pub_key + credential_signature`，服务端校验防冒充）
+- `POST /api/v1/votes`：提交匿名投票（`user_id` + `user_pub_key` + `credential_signature` 均为必填，服务端校验防冒充）
 - `POST /api/v1/proposals/:proposal_id/vote-status`：持凭证材料查询该用户是否已投票
 - `GET /api/v1/proposals/:proposal_id/credentials`：管理员查询该提案下所有凭证及 `has_voted`
 - `POST /api/v1/proposals/:proposal_id/ballot-draft`：按选项生成投票草稿（开发联调）
@@ -73,6 +73,7 @@ CRYPTO_VK_PATH=./keys/verifying.key
 - 提案创建时必须显式提供 `options`，后端会把它作为正式计票口径保存并在草稿生成/计票时校验。
 - 管理面接口（凭证签发、创建提案、凭证状态、解密 setup、发布结果）都需要 `Authorization: Bearer <admin token>`。
 - `decryption/setup` 会拒绝“投票开放中”的提案；实际联调和运营应在 `starts_at` 之前完成初始化。
+- 同一提案重复执行 `decryption/setup` 或 `results/publish` 会返回 `409`，不会覆盖已有会话或重复发布结果。
 - 开发模式内置 CORS（支持 `http://localhost:3000` 本地前端跨域访问）。
 - `ballot-draft` 用于开发联调；生产模式应使用真实钱包/客户端生成 proof 与密文。
 

@@ -89,6 +89,53 @@ func TestTallyUseCase_SetupAndPublishResult(t *testing.T) {
 	assert.Equal(t, result.TotalVotes, stored.TotalVotes)
 }
 
+func TestTallyUseCase_RejectsRepeatedSetupAndPublish(t *testing.T) {
+	proposalRepo := new(inMemoryProposalRepo)
+	proposalRepo.items = map[string]*entity.Proposal{}
+	sessionRepo := new(inMemoryDecryptionSessionRepo)
+	resultRepo := new(inMemoryTallyResultRepo)
+	anchorRepo := new(inMemoryAuditAnchorRepo)
+
+	proposal := &entity.Proposal{
+		ID:        "proposal-1",
+		Options:   []string{"candidate-A", "candidate-B"},
+		Status:    "closed",
+		StartsAt:  time.Now().UTC().Add(-2 * time.Hour),
+		EndsAt:    time.Now().UTC().Add(-1 * time.Hour),
+		CreatedAt: time.Now().UTC().Add(-3 * time.Hour),
+	}
+	proposalRepo.items[proposal.ID] = proposal
+
+	uc := NewTallyUseCase(
+		new(inMemoryVoteRepo),
+		proposalRepo,
+		sessionRepo,
+		resultRepo,
+		anchorRepo,
+		new(fakeThresholdCrypto),
+		new(fakeMerkleBuilder),
+		zap.NewNop(),
+	)
+	ctx := context.Background()
+
+	setup, err := uc.SetupThresholdSession(ctx, proposal.ID, 2, 3)
+	require.NoError(t, err)
+
+	_, err = uc.SetupThresholdSession(ctx, proposal.ID, 2, 3)
+	require.ErrorIs(t, err, ErrSessionAlreadyExists)
+	stored, err := sessionRepo.GetByProposal(ctx, proposal.ID)
+	require.NoError(t, err)
+	require.Len(t, parseSharesForTest(t, stored.SharesJSON), 3)
+
+	_, err = uc.PublishResult(ctx, proposal.ID, setup.Shares[:2])
+	require.NoError(t, err)
+	require.Len(t, anchorRepo.items[proposal.ID], 1)
+
+	_, err = uc.PublishResult(ctx, proposal.ID, setup.Shares[:2])
+	require.ErrorIs(t, err, ErrResultAlreadyPublished)
+	require.Len(t, anchorRepo.items[proposal.ID], 1)
+}
+
 func TestTallyUseCase_PublishResult_RejectsInsufficientShares(t *testing.T) {
 	voteRepo := new(inMemoryVoteRepo)
 	proposalRepo := new(inMemoryProposalRepo)
@@ -290,6 +337,10 @@ func TestTallyUseCase_PublishResult_InvalidShareFormat(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = uc.PublishResult(context.Background(), "proposal-1", []string{"not-base64", setup.Shares[1]})
+	require.ErrorIs(t, err, ErrInvalidRequest)
+
+	// One share repeated twice must be rejected instead of surfacing as a 500.
+	_, err = uc.PublishResult(context.Background(), "proposal-1", []string{setup.Shares[0], setup.Shares[0]})
 	require.ErrorIs(t, err, ErrInvalidRequest)
 }
 

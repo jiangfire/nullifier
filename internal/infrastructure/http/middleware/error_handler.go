@@ -50,6 +50,10 @@ func mapError(err error) (int, string) {
 		return http.StatusConflict, "USER_ALREADY_VOTED"
 	case errors.Is(err, usecase.ErrInvalidCredential):
 		return http.StatusUnauthorized, "INVALID_CREDENTIAL"
+	case errors.Is(err, usecase.ErrSessionAlreadyExists):
+		return http.StatusConflict, "DECRYPTION_SESSION_EXISTS"
+	case errors.Is(err, usecase.ErrResultAlreadyPublished):
+		return http.StatusConflict, "RESULT_ALREADY_PUBLISHED"
 	case errors.Is(err, usecase.ErrUnauthorized):
 		return http.StatusUnauthorized, "UNAUTHORIZED"
 	case errors.Is(err, repository.ErrNotFound):
@@ -71,6 +75,10 @@ func publicErrorMessage(err error, code string) string {
 		return "user already voted"
 	case "INVALID_CREDENTIAL":
 		return "invalid credential"
+	case "DECRYPTION_SESSION_EXISTS":
+		return "decryption session already exists"
+	case "RESULT_ALREADY_PUBLISHED":
+		return "tally result already published"
 	case "UNAUTHORIZED":
 		return "unauthorized"
 	case "NOT_FOUND":

@@ -94,7 +94,15 @@ function textOf(object: JsonMap | null, key: string): string {
     return '';
   }
   const value = object[key];
-  return typeof value === 'string' ? value : '';
+  if (typeof value === 'string') {
+    return value;
+  }
+  // The API returns some display fields (for example issuer_key_version) as
+  // numbers; render them as text instead of dropping them.
+  if (typeof value === 'number') {
+    return String(value);
+  }
+  return '';
 }
 
 function boolOf(object: JsonMap | null, key: string): boolean | null {
@@ -235,6 +243,7 @@ export function useVotePortal() {
   const useCustomPubKey = ref(false);
   const generatedPubKey = ref(randomBase64(32));
   const wallet = reactive({
+    proposalId: '',
     userId: '',
     userPubKey: '',
     signature: '',
@@ -327,6 +336,16 @@ export function useVotePortal() {
       wallet.userPubKey !== '' &&
       wallet.signature !== '',
   );
+  // Credentials are issued per proposal; a credential imported or issued for
+  // another proposal cannot be used here.
+  const walletMatchesProposal = computed(() => {
+    const credentialProposal = wallet.proposalId.trim();
+    const target = voteForm.proposalId.trim();
+    if (credentialProposal === '' || target === '') {
+      return true;
+    }
+    return credentialProposal === target;
+  });
   const adminTokenReady = computed(() => adminBearerToken.value.trim() !== '');
   const selectedProposal = computed(() => {
     const byVoteForm = voteForm.proposalId.trim();
@@ -526,7 +545,7 @@ export function useVotePortal() {
     }
     const payload = {
       version: 1,
-      proposal_id: voteForm.proposalId.trim(),
+      proposal_id: wallet.proposalId.trim() || voteForm.proposalId.trim(),
       user_id: wallet.userId,
       user_pub_key: wallet.userPubKey,
       signature: wallet.signature,
@@ -573,6 +592,8 @@ export function useVotePortal() {
         addNotice('error', '导入失败', '凭证文件缺少必要字段');
         return;
       }
+      const proposalID = textOf(parsed, 'proposal_id').trim();
+      wallet.proposalId = proposalID;
       wallet.userId = userID;
       wallet.userPubKey = userPubKey;
       wallet.signature = signature;
@@ -580,7 +601,16 @@ export function useVotePortal() {
       wallet.issuedAt = textOf(parsed, 'issued_at');
       identityForm.userId = userID;
       hasVoted.value = null;
-      addNotice('success', '导入成功', `已导入凭证：${userID}`);
+      if (proposalID !== '') {
+        adoptProposal(proposalID);
+      }
+      addNotice(
+        'success',
+        '导入成功',
+        proposalID === ''
+          ? `已导入凭证：${userID}`
+          : `已导入凭证：${userID}（提案 ${proposalID}）`,
+      );
     } catch {
       addNotice('error', '导入失败', '文件内容不是合法 JSON');
     } finally {
@@ -870,6 +900,8 @@ export function useVotePortal() {
       return false;
     }
     const payload = toObject(result.data);
+    wallet.proposalId =
+      textOf(payload, 'proposal_id') || voteForm.proposalId.trim();
     wallet.userId = textOf(payload, 'user_id') || identityForm.userId.trim();
     wallet.userPubKey = textOf(payload, 'user_pub_key');
     wallet.signature = textOf(payload, 'signature');
@@ -888,6 +920,11 @@ export function useVotePortal() {
     }
     if (voteForm.proposalId.trim() === '') {
       voteErrors.proposalId = '请选择 proposal_id';
+      addNotice('error', '提交失败', voteErrors.proposalId);
+      return false;
+    }
+    if (!walletMatchesProposal.value) {
+      voteErrors.proposalId = `当前凭证属于提案 ${wallet.proposalId}，不能用于 ${voteForm.proposalId.trim()}`;
       addNotice('error', '提交失败', voteErrors.proposalId);
       return false;
     }

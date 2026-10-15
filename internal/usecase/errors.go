@@ -9,4 +9,6 @@ var (
 	ErrUserAlreadyVoted        = errors.New("user already voted")
 	ErrInvalidCredential       = errors.New("invalid credential")
 	ErrUnauthorized            = errors.New("unauthorized")
+	ErrSessionAlreadyExists    = errors.New("decryption session already exists")
+	ErrResultAlreadyPublished  = errors.New("tally result already published")
 )

@@ -28,14 +28,29 @@ func TestSubmitVoteRequest_Validate(t *testing.T) {
 	req = &SubmitVoteRequest{}
 	require.ErrorIs(t, req.Validate(), ErrInvalidRequest)
 
-	req = &SubmitVoteRequest{
-		ProposalID:    "p1",
-		Nullifier:     "n1",
-		EncryptedVote: []byte("cipher"),
-		Proof:         &entity.Proof{Data: []byte("proof")},
-		UserID:        "u1",
+	valid := SubmitVoteRequest{
+		ProposalID:          "p1",
+		Nullifier:           "n1",
+		EncryptedVote:       []byte("cipher"),
+		Proof:               &entity.Proof{Data: []byte("proof")},
+		UserID:              "u1",
+		UserPubKey:          []byte("pub"),
+		CredentialSignature: []byte("sig"),
 	}
-	require.ErrorIs(t, req.Validate(), ErrInvalidRequest)
+	require.NoError(t, valid.Validate())
+
+	// The credential material is mandatory: a vote cannot be cast anonymously.
+	missingUserID := valid
+	missingUserID.UserID = ""
+	require.ErrorIs(t, missingUserID.Validate(), ErrInvalidRequest)
+
+	missingPubKey := valid
+	missingPubKey.UserPubKey = nil
+	require.ErrorIs(t, missingPubKey.Validate(), ErrInvalidRequest)
+
+	missingSignature := valid
+	missingSignature.CredentialSignature = nil
+	require.ErrorIs(t, missingSignature.Validate(), ErrInvalidRequest)
 }
 
 func TestCreateProposalRequest_Validate(t *testing.T) {

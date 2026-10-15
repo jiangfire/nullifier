@@ -90,6 +90,7 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/proposals", body: map[string]any{}},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/decryption/setup", body: map[string]any{}},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/results/publish", body: map[string]any{}},
+		{method: http.MethodGet, path: "/api/v1/proposals/p1/credentials"},
 	} {
 		rec := httptest.NewRecorder()
 		req := jsonRequest(t, tc.method, tc.path, tc.body)
@@ -387,6 +388,11 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credentialResp))
 	_ = resp.Body.Close()
 
+	statuses := doGetProposalCredentialStatuses(t, ts.URL, proposalResp.ID)
+	require.Len(t, statuses, 1)
+	require.Equal(t, "u-1", statuses[0].UserID)
+	require.False(t, statuses[0].HasVoted)
+
 	setupReq := map[string]any{
 		"threshold": 2,
 		"trustees":  3,
@@ -444,6 +450,10 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	_ = resp.Body.Close()
 
+	statuses = doGetProposalCredentialStatuses(t, ts.URL, proposalResp.ID)
+	require.Len(t, statuses, 1)
+	require.True(t, statuses[0].HasVoted)
+
 	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/vote-status", map[string]any{
 		"user_id":              "u-1",
 		"user_pub_key":         credentialResp.UserPubKey,
@@ -480,6 +490,39 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_ = resp.Body.Close()
+}
+
+type proposalCredentialStatus struct {
+	CredentialID string `json:"credential_id"`
+	UserID       string `json:"user_id"`
+	HasVoted     bool   `json:"has_voted"`
+}
+
+func doGetProposalCredentialStatuses(
+	t *testing.T,
+	baseURL string,
+	proposalID string,
+) []proposalCredentialStatus {
+	t.Helper()
+
+	req, err := http.NewRequest(
+		http.MethodGet,
+		baseURL+"/api/v1/proposals/"+proposalID+"/credentials",
+		nil,
+	)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer secret")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var body struct {
+		Items []proposalCredentialStatus `json:"items"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	return body.Items
 }
 
 func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.KyberElGamal, *gorm.DB) {

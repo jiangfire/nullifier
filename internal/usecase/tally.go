@@ -110,6 +110,12 @@ func (uc *TallyUseCase) SetupThresholdSession(
 		)
 	}
 
+	if _, err := uc.sessionRepo.GetByProposal(ctx, proposalID); err == nil {
+		return nil, fmt.Errorf("%w: proposal %s", ErrSessionAlreadyExists, proposalID)
+	} else if !errors.Is(err, repository.ErrNotFound) {
+		return nil, fmt.Errorf("check existing decryption session: %w", err)
+	}
+
 	privateKey, publicKey, err := uc.crypto.GenerateKeyPair()
 	if err != nil {
 		return nil, fmt.Errorf("generate decryption key pair: %w", err)
@@ -179,6 +185,11 @@ func (uc *TallyUseCase) PublishResult(
 	}
 	if !isProposalClosed(proposal, time.Now().UTC()) {
 		return nil, fmt.Errorf("%w: proposal must be closed before tally", ErrInvalidRequest)
+	}
+	if _, err := uc.resultRepo.GetByProposal(ctx, proposalID); err == nil {
+		return nil, fmt.Errorf("%w: proposal %s", ErrResultAlreadyPublished, proposalID)
+	} else if !errors.Is(err, repository.ErrNotFound) {
+		return nil, fmt.Errorf("check existing tally result: %w", err)
 	}
 	if len(providedShares) < session.Threshold {
 		return nil, fmt.Errorf("%w: insufficient shares", ErrInvalidRequest)
@@ -421,10 +432,17 @@ func ensureSharesBelongToSession(registered []string, provided []string) error {
 	for _, item := range registered {
 		allowed[item] = struct{}{}
 	}
+	seen := make(map[string]struct{}, len(provided))
 	for _, item := range provided {
-		if _, ok := allowed[hashShare(item)]; !ok {
+		digest := hashShare(item)
+		if _, ok := allowed[digest]; !ok {
 			return fmt.Errorf("share does not belong to session")
 		}
+		// Repeating one share must not count towards the threshold.
+		if _, ok := seen[digest]; ok {
+			return fmt.Errorf("duplicate share submitted")
+		}
+		seen[digest] = struct{}{}
 	}
 	return nil
 }

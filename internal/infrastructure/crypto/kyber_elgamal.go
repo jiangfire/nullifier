@@ -262,13 +262,11 @@ func deriveKeys(shared []byte) (encKey []byte, authKey []byte) {
 }
 
 func xorKeystream(data []byte, key []byte, nonce []byte) []byte {
-	out := make([]byte, len(data))
-	var counter uint32
-	used := 0
+	out := make([]byte, 0, len(data))
+	counterBytes := make([]byte, 4)
 
-	for used < len(data) {
-		counterBytes := make([]byte, 4)
-		binary.BigEndian.PutUint32(counterBytes, counter)
+	for offset := 0; offset < len(data); offset += sha256.Size {
+		binary.BigEndian.PutUint32(counterBytes, uint32(offset/sha256.Size))
 
 		blockHash := sha256.New()
 		blockHash.Write(key)
@@ -276,12 +274,13 @@ func xorKeystream(data []byte, key []byte, nonce []byte) []byte {
 		blockHash.Write(counterBytes)
 		block := blockHash.Sum(nil)
 
-		n := copy(out[used:], data[used:])
-		for i := 0; i < n; i++ {
-			out[used+i] ^= block[i]
+		end := offset + sha256.Size
+		if end > len(data) {
+			end = len(data)
 		}
-		used += n
-		counter++
+		for i := offset; i < end; i++ {
+			out = append(out, data[i]^block[i-offset])
+		}
 	}
 	return out
 }

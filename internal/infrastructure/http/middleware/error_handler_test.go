@@ -26,6 +26,8 @@ func TestMapError(t *testing.T) {
 		{name: "credential_exists", err: usecase.ErrCredentialAlreadyIssued, status: http.StatusConflict, code: "CREDENTIAL_EXISTS"},
 		{name: "user_voted", err: usecase.ErrUserAlreadyVoted, status: http.StatusConflict, code: "USER_ALREADY_VOTED"},
 		{name: "invalid_credential", err: usecase.ErrInvalidCredential, status: http.StatusUnauthorized, code: "INVALID_CREDENTIAL"},
+		{name: "session_exists", err: usecase.ErrSessionAlreadyExists, status: http.StatusConflict, code: "DECRYPTION_SESSION_EXISTS"},
+		{name: "result_published", err: usecase.ErrResultAlreadyPublished, status: http.StatusConflict, code: "RESULT_ALREADY_PUBLISHED"},
 		{name: "unauthorized", err: usecase.ErrUnauthorized, status: http.StatusUnauthorized, code: "UNAUTHORIZED"},
 		{name: "not_found", err: repository.ErrNotFound, status: http.StatusNotFound, code: "NOT_FOUND"},
 		{name: "unknown", err: errors.New("x"), status: http.StatusInternalServerError, code: "INTERNAL_ERROR"},
@@ -36,6 +38,26 @@ func TestMapError(t *testing.T) {
 			status, code := mapError(tc.err)
 			require.Equal(t, tc.status, status)
 			require.Equal(t, tc.code, code)
+		})
+	}
+}
+
+func TestPublicErrorMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		code string
+		want string
+	}{
+		{name: "invalid_request", err: usecase.ErrInvalidRequest, code: "INVALID_REQUEST", want: "invalid request"},
+		{name: "session_exists", err: usecase.ErrSessionAlreadyExists, code: "DECRYPTION_SESSION_EXISTS", want: "decryption session already exists"},
+		{name: "result_published", err: usecase.ErrResultAlreadyPublished, code: "RESULT_ALREADY_PUBLISHED", want: "tally result already published"},
+		{name: "unknown", err: errors.New("sql: connection refused"), code: "INTERNAL_ERROR", want: "internal server error"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, publicErrorMessage(tc.err, tc.code))
 		})
 	}
 }

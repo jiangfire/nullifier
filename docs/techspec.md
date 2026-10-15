@@ -181,16 +181,19 @@ web/                        # Vue 3 前端门户
 ### 5.3 关键约束
 
 - `POST /api/v1/votes`
-  - 要求 `proposal_id`、`encrypted_vote`、`proof`、`nullifier`
-  - 若提交了 `user_id`，则必须同时提交 `user_pub_key` 和 `credential_signature`
+  - 要求 `proposal_id`、`encrypted_vote`、`proof`、`nullifier`、`user_id`、`user_pub_key`、`credential_signature`，全部必填（HTTP 层与 usecase 层都强制，不存在匿名免凭证投票的路径）
   - 当前服务端会校验 proof、密文格式、凭证归属、防重投
+  - 落票与参与记录要么在同一事务里完成，要么都不做；不存在“记了票但没记参与状态”的路径
 - `POST /api/v1/proposals/:proposal_id/vote-status`
   - 必须带当前凭证材料，不接受裸 `user_id` 枚举
 - `POST /api/v1/proposals/:proposal_id/decryption/setup`
   - 当前实现拒绝“投票开放中”的提案
+  - 同一提案重复 setup 返回 `409 DECRYPTION_SESSION_EXISTS`，不会覆盖已有会话（已有会话如果被覆盖，已投选票将无法解密）
   - 实际运营应在投票开始前完成初始化
 - `POST /api/v1/proposals/:proposal_id/results/publish`
   - 仅允许在提案关闭后执行
+  - 同一提案重复发布返回 `409 RESULT_ALREADY_PUBLISHED`
+  - 重复提交同一份 share 返回 `400 INVALID_REQUEST`，不会绕过 threshold 计数
   - share 会先校验是否属于当前 session
 
 ## 6. 密码学实现边界
@@ -266,4 +269,7 @@ web/                        # Vue 3 前端门户
 - 解密会话的初始化时机是当前系统最容易被文档写错的点：
   - 服务端禁止在投票开放中 setup
   - 实际业务上应在开始前准备好 session
+- `GET /api/v1/proposals/open` 只返回“状态 open 且当前处于时间窗口内”的提案：
+  - 尚未开始的提案不会出现在大厅列表里，管理端需要用创建返回的 `proposal_id` 继续操作
+  - 目前没有“列出全部提案”的接口
 - 前端仍保留对历史 JSON 描述字段的兼容解析，仅用于读取旧数据；新写路径已统一为纯文本 `description` + 独立 `options`。

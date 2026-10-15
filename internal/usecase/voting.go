@@ -45,13 +45,14 @@ func (r *SubmitVoteRequest) Validate() error {
 	if r.Proof == nil || len(r.Proof.Data) == 0 {
 		return fmt.Errorf("%w: proof is required", ErrInvalidRequest)
 	}
-	if r.UserID != "" {
-		if len(r.UserPubKey) == 0 {
-			return fmt.Errorf("%w: user_pub_key is required when user_id is provided", ErrInvalidRequest)
-		}
-		if len(r.CredentialSignature) == 0 {
-			return fmt.Errorf("%w: credential_signature is required when user_id is provided", ErrInvalidRequest)
-		}
+	if r.UserID == "" {
+		return fmt.Errorf("%w: user_id is required", ErrInvalidRequest)
+	}
+	if len(r.UserPubKey) == 0 {
+		return fmt.Errorf("%w: user_pub_key is required", ErrInvalidRequest)
+	}
+	if len(r.CredentialSignature) == 0 {
+		return fmt.Errorf("%w: credential_signature is required", ErrInvalidRequest)
 	}
 	return nil
 }
@@ -117,6 +118,12 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 	if uc.sessionRepo == nil {
 		return errors.New("decryption session repository is not configured")
 	}
+	if uc.credentialRepo == nil {
+		return errors.New("credential repository is not configured")
+	}
+	if uc.participationRepo == nil {
+		return errors.New("participation repository is not configured")
+	}
 	if uc.verifier == nil {
 		return errors.New("proof verifier is not configured")
 	}
@@ -146,29 +153,21 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 			return fmt.Errorf("%w: invalid encrypted vote: %v", ErrInvalidRequest, err)
 		}
 	}
-	if req.UserID != "" {
-		if uc.credentialRepo == nil {
-			return errors.New("credential repository is not configured")
-		}
-		credential, err := uc.credentialRepo.GetByProposalAndUserID(ctx, req.ProposalID, req.UserID)
-		if err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				return ErrInvalidCredential
-			}
-			return fmt.Errorf("load credential: %w", err)
-		}
-		if !bytes.Equal(credential.UserPubKey, req.UserPubKey) {
+	credential, err := uc.credentialRepo.GetByProposalAndUserID(ctx, req.ProposalID, req.UserID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
 			return ErrInvalidCredential
 		}
-		if !bytes.Equal(credential.Signature, req.CredentialSignature) {
-			return ErrInvalidCredential
-		}
+		return fmt.Errorf("load credential: %w", err)
+	}
+	if !bytes.Equal(credential.UserPubKey, req.UserPubKey) {
+		return ErrInvalidCredential
+	}
+	if !bytes.Equal(credential.Signature, req.CredentialSignature) {
+		return ErrInvalidCredential
 	}
 
-	userHash := ""
-	if req.UserID != "" {
-		userHash = hashUserID(req.UserID)
-	}
+	userHash := hashUserID(req.UserID)
 
 	exists, err := uc.repo.ExistsByNullifier(ctx, req.Nullifier)
 	if err != nil {
@@ -177,14 +176,12 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 	if exists {
 		return ErrDoubleVoting
 	}
-	if req.UserID != "" && uc.participationRepo != nil {
-		hasVoted, err := uc.participationRepo.HasVoted(ctx, req.ProposalID, userHash)
-		if err != nil {
-			return fmt.Errorf("check user participation: %w", err)
-		}
-		if hasVoted {
-			return ErrUserAlreadyVoted
-		}
+	hasVoted, err := uc.participationRepo.HasVoted(ctx, req.ProposalID, userHash)
+	if err != nil {
+		return fmt.Errorf("check user participation: %w", err)
+	}
+	if hasVoted {
+		return ErrUserAlreadyVoted
 	}
 
 	vote := &entity.Vote{
@@ -195,38 +192,31 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 		CreatedAt:  time.Now().UTC(),
 	}
 
-	if req.UserID != "" && uc.participationRepo != nil {
-		if txSaver, ok := uc.repo.(atomicVoteParticipationSaver); ok {
-			if err := txSaver.SaveWithParticipation(ctx, vote, userHash, vote.CreatedAt); err != nil {
-				if errors.Is(err, repository.ErrDuplicateParticipation) {
-					return ErrUserAlreadyVoted
-				}
-				if errors.Is(err, repository.ErrDuplicateVote) {
-					return ErrDoubleVoting
-				}
-				return fmt.Errorf("save vote with participation: %w", err)
+	if txSaver, ok := uc.repo.(atomicVoteParticipationSaver); ok {
+		if err := txSaver.SaveWithParticipation(ctx, vote, userHash, vote.CreatedAt); err != nil {
+			if errors.Is(err, repository.ErrDuplicateParticipation) {
+				return ErrUserAlreadyVoted
 			}
-		} else {
-			if err := uc.repo.Save(ctx, vote); err != nil {
-				if errors.Is(err, repository.ErrDuplicateVote) {
-					return ErrDoubleVoting
-				}
-				return fmt.Errorf("save vote: %w", err)
+			if errors.Is(err, repository.ErrDuplicateVote) {
+				return ErrDoubleVoting
 			}
-			if err := uc.participationRepo.MarkVoted(
-				ctx,
-				req.ProposalID,
-				userHash,
-				vote.CreatedAt,
-			); err != nil {
-				return fmt.Errorf("mark user voted: %w", err)
-			}
+			return fmt.Errorf("save vote with participation: %w", err)
 		}
-	} else if err := uc.repo.Save(ctx, vote); err != nil {
-		if errors.Is(err, repository.ErrDuplicateVote) {
-			return ErrDoubleVoting
+	} else {
+		if err := uc.repo.Save(ctx, vote); err != nil {
+			if errors.Is(err, repository.ErrDuplicateVote) {
+				return ErrDoubleVoting
+			}
+			return fmt.Errorf("save vote: %w", err)
 		}
-		return fmt.Errorf("save vote: %w", err)
+		if err := uc.participationRepo.MarkVoted(
+			ctx,
+			req.ProposalID,
+			userHash,
+			vote.CreatedAt,
+		); err != nil {
+			return fmt.Errorf("mark user voted: %w", err)
+		}
 	}
 
 	uc.logger.Info("vote submitted",
