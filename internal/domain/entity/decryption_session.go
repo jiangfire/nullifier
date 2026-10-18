@@ -8,7 +8,7 @@ type DecryptionSession struct {
 	ProposalID string    `gorm:"size:64;not null;uniqueIndex" json:"proposal_id"`
 	Threshold  int       `gorm:"not null" json:"threshold"`
 	Trustees   int       `gorm:"not null" json:"trustees"`
-	PublicKey  []byte    `gorm:"type:blob;not null" json:"public_key"`
+	PublicKey  []byte    `gorm:"not null" json:"public_key"`
 	SharesJSON string    `gorm:"type:text;not null" json:"shares_json"`
 	CreatedAt  time.Time `gorm:"not null" json:"created_at"`
 	UpdatedAt  time.Time `gorm:"not null" json:"updated_at"`
