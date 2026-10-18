@@ -202,11 +202,6 @@ const activePrimaryNavId = computed<PrimaryNavId>(() => {
   }
   return portal.workspace === 'admin' ? 'adminflow' : 'userflow';
 });
-const workflowHeadline = computed(() =>
-  portal.workspace === 'admin'
-    ? '把运营动作压缩成一条顺序清晰的计票链路'
-    : '给投票人一条更像产品流程、而不是联调台的操作路径',
-);
 const currentOpsStepTitle = computed(
   () => opsSteps.find((item) => item.id === opsStep.value)?.title || '未选择',
 );

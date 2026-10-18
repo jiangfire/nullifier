@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"anonvote/internal/domain/entity"
@@ -62,4 +63,26 @@ func (r *ParticipationRepository) HasVoted(ctx context.Context, proposalID strin
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (r *ParticipationRepository) ListVotedUserHashes(
+	ctx context.Context,
+	proposalID string,
+) (map[string]struct{}, error) {
+	voted := make(map[string]struct{})
+	var rows []entity.VoteParticipation
+	err := r.db.WithContext(ctx).
+		Model(&entity.VoteParticipation{}).
+		Where("proposal_id = ?", proposalID).
+		Find(&rows).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return voted, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		voted[row.UserHash] = struct{}{}
+	}
+	return voted, nil
 }

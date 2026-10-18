@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -29,6 +30,12 @@ func (m *proposalRepositoryMock) GetByID(ctx context.Context, id string) (*entit
 }
 
 func (m *proposalRepositoryMock) ListOpen(ctx context.Context) ([]*entity.Proposal, error) {
+	args := m.Called(ctx)
+	proposals, _ := args.Get(0).([]*entity.Proposal)
+	return proposals, args.Error(1)
+}
+
+func (m *proposalRepositoryMock) ListAll(ctx context.Context) ([]*entity.Proposal, error) {
 	args := m.Called(ctx)
 	proposals, _ := args.Get(0).([]*entity.Proposal)
 	return proposals, args.Error(1)
@@ -87,4 +94,30 @@ func TestProposalUseCase_ListOpen(t *testing.T) {
 	proposals, err := uc.ListOpen(context.Background())
 	assert.NoError(t, err)
 	assert.Len(t, proposals, 2)
+}
+
+func TestProposalUseCase_List(t *testing.T) {
+	repo := new(proposalRepositoryMock)
+	uc := NewProposalUseCase(repo, zap.NewNop())
+
+	repo.On("ListAll", mock.Anything).Return([]*entity.Proposal{
+		{ID: "p2", Title: "B", Status: "closed"},
+		{ID: "p1", Title: "A", Status: "open"},
+	}, nil).Once()
+
+	proposals, err := uc.List(context.Background())
+	assert.NoError(t, err)
+	assert.Len(t, proposals, 2)
+	assert.Equal(t, "p2", proposals[0].ID)
+}
+
+func TestProposalUseCase_List_Error(t *testing.T) {
+	repo := new(proposalRepositoryMock)
+	uc := NewProposalUseCase(repo, zap.NewNop())
+
+	repo.On("ListAll", mock.Anything).Return(([]*entity.Proposal)(nil), errors.New("db down")).Once()
+
+	proposals, err := uc.List(context.Background())
+	assert.Nil(t, proposals)
+	assert.Error(t, err)
 }

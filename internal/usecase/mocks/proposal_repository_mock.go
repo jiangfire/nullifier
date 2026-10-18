@@ -50,6 +50,21 @@ func (mr *MockProposalRepositoryMockRecorder) GetByID(ctx, id interface{}) *gomo
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetByID", reflect.TypeOf((*MockProposalRepository)(nil).GetByID), ctx, id)
 }
 
+// ListAll mocks base method.
+func (m *MockProposalRepository) ListAll(ctx context.Context) ([]*entity.Proposal, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListAll", ctx)
+	ret0, _ := ret[0].([]*entity.Proposal)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListAll indicates an expected call of ListAll.
+func (mr *MockProposalRepositoryMockRecorder) ListAll(ctx interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListAll", reflect.TypeOf((*MockProposalRepository)(nil).ListAll), ctx)
+}
+
 // ListOpen mocks base method.
 func (m *MockProposalRepository) ListOpen(ctx context.Context) ([]*entity.Proposal, error) {
 	m.ctrl.T.Helper()

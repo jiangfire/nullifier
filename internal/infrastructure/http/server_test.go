@@ -69,6 +69,7 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/votes", body: map[string]any{}},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/open"},
+		{method: http.MethodGet, path: "/api/v1/proposals"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/results"},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/audit-anchors"},
@@ -328,6 +329,7 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 		body   any
 	}{
 		{method: http.MethodGet, path: "/api/v1/proposals/open"},
+		{method: http.MethodGet, path: "/api/v1/proposals"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", body: map[string]any{
 			"user_id":              "u1",
 			"user_pub_key":         base64.StdEncoding.EncodeToString([]byte("pub")),
@@ -466,6 +468,29 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_ = resp.Body.Close()
+
+	resp, err = http.Get(ts.URL + "/api/v1/proposals")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var allProposals struct {
+		Items []struct {
+			ID     string   `json:"id"`
+			Title  string   `json:"title"`
+			Status string   `json:"status"`
+			Opts   []string `json:"options"`
+		} `json:"items"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&allProposals))
+	_ = resp.Body.Close()
+	require.NotEmpty(t, allProposals.Items, "GET /proposals must list proposals, not only open ones")
+	found := false
+	for _, item := range allProposals.Items {
+		if item.ID == proposalResp.ID {
+			found = true
+			require.NotEmpty(t, item.Opts, "options must be serialized")
+		}
+	}
+	require.True(t, found, "the created proposal must appear in GET /proposals")
 
 	require.NoError(t, db.Model(&entity.Proposal{}).
 		Where("id = ?", proposalResp.ID).
