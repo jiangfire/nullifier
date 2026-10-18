@@ -28,7 +28,11 @@ if [[ -z "${TOTAL_LINE}" ]]; then
   exit 1
 fi
 
-COVERAGE="$(echo "${TOTAL_LINE}" | sed -E 's/.* ([0-9]+(\.[0-9]+)?)%.*/\1/')"
+# Extract the first percentage on the total line without depending on the
+# whitespace `go tool cover` happens to pad with: Go 1.25 separates the
+# percentage with a tab while Go 1.26 uses spaces, and a parser anchored on a
+# literal space silently yields 0 on the other version.
+COVERAGE="$(echo "${TOTAL_LINE}" | grep -oE '[0-9]+(\.[0-9]+)?%' | head -1 | tr -d '%')"
 if [[ -z "${COVERAGE}" ]]; then
   echo "覆盖率格式不符合预期: ${TOTAL_LINE}"
   exit 1
