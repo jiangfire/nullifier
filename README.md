@@ -1,119 +1,229 @@
-# nullifier
+<h1 align="center">nullifier</h1>
 
-基于 Clean Architecture 的匿名投票后端实现（Go + Gin + GORM）。
+<p align="center">
+  匿名投票后端 —— 服务端数得清结果,数不出是谁投的。<br>
+  <sub>Go · Gin · GORM · 零知识证明 · 门限加密 · Vue 3</sub>
+</p>
 
-## 项目状态
+<p align="center">
+  <a href="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml"><img src="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-yellow.svg" alt="License: AGPL-3.0" /></a>
+  <img src="https://img.shields.io/badge/go-1.25.4-00ADD8?logo=go&logoColor=white" alt="Go 1.25.4" />
+  <img src="https://img.shields.io/badge/coverage-81.8%25-brightgreen.svg" alt="Coverage 81.8%" />
+</p>
 
-- 最新交接状态见：`docs/status.md`
-- 截止 2026-03-18，后端主流程、前端门户、CLI 工作流已打通；当前主要工作是持续保持文档与实现同步。
+---
+
+## 服务端数得清结果,数不出是谁投的
+
+投票系统最常见的做法是:一张 `votes` 表,一行一个人。这个设计的问题不在存储,而在于**服务器本身就是那个能作恶的角色** —— 它同时掌握选票内容和投票人身份,于是"我不记这一票"这句话无法被任何人验证。
+
+nullifier 把这两个动作拆开:
+
+- **发资格的人看不到选谁** —— 凭证用 RSA 盲签名签发(RFC9474)。签发方看到的是被盲化的随机串,选票内容留在用户手里。
+- **记选票的人看不到是谁** —— `votes` 表只有 `proposal_id`、`nullifier`、`cipher` 三列,没有用户标识。"是否参与"单独存进 `vote_participations`,且只存 `hash(user_id)`,不与票内容关联。
+- **验票真伪但不验身份** —— 服务端用 gnark 验证零知识证明,证明"这张票是按合法凭证生成的",证明本身不携带任何身份信息。
+
+结果是:管理员能看到计票结果和审计锚点,但拿到数据库也回答不了"某个人投了什么"。
+
+## 特性
+
+**匿名性**
+
+| 能力 | 说明 |
+|---|---|
+| 盲签名凭证 | RFC9474 RSA blind signature,签发方只见盲化串,不见选票内容 |
+| 零知识验票 | gnark 验证选票合法性,证明不携带身份 |
+| 防重放 | 每票一个 `nullifier`,重复投票直接拒绝 |
+| 防冒充 | `proposal_id + user_id + user_pub_key + credential_signature` 四元组校验 |
+| 选择性披露 | 只能回答"你投过票吗",不能回答"你投了什么" |
+
+**计票与审计**
+
+| 能力 | 说明 |
+|---|---|
+| 门限解密 | kyber ElGamal 封装,2-of-3 份额即可恢复,单份份额无法解密 |
+| 会话不可覆盖 | 重复 setup 返回 `409`,已投选票的解密能力不会被覆盖 |
+| 幂等发布 | 重复 publish 返回 `409`,不重复写审计锚点 |
+| 审计锚点 | 结果发布时生成 Merkle Root,可导出供外部核验 |
+| 份额校验 | 拒绝重复 share,不会绕过 threshold 计数 |
+
+**交付形态**
+
+| 形态 | 说明 |
+|---|---|
+| HTTP API | 11 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
+| CLI | 13 个命令,复用同一套 HTTP API,不绕过服务端校验 |
+| Web 门户 | Vue 3 单页应用,覆盖投票端与运营端全流程 |
 
 ## 快速开始
 
+需要 Go 1.25+。**Windows 上跑测试需要 `CGO_ENABLED=1`**(`gorm.io/driver/sqlite` 依赖 cgo)。
+
 ```bash
-go mod tidy
-go test ./...
+git clone https://github.com/jiangfire/nullifier.git
+cd nullifier
+go mod download
 go run ./cmd/server
 ```
 
-也可以直接使用命令行客户端操作流程：
+服务默认监听 `:8080`,用仓库自带的 `configs/config.yaml`(debug 模式,SQLite 文件库 `anonvote.db`,管理员令牌 `dev-admin-token`)。
+
+### 走完一次完整投票
+
+下面命令里的 `<proposal_id>` 替换成第 1 步返回的 id。**`decrypt-setup` 必须在提案 `starts_at` 之前完成**,否则服务端会以"投票开放中"拒绝。
 
 ```bash
-go run ./cmd/cli health
-go run ./cmd/cli -admin-token dev-admin-token proposal-create -title "Board" -options "A,B" -start 2026-03-10T10:00:00Z -end 2026-03-10T12:00:00Z
-go run ./cmd/cli -admin-token dev-admin-token credential-issue -proposal p-1 -user u-1001 -out cred-u1001.json
-go run ./cmd/cli -admin-token dev-admin-token decrypt-setup -proposal p-1 -threshold 2 -trustees 3 -out shares.json
-go run ./cmd/cli ballot-draft -proposal p-1 -option A -out ballot.json
-go run ./cmd/cli vote-submit -credential-file cred-u1001.json -ballot-file ballot.json
-go run ./cmd/cli -admin-token dev-admin-token credentials-list -proposal p-1
-go run ./cmd/cli -admin-token dev-admin-token result-publish -proposal p-1 -shares-file shares.json
+# 1. 创建提案(options 是正式计票口径,至少两个)
+go run ./cmd/cli -admin-token dev-admin-token proposal-create \
+  -title "Board" -options "A,B" -start 2026-12-01T10:00:00Z -end 2026-12-01T12:00:00Z
+
+# 2. 初始化 2-of-3 门限解密会话(必须在 -start 之前)
+go run ./cmd/cli -admin-token dev-admin-token decrypt-setup \
+  -proposal <proposal_id> -threshold 2 -trustees 3 -out shares.json
+
+# 3. 签发匿名凭证
+go run ./cmd/cli -admin-token dev-admin-token credential-issue \
+  -proposal <proposal_id> -user u-1001 -out cred.json
+
+# 4. 生成选票草稿并投票
+go run ./cmd/cli ballot-draft -proposal <proposal_id> -option A -out ballot.json
+go run ./cmd/cli vote-submit -credential-file cred.json -ballot-file ballot.json
+
+# 5. 提案关闭后,提交份额并计票
+go run ./cmd/cli -admin-token dev-admin-token result-publish \
+  -proposal <proposal_id> -shares-file shares.json
+
+# 6. 查结果与审计锚点
+go run ./cmd/cli -admin-token dev-admin-token result-get -proposal <proposal_id>
+go run ./cmd/cli -admin-token dev-admin-token anchors-list -proposal <proposal_id>
 ```
 
-默认使用 SQLite 文件数据库 `anonvote.db`，可通过环境变量切到 PostgreSQL：
+不想每次带 `-admin-token`,设个环境变量即可:
 
 ```bash
-DB_DRIVER=postgres
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=anonvote
-DB_USER=postgres
-DB_PASSWORD=postgres
-DB_SSLMODE=disable
-CRYPTO_ISSUER_KEY_PATH=issuer_keys.json
-CRYPTO_ISSUER_ROTATE_DAYS=90
-CRYPTO_VK_PATH=./keys/verifying.key
+export NULLIFIER_BASE_URL=http://localhost:8080
+export NULLIFIER_ADMIN_TOKEN=dev-admin-token
 ```
 
-也可使用 `configs/config.yaml` 覆盖默认配置。
-其中 `crypto.issuer_key_path` 和 `crypto.issuer_rotate_days` 用于凭证签发密钥持久化与自动轮换。
-当 `server.mode` 为 `release/prod/production` 时，必须设置 `crypto.vk_path`（或环境变量 `CRYPTO_VK_PATH`），否则服务会启动失败。
-管理面接口使用 `server.admin_bearer_token` 鉴权；若未配置，服务启动时会自动生成一个临时 token，并打印到控制台日志中。
-生产部署可参考：
-- `configs/config.production.yaml`（`server.mode=release`）
-- `configs/production.env.example`（显式设置 `CRYPTO_VK_PATH` 等环境变量）
+### Web 门户
 
-## API（v1）
+```bash
+pnpm --dir web install
+pnpm --dir web run dev
+```
 
-- `POST /api/v1/credentials`：管理员签发匿名凭证（RFC9474 RSA blind signature）
-- `POST /api/v1/proposals`：创建提案
-- `GET /api/v1/proposals/open`：查询开放提案
-- `POST /api/v1/votes`：提交匿名投票（`user_id` + `user_pub_key` + `credential_signature` 均为必填，服务端校验防冒充）
-- `POST /api/v1/proposals/:proposal_id/vote-status`：持凭证材料查询该用户是否已投票
-- `GET /api/v1/proposals/:proposal_id/credentials`：管理员查询该提案下所有凭证及 `has_voted`
-- `POST /api/v1/proposals/:proposal_id/ballot-draft`：按选项生成投票草稿（开发联调）
-- `POST /api/v1/proposals/:proposal_id/decryption/setup`：初始化阈值解密会话（threshold/trustees）
-- `POST /api/v1/proposals/:proposal_id/results/publish`：提交份额并发布计票结果
-- `GET /api/v1/proposals/:proposal_id/results`：查询已发布计票结果
-- `GET /api/v1/proposals/:proposal_id/audit-anchors`：导出审计锚点（含 Merkle Root）
-- `GET /healthz`：健康检查
+打开 `http://localhost:3000`,顶部填服务地址和 Admin Token。页面分为投票大厅、我的身份、参与投票、计票与审计四块,覆盖领取/导入凭证、投票、初始化解密、发布结果、查看审计锚点。
 
-说明：
-- 票据表仅存匿名投票数据（不含用户标识）。
-- “已投票状态”单独存储为用户标识哈希，可用于“知道你是否投过票”，但不直接关联具体票内容。
-- 匿名凭证按 `proposal_id` 绑定，管理员可看到某提案下哪些凭证已投票，但看不到凭证对应的投票内容。
-- 提案创建时必须显式提供 `options`，后端会把它作为正式计票口径保存并在草稿生成/计票时校验。
-- 管理面接口（凭证签发、创建提案、凭证状态、解密 setup、发布结果）都需要 `Authorization: Bearer <admin token>`。
-- `decryption/setup` 会拒绝“投票开放中”的提案；实际联调和运营应在 `starts_at` 之前完成初始化。
-- 同一提案重复执行 `decryption/setup` 或 `results/publish` 会返回 `409`，不会覆盖已有会话或重复发布结果。
-- 开发模式内置 CORS（支持 `http://localhost:3000` 本地前端跨域访问）。
-- `ballot-draft` 用于开发联调；生产模式应使用真实钱包/客户端生成 proof 与密文。
+## 架构
 
-## 前端门户（web）
-
-- 目录：`web/`
-- 定位：面向用户与运营的业务页面，不是 API 调试台
-- 已支持：
-  - 匿名凭证文件导入/导出
-  - 创建多选项提案
-  - 参与投票时按提案选项选择并一键生成投票草稿
-  - 管理员凭证状态面板（只看 `has_voted`，不看投票内容）
-  - 顶部 `Admin Token` 输入，直连已鉴权的管理接口
-- 详细说明见：`web/README.md`
-
-## 测试
-
-- 单元/集成/E2E：`go test ./...`
-- CLI 帮助：`go run ./cmd/cli help`
-- 前端类型检查：`pnpm --dir web exec tsc --noEmit`
-- 生成 gomock：`go generate ./internal/usecase/mocks`
-- 覆盖率门槛（默认检查 `usecase + config + di + http`，总覆盖率需 >=80%）：
-  - PowerShell：`./scripts/check-coverage.ps1`
-  - Bash：`./scripts/check-coverage.sh`
-- PostgreSQL 集成（testcontainers）在 Docker 不可用时会自动跳过
-
-## 日志规范
-
-- 服务端运行期日志统一使用 `zap`，包括启动日志、HTTP 请求日志、错误日志和 panic recovery。
-- 不要在服务端代码路径继续引入 `log.Printf`、`fmt.Println` 这类运行期日志输出；需要记录运行状态时统一走注入的 `*zap.Logger`。
-- Gin 默认的 debug/route/listen 输出已关闭，避免和业务日志混杂。
-- CLI 保留纯文本或 JSON 结果输出，这些属于命令结果，不属于服务端运行日志；不要把 CLI 用户输出和服务端日志规则混为一谈。
-
-## 目录
+Clean Architecture 分层,依赖只朝内:
 
 ```text
-cmd/server               # 启动入口
-internal/domain          # 实体与接口
-internal/usecase         # 业务用例
-internal/infrastructure  # DB/HTTP/crypto 实现
-internal/di              # Wire 依赖注入
-tests                    # 测试与测试工具
+cmd/server          服务入口          cmd/cli       CLI 客户端
+     ↓                                    ↓
+internal/usecase    业务编排(5 个用例) ──→ internal/domain   实体 + 仓储/密码学接口
+     ↓
+internal/infrastructure   http(Gin) · persistence(GORM) · crypto(gnark/kyber/kryptology)
+     ↑
+internal/di         Wire 装配          internal/config   viper 配置 + 运行期校验
 ```
+
+| 层 | 职责 | 约束 |
+|---|---|---|
+| `domain` | 实体、仓储接口、密码学接口、领域错误 | 不依赖 HTTP / GORM / 具体密码学库 |
+| `usecase` | Proposal / Register / Voting / Participation / Tally 五个用例编排 | 只依赖 `domain` 接口 |
+| `infrastructure` | Gin 路由与错误映射、GORM 仓储与自动迁移、密码学实现 | 实现 `domain` 定义的接口 |
+| `di` | Wire provider 组装 | 启动期一次性装配 |
+
+**Stack:** Go 1.25 · Gin · GORM · Wire · gnark · kyber · kryptology · SQLite / PostgreSQL · Vue 3 · TypeScript · Rsbuild
+
+## 配置
+
+优先级:环境变量 > `configs/config.yaml` > 内置默认值。
+
+| 环境变量 | 对应配置 | 默认值 | 说明 |
+|---|---|---|---|
+| `DB_DRIVER` | `db.driver` | `sqlite` | `sqlite` / `postgres` |
+| `DB_HOST` | `db.host` | — | PostgreSQL 主机 |
+| `DB_PORT` | `db.port` | — | PostgreSQL 端口 |
+| `DB_NAME` | `db.name` | `anonvote` | PostgreSQL 数据库名 |
+| `DB_PATH` | `db.path` | `anonvote.db` | SQLite 文件路径(设 `GO_ENV=test` 时强制内存库) |
+| `DB_USER` | `db.user` | — | |
+| `DB_PASSWORD` | `db.password` | — | |
+| `DB_SSLMODE` | `db.sslmode` | — | 如 `disable` |
+| `CRYPTO_VK_PATH` | `crypto.vk_path` | 空 | **生产模式必填** |
+| `CRYPTO_ISSUER_KEY_PATH` | `crypto.issuer_key_path` | `issuer_keys.json` | 签发密钥持久化 |
+| `CRYPTO_ISSUER_ROTATE_DAYS` | `crypto.issuer_rotate_days` | `90` | 签发密钥轮换周期 |
+| `SERVER_ADMIN_BEARER_TOKEN` | `server.admin_bearer_token` | 空 | 为空则启动时生成临时 token 并打印日志 |
+| `SERVER_MODE` | `server.mode` | `release` | `release`/`prod`/`production` 时强制要求 `vk_path` |
+
+生产部署参考 `configs/config.production.yaml` 与 `configs/production.env.example`。
+
+## HTTP API
+
+公共端点:
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/healthz` | 健康检查 |
+| `GET` | `/api/v1/proposals` | 列出全部提案(按创建时间倒序,含已关闭/未开始) |
+| `GET` | `/api/v1/proposals/open` | 时间窗口内的开放提案 |
+| `POST` | `/api/v1/votes` | 提交匿名投票(7 个字段全部必填) |
+| `POST` | `/api/v1/proposals/:id/vote-status` | 持凭证材料查询是否已投票 |
+| `POST` | `/api/v1/proposals/:id/ballot-draft` | 生成选票草稿(开发联调) |
+| `GET` | `/api/v1/proposals/:id/results` | 已发布的计票结果 |
+| `GET` | `/api/v1/proposals/:id/audit-anchors` | 导出审计锚点 |
+
+管理端点,需 `Authorization: Bearer <admin token>`:
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/v1/credentials` | 签发匿名凭证 |
+| `POST` | `/api/v1/proposals` | 创建提案 |
+| `GET` | `/api/v1/proposals/:id/credentials` | 该提案下凭证的 `has_voted` 状态 |
+| `POST` | `/api/v1/proposals/:id/decryption/setup` | 初始化门限解密会话 |
+| `POST` | `/api/v1/proposals/:id/results/publish` | 提交份额并发布结果 |
+
+## 开发
+
+```bash
+go build ./...                  # 构建
+go vet ./...                    # 静态检查
+gofmt -l ./cmd ./internal ./tests   # 格式检查(应无输出)
+go test ./...                   # 全部测试
+./scripts/check-coverage.ps1    # 覆盖率门槛(默认 80%)
+bash ./scripts/check-coverage.sh 80 coverage.out   # CI 实际执行的形式
+```
+
+CI 定义在 `.github/workflows/ci.yml`,执行 `go test ./...` 加覆盖率门槛。PostgreSQL 集成测试走 testcontainers,Docker 不可用时自动跳过。
+
+当前覆盖率 81.4%,距 80% 门槛只剩 1.4 个百分点余量 —— **新增代码请一并补测**。
+
+## 项目状态与限制
+
+这是个在推进中的实现,接手前请知道边界在哪:
+
+- **`ballot-draft` 是开发联调接口**,返回的是便于串通流程的草稿数据。生产环境应由真实钱包/客户端生成 proof 与密文;后端只负责验证,不代替用户端生成证明。这条链路尚未完成。
+- **`decryption/setup` 拒绝"投票开放中"的提案**,运营上必须在 `starts_at` 之前完成初始化。
+
+当前实现口径见 [`docs/techspec.md`](./docs/techspec.md)。
+
+## 贡献
+
+从 `main` 切分支,不要直接推默认分支。提交信息遵循 Conventional Commits:
+
+```text
+feat: add threshold decryption session lookup
+fix: reject duplicate shares on publish
+```
+
+改动涉及接口、密码学或持久化逻辑时必须补回归测试。PR 请说明变更范围、测试结果与配置影响;改 API 附示例请求,改 `web/` 附截图。
+
+## License
+
+[AGPL-3.0](./LICENSE)
+
+## 作者
+
+[![jiangfire](https://github.com/jiangfire.png?size=100)](https://github.com/jiangfire) **[jiangfire](https://github.com/jiangfire)**

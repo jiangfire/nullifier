@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -35,6 +36,15 @@ func (m *participationRepositoryMock) HasVoted(
 ) (bool, error) {
 	args := m.Called(ctx, proposalID, userHash)
 	return args.Bool(0), args.Error(1)
+}
+
+func (m *participationRepositoryMock) ListVotedUserHashes(
+	ctx context.Context,
+	proposalID string,
+) (map[string]struct{}, error) {
+	args := m.Called(ctx, proposalID)
+	voted, _ := args.Get(0).(map[string]struct{})
+	return voted, args.Error(1)
 }
 
 var _ repository.ParticipationRepository = (*participationRepositoryMock)(nil)
@@ -82,14 +92,65 @@ func TestParticipationUseCase_ListCredentialStatuses(t *testing.T) {
 			IssuedAt:         time.Now().UTC(),
 		},
 	}, nil).Once()
-	participationRepo.On("HasVoted", mock.Anything, "p-1", hashUserID("u-1")).Return(true, nil).Once()
-	participationRepo.On("HasVoted", mock.Anything, "p-1", hashUserID("u-2")).Return(false, nil).Once()
+	participationRepo.On("ListVotedUserHashes", mock.Anything, "p-1").
+		Return(map[string]struct{}{hashUserID("u-1"): {}}, nil).Once()
 
 	items, err := uc.ListCredentialStatuses(context.Background(), "p-1")
 	assert.NoError(t, err)
 	assert.Len(t, items, 2)
 	assert.True(t, items[0].HasVoted)
 	assert.False(t, items[1].HasVoted)
+	participationRepo.AssertExpectations(t)
+}
+
+func TestParticipationUseCase_ListCredentialStatuses_UsesSingleParticipationQuery(t *testing.T) {
+	participationRepo := new(participationRepositoryMock)
+	credentialRepo := new(credentialRepositoryMock)
+	uc := NewParticipationUseCase(participationRepo, credentialRepo, zap.NewNop())
+
+	credentials := make([]*entity.Credential, 0, 50)
+	for i := 0; i < 50; i++ {
+		credentials = append(credentials, &entity.Credential{
+			ID:         fmt.Sprintf("c-%d", i),
+			ProposalID: "p-1",
+			UserID:     fmt.Sprintf("u-%d", i),
+			UserPubKey: []byte("pub"),
+			IssuedAt:   time.Now().UTC(),
+		})
+	}
+	credentialRepo.On("ListByProposal", mock.Anything, "p-1").Return(credentials, nil).Once()
+	participationRepo.On("ListVotedUserHashes", mock.Anything, "p-1").
+		Return(map[string]struct{}{hashUserID("u-7"): {}}, nil).Once()
+
+	items, err := uc.ListCredentialStatuses(context.Background(), "p-1")
+	assert.NoError(t, err)
+	assert.Len(t, items, 50)
+	votedCount := 0
+	for _, item := range items {
+		if item.HasVoted {
+			votedCount++
+		}
+	}
+	assert.Equal(t, 1, votedCount)
+	// One batched lookup must satisfy the whole listing: any per-credential
+	// HasVoted call is the N+1 regression this test exists to prevent.
+	participationRepo.AssertNotCalled(t, "HasVoted", mock.Anything, mock.Anything, mock.Anything)
+	participationRepo.AssertNumberOfCalls(t, "ListVotedUserHashes", 1)
+}
+
+func TestParticipationUseCase_ListCredentialStatuses_ParticipationError(t *testing.T) {
+	participationRepo := new(participationRepositoryMock)
+	credentialRepo := new(credentialRepositoryMock)
+	uc := NewParticipationUseCase(participationRepo, credentialRepo, zap.NewNop())
+
+	credentialRepo.On("ListByProposal", mock.Anything, "p-1").
+		Return([]*entity.Credential{{ID: "c-1", ProposalID: "p-1", UserID: "u-1"}}, nil).Once()
+	participationRepo.On("ListVotedUserHashes", mock.Anything, "p-1").
+		Return(nil, errors.New("db down")).Once()
+
+	items, err := uc.ListCredentialStatuses(context.Background(), "p-1")
+	assert.Nil(t, items)
+	assert.Error(t, err)
 }
 
 func TestParticipationUseCase_ListCredentialStatuses_ListError(t *testing.T) {

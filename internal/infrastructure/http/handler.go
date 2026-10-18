@@ -59,6 +59,7 @@ func NewHandlerWithTally(
 
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.POST("/votes", h.SubmitVote)
+	r.GET("/proposals", h.ListProposals)
 	r.GET("/proposals/open", h.ListOpenProposals)
 	r.POST("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
 	r.POST("/proposals/:proposal_id/ballot-draft", h.PrepareBallotDraft)
@@ -241,7 +242,11 @@ func (h *Handler) CreateProposal(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{
+	c.JSON(http.StatusCreated, proposalResponse(proposal))
+}
+
+func proposalResponse(proposal *entity.Proposal) gin.H {
+	return gin.H{
 		"id":          proposal.ID,
 		"title":       proposal.Title,
 		"description": proposal.Description,
@@ -250,6 +255,28 @@ func (h *Handler) CreateProposal(c *gin.Context) {
 		"starts_at":   proposal.StartsAt.Format(time.RFC3339),
 		"ends_at":     proposal.EndsAt.Format(time.RFC3339),
 		"created_at":  proposal.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+func (h *Handler) ListProposals(c *gin.Context) {
+	if h.proposalUC == nil {
+		c.Error(fmt.Errorf("proposal usecase is not configured"))
+		return
+	}
+
+	proposals, err := h.proposalUC.List(c.Request.Context())
+	if err != nil {
+		c.Error(err)
+		return
+	}
+
+	out := make([]gin.H, 0, len(proposals))
+	for _, proposal := range proposals {
+		out = append(out, proposalResponse(proposal))
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items": out,
 	})
 }
 
@@ -267,16 +294,7 @@ func (h *Handler) ListOpenProposals(c *gin.Context) {
 
 	out := make([]gin.H, 0, len(proposals))
 	for _, proposal := range proposals {
-		out = append(out, gin.H{
-			"id":          proposal.ID,
-			"title":       proposal.Title,
-			"description": proposal.Description,
-			"options":     proposal.Options,
-			"status":      proposal.Status,
-			"starts_at":   proposal.StartsAt.Format(time.RFC3339),
-			"ends_at":     proposal.EndsAt.Format(time.RFC3339),
-			"created_at":  proposal.CreatedAt.Format(time.RFC3339),
-		})
+		out = append(out, proposalResponse(proposal))
 	}
 
 	c.JSON(http.StatusOK, gin.H{

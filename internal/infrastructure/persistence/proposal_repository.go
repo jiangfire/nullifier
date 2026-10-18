@@ -68,6 +68,25 @@ func (r *ProposalRepository) ListOpen(ctx context.Context) ([]*entity.Proposal, 
 	return proposals, nil
 }
 
+func (r *ProposalRepository) ListAll(ctx context.Context) ([]*entity.Proposal, error) {
+	var proposals []*entity.Proposal
+	err := r.db.WithContext(ctx).
+		Order("created_at desc").
+		Find(&proposals).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return []*entity.Proposal{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for i := range proposals {
+		if _, err := hydrateProposal(proposals[i]); err != nil {
+			return nil, err
+		}
+	}
+	return proposals, nil
+}
+
 func hydrateProposal(proposal *entity.Proposal) (*entity.Proposal, error) {
 	if proposal == nil {
 		return nil, nil

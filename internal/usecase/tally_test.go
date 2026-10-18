@@ -538,6 +538,10 @@ func (r *inMemoryProposalRepo) ListOpen(ctx context.Context) ([]*entity.Proposal
 	return nil, nil
 }
 
+func (r *inMemoryProposalRepo) ListAll(ctx context.Context) ([]*entity.Proposal, error) {
+	return nil, nil
+}
+
 type inMemoryDecryptionSessionRepo struct {
 	items map[string]*entity.DecryptionSession
 }

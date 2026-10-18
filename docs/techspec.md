@@ -161,6 +161,7 @@ web/                        # Vue 3 前端门户
 ### 5.1 公共接口
 
 - `GET /healthz`
+- `GET /api/v1/proposals`
 - `GET /api/v1/proposals/open`
 - `POST /api/v1/votes`
 - `POST /api/v1/proposals/:proposal_id/vote-status`
@@ -270,6 +271,6 @@ web/                        # Vue 3 前端门户
   - 服务端禁止在投票开放中 setup
   - 实际业务上应在开始前准备好 session
 - `GET /api/v1/proposals/open` 只返回“状态 open 且当前处于时间窗口内”的提案：
-  - 尚未开始的提案不会出现在大厅列表里，管理端需要用创建返回的 `proposal_id` 继续操作
-  - 目前没有“列出全部提案”的接口
+  - 尚未开始的提案不会出现在大厅列表里
+  - 管理端需要看到未开始/已关闭提案时，改用 `GET /api/v1/proposals`（全部提案，按创建时间倒序）
 - 前端仍保留对历史 JSON 描述字段的兼容解析，仅用于读取旧数据；新写路径已统一为纯文本 `description` + 独立 `options`。

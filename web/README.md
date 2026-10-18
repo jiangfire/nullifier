@@ -17,15 +17,16 @@ pnpm run dev
 1. `GET /healthz`
 2. `POST /api/v1/credentials`
 3. `POST /api/v1/proposals`
-4. `GET /api/v1/proposals/open`
-5. `POST /api/v1/votes`
-6. `POST /api/v1/proposals/:proposal_id/vote-status`
-7. `GET /api/v1/proposals/:proposal_id/credentials`
-8. `POST /api/v1/proposals/:proposal_id/ballot-draft`
-9. `POST /api/v1/proposals/:proposal_id/decryption/setup`
-10. `POST /api/v1/proposals/:proposal_id/results/publish`
-11. `GET /api/v1/proposals/:proposal_id/results`
-12. `GET /api/v1/proposals/:proposal_id/audit-anchors`
+4. `GET /api/v1/proposals`
+5. `GET /api/v1/proposals/open`
+6. `POST /api/v1/votes`
+7. `POST /api/v1/proposals/:proposal_id/vote-status`
+8. `GET /api/v1/proposals/:proposal_id/credentials`
+9. `POST /api/v1/proposals/:proposal_id/ballot-draft`
+10. `POST /api/v1/proposals/:proposal_id/decryption/setup`
+11. `POST /api/v1/proposals/:proposal_id/results/publish`
+12. `GET /api/v1/proposals/:proposal_id/results`
+13. `GET /api/v1/proposals/:proposal_id/audit-anchors`
 
 ## 页面模块
 
@@ -60,6 +61,7 @@ pnpm run dev
 
 ```bash
 pnpm run lint
-pnpm run build
 pnpm exec tsc --noEmit
+pnpm run test
+pnpm run build
 ```

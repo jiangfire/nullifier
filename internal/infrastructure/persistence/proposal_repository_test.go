@@ -25,6 +25,7 @@ func TestProposalRepository_ListOpen_OnlyReturnsActiveOpenProposals(t *testing.T
 			ID:        "p-active-1",
 			Title:     "active-1",
 			Status:    "open",
+			Options:   []string{"yes", "no"},
 			StartsAt:  now.Add(-2 * time.Hour),
 			EndsAt:    now.Add(2 * time.Hour),
 			CreatedAt: now.Add(-3 * time.Hour),
@@ -71,4 +72,11 @@ func TestProposalRepository_ListOpen_OnlyReturnsActiveOpenProposals(t *testing.T
 	require.Len(t, got, 2)
 	require.Equal(t, "p-active-1", got[0].ID)
 	require.Equal(t, "p-active-2", got[1].ID)
+
+	all, err := repo.ListAll(context.Background())
+	require.NoError(t, err)
+	require.Len(t, all, 5, "ListAll must include closed, expired and future proposals")
+	require.Equal(t, "p-closed", all[0].ID, "newest first")
+	require.Equal(t, "p-expired", all[4].ID, "oldest last")
+	require.Equal(t, []string{"yes", "no"}, all[3].Options, "options must be hydrated from options_json")
 }

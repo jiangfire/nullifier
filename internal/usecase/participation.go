@@ -113,15 +113,17 @@ func (uc *ParticipationUseCase) ListCredentialStatuses(
 		return nil, fmt.Errorf("list proposal credentials: %w", err)
 	}
 
+	votedHashes, err := uc.repo.ListVotedUserHashes(ctx, proposalID)
+	if err != nil {
+		return nil, fmt.Errorf("list proposal participations: %w", err)
+	}
+
 	out := make([]CredentialVoteStatus, 0, len(credentials))
 	for _, credential := range credentials {
 		if credential == nil {
 			continue
 		}
-		hasVoted, err := uc.repo.HasVoted(ctx, proposalID, hashUserID(credential.UserID))
-		if err != nil {
-			return nil, fmt.Errorf("check participation: %w", err)
-		}
+		_, hasVoted := votedHashes[hashUserID(credential.UserID)]
 		out = append(out, mapCredentialVoteStatus(credential, hasVoted))
 	}
 	return out, nil

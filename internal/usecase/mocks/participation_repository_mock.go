@@ -50,6 +50,21 @@ func (mr *MockParticipationRepositoryMockRecorder) HasVoted(ctx, proposalID, use
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HasVoted", reflect.TypeOf((*MockParticipationRepository)(nil).HasVoted), ctx, proposalID, userHash)
 }
 
+// ListVotedUserHashes mocks base method.
+func (m *MockParticipationRepository) ListVotedUserHashes(ctx context.Context, proposalID string) (map[string]struct{}, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ListVotedUserHashes", ctx, proposalID)
+	ret0, _ := ret[0].(map[string]struct{})
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ListVotedUserHashes indicates an expected call of ListVotedUserHashes.
+func (mr *MockParticipationRepositoryMockRecorder) ListVotedUserHashes(ctx, proposalID interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListVotedUserHashes", reflect.TypeOf((*MockParticipationRepository)(nil).ListVotedUserHashes), ctx, proposalID)
+}
+
 // MarkVoted mocks base method.
 func (m *MockParticipationRepository) MarkVoted(ctx context.Context, proposalID, userHash string, votedAt time.Time) error {
 	m.ctrl.T.Helper()

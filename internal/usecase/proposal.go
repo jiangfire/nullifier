@@ -116,6 +116,17 @@ func (uc *ProposalUseCase) ListOpen(ctx context.Context) ([]*entity.Proposal, er
 	return proposals, nil
 }
 
+func (uc *ProposalUseCase) List(ctx context.Context) ([]*entity.Proposal, error) {
+	if uc.repo == nil {
+		return nil, fmt.Errorf("proposal repository is not configured")
+	}
+	proposals, err := uc.repo.ListAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list proposals: %w", err)
+	}
+	return proposals, nil
+}
+
 func normalizeProposalOptions(options []string) []string {
 	out := make([]string, 0, len(options))
 	seen := make(map[string]struct{}, len(options))
