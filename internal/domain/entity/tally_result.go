@@ -8,7 +8,7 @@ type TallyResult struct {
 	ProposalID  string         `gorm:"size:64;not null;uniqueIndex" json:"proposal_id"`
 	TotalVotes  int            `gorm:"not null" json:"total_votes"`
 	TallyJSON   string         `gorm:"type:text;not null" json:"tally_json"`
-	MerkleRoot  []byte         `gorm:"type:blob;not null" json:"merkle_root"`
+	MerkleRoot  []byte         `gorm:"not null" json:"merkle_root"`
 	AnchorHash  string         `gorm:"size:128;not null" json:"anchor_hash"`
 	PublishedAt time.Time      `gorm:"not null" json:"published_at"`
 	CreatedAt   time.Time      `gorm:"not null" json:"created_at"`

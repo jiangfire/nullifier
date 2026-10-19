@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -132,6 +133,13 @@ func setupPostgresDB(t *testing.T) (context.Context, *gorm.DB, func()) {
 	if err != nil {
 		cancel()
 		if isDockerUnavailable(err) {
+			// A skipped container test reports the same green as a passing one, so
+			// letting CI skip here would silently stop covering PostgreSQL. Only
+			// allow the skip outside CI, where Docker is genuinely optional.
+			if isCI() {
+				require.NoErrorf(t, err,
+					"Docker is unavailable; the PostgreSQL integration tests must run in CI, not be skipped")
+			}
 			t.Skipf("docker unavailable: %v", err)
 		}
 		require.NoError(t, err)
@@ -171,4 +179,18 @@ func isDockerUnavailable(err error) bool {
 		strings.Contains(msg, "daemon") ||
 		strings.Contains(msg, "no such host") ||
 		strings.Contains(msg, "cannot connect")
+}
+
+// isCI reports whether the suite is running under a CI provider. GitHub Actions
+// sets both CI and GITHUB_ACTIONS; GitLab and most others set CI.
+func isCI() bool {
+	for _, key := range []string{"CI", "GITHUB_ACTIONS"} {
+		switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+		case "", "false", "0", "no":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
