@@ -232,7 +232,47 @@ web/                        # Vue 3 前端门户
   - 查看凭证状态
   - 查看审计锚点
 
-### 7.2 CLI
+### 7.2 前端信息架构与设计系统
+
+- 外壳结构：左侧导航（共享页 + 当前工作区分组）+ 顶栏（页面标题与上下文状态）+ 内容区。
+  `src/App.vue` 只负责外壳、路由与新手引导编排，业务页面在 `src/components/panels/`。
+- 页面分区（`SectionId`）：
+  - 共享：`overview`（概览）、`setup`（连接配置）、`guide`（术语参考）
+  - 用户端：`hall`（投票大厅）、`identity`（我的身份）、`vote`（参与投票）
+  - 运营端：`ops`（计票与审计，内部再分 `OpsStepId` 六个步骤）
+- 引导策略：只保留一种上下文引导——当用户被前置条件卡住时，页面顶部出现一条
+  带直达动作的提示条（缺 Admin Token、缺凭证、缺解密份额等），条件满足即消失。
+  新手引导浮层只负责选角色，具体步骤由内容区顶部的引导条承载；
+  术语说明集中在「术语参考」页，不再在每个字段旁重复解释。
+- 设计系统：`src/styles/` 分为 `tokens.css`（颜色/圆角/间距/字体令牌）、
+  `base.css`（重置与基础排版）、`components.css`（通用 UI 词汇表）、
+  `shell.css`（外壳布局）。组件只引用令牌变量，不写裸色值。
+- 视图推导规则（工作区归属、页面标题、引导步进）集中在 `src/lib/portal-view.ts`，
+  有对应单元测试。
+- 候选项用可增删的行式输入：`createProposalForm.options` 是字符串数组，不是按行分割的文本。
+  每行一个输入框 + 「移除」按钮，底部「+ 添加选项」；界面至少保留 2 行（后端要求 ≥ 2 个候选项），
+  增删后焦点自动落到相邻输入框。行编辑规则在 `src/lib/options.ts`，有对应单元测试。
+
+### 7.3 前端错误文案中文化
+
+- 后端 `ErrorHandler` 统一返回 `{ error, code }`：`code` 是稳定枚举
+  （`INVALID_REQUEST` / `NOT_FOUND` / `UNAUTHORIZED` / `DOUBLE_VOTING` /
+  `CREDENTIAL_EXISTS` / `USER_ALREADY_VOTED` / `INVALID_CREDENTIAL` /
+  `DECRYPTION_SESSION_EXISTS` / `RESULT_ALREADY_PUBLISHED` / `INTERNAL_ERROR`），
+  `error` 是面向开发者的英文或原始 Go error 细节。
+- 前端不再直接透传 `error`：`src/lib/api.ts` 把 `code` 一并带出，
+  `src/lib/error-messages.ts` 的 `describeApiError(message, code, fallback)` 负责翻译，
+  优先级为 **业务短语 > 错误码 > 调用方兜底**。
+  - 业务短语：按后端透出的英文短语正则匹配（如 `proposal must be closed before tally`），
+    映射成带操作指引的中文。
+  - 错误码：与操作无关的失败直接用错误码的通用说法。
+  - 兜底：调用方按当前操作给出上下文文案（如「该提案还没有发布结果，或结果尚未成功解密」）。
+  - 未命中已知短语的 `INVALID_REQUEST` 去掉 `invalid request: ` 前缀后透出后端细节，
+    避免吞掉真实原因。
+- 所有失败出口统一走 `describeApiError`，不再有组件内的英文硬编码特例。
+- CLI 输出保持纯文本命令结果，不做中文化。
+
+### 7.4 CLI
 
 - CLI 直接复用 HTTP API，不绕过服务端校验。
 - 当前命令：
@@ -263,6 +303,8 @@ web/                        # Vue 3 前端门户
 - PostgreSQL 集成测试使用 `testcontainers`
 - 前端最小校验是：
   - `pnpm --dir web exec tsc --noEmit`
+  - `pnpm --dir web run lint`
+  - `pnpm --dir web run test`
 
 ## 9. 当前已知限制
 

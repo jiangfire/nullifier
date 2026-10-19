@@ -30,7 +30,7 @@
 - `internal/infrastructure` — `http`（Gin 路由/中间件/错误映射）、`persistence`（GORM 仓储与自动迁移）、`crypto`（gnark / kyber / kryptology）
 - `internal/di` — Wire 依赖注入；`internal/config` — viper 配置加载与运行期校验
 - `tests/` — `unit` 同级 `_test.go`、`integration`（testcontainers + PG）、`e2e`
-- `web/` — Vue 3 + TypeScript + Rsbuild 单页门户（`src/App.vue` 单文件承载全部页面模块）
+- `web/` — Vue 3 + TypeScript + Rsbuild 单页门户（`src/App.vue` 只做外壳与引导编排，页面拆在 `src/components/panels/`，设计令牌在 `src/styles/`，后端错误文案映射在 `src/lib/error-messages.ts`）
 - `configs/` — `config.yaml`（开发）、`config.production.yaml`、`production.env.example`
 - `docs/` — `techspec.md`（当前实现口径，改接口/流程优先更新）
 - `scripts/` — 覆盖率门槛脚本；`.github/workflows/ci.yml` — CI 定义
