@@ -179,6 +179,45 @@ function nowLabel(): string {
   return new Date().toLocaleString('zh-CN', { hour12: false });
 }
 
+// parseProposalItems 把接口返回的 items 归一化成 ProposalItem 列表。
+// 大厅只取开放提案、运营端取全部提案，两者结构一致，共用这段解析。
+function parseProposalItems(raw: unknown): ProposalItem[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((item): ProposalItem | null => {
+      const object = toObject(item);
+      if (object === null) {
+        return null;
+      }
+      const id = textOf(object, 'id');
+      if (id === '') {
+        return null;
+      }
+      const parsedDescription = decodeProposalDescription(
+        textOf(object, 'description'),
+      );
+      const rawOptions = object.options;
+      const options = Array.isArray(rawOptions)
+        ? rawOptions
+            .filter((item): item is string => typeof item === 'string')
+            .map((item) => item.trim())
+            .filter((item) => item !== '')
+        : parsedDescription.options;
+      return {
+        id,
+        title: textOf(object, 'title'),
+        description: parsedDescription.description,
+        options,
+        status: textOf(object, 'status'),
+        startsAt: textOf(object, 'starts_at'),
+        endsAt: textOf(object, 'ends_at'),
+      };
+    })
+    .filter((item): item is ProposalItem => item !== null);
+}
+
 function parseStoredRoute(raw: string | null): PortalRouteState | null {
   if (!raw) {
     return null;
@@ -235,6 +274,11 @@ export function useVotePortal() {
     checkedAt: '',
   });
   const hallState = reactive({
+    loading: false,
+    proposals: [] as ProposalItem[],
+  });
+  // 运营端持有全部提案（含已关闭、未开始），用来挑选 proposal_id。
+  const opsProposalsState = reactive({
     loading: false,
     proposals: [] as ProposalItem[],
   });
@@ -808,37 +852,7 @@ export function useVotePortal() {
       }
       return;
     }
-    hallState.proposals = items
-      .map((item): ProposalItem | null => {
-        const object = toObject(item);
-        if (object === null) {
-          return null;
-        }
-        const id = textOf(object, 'id');
-        if (id === '') {
-          return null;
-        }
-        const parsedDescription = decodeProposalDescription(
-          textOf(object, 'description'),
-        );
-        const rawOptions = object.options;
-        const options = Array.isArray(rawOptions)
-          ? rawOptions
-              .filter((item): item is string => typeof item === 'string')
-              .map((item) => item.trim())
-              .filter((item) => item !== '')
-          : parsedDescription.options;
-        return {
-          id,
-          title: textOf(object, 'title'),
-          description: parsedDescription.description,
-          options,
-          status: textOf(object, 'status'),
-          startsAt: textOf(object, 'starts_at'),
-          endsAt: textOf(object, 'ends_at'),
-        };
-      })
-      .filter((item): item is ProposalItem => item !== null);
+    hallState.proposals = parseProposalItems(items);
 
     const selected = selectedProposalId.value.trim();
     const exists = hallState.proposals.some((item) => item.id === selected);
@@ -850,6 +864,33 @@ export function useVotePortal() {
         'success',
         '提案已刷新',
         `共 ${hallState.proposals.length} 个提案`,
+      );
+    }
+  }
+
+  // loadAllProposals 拉取全部提案（含已关闭、未开始），
+  // 供运营端选择 proposal_id，不必再手工抄编号。
+  async function loadAllProposals(showNotice = true): Promise<void> {
+    opsProposalsState.loading = true;
+    const result = await apiCall({
+      baseUrl: apiBaseUrl.value,
+      path: '/api/v1/proposals',
+    });
+    opsProposalsState.loading = false;
+    if (!result.ok) {
+      opsProposalsState.proposals = [];
+      if (showNotice) {
+        addNotice('error', '加载失败', result.error ?? '无法获取提案列表');
+      }
+      return;
+    }
+    const payload = toObject(result.data);
+    opsProposalsState.proposals = parseProposalItems(payload?.items);
+    if (showNotice) {
+      addNotice(
+        'success',
+        '提案列表已更新',
+        `共 ${opsProposalsState.proposals.length} 个提案`,
       );
     }
   }
@@ -1442,6 +1483,7 @@ export function useVotePortal() {
 
     await checkHealth(false);
     await loadOpenProposals(false);
+    await loadAllProposals(false);
   });
 
   onUnmounted(() => {
@@ -1470,6 +1512,9 @@ export function useVotePortal() {
     loadOpenProposals,
     selectedProposal,
     adoptProposal,
+
+    opsProposalsState,
+    loadAllProposals,
 
     identityForm,
     useCustomPubKey,

@@ -52,7 +52,7 @@ nullifier 把这两个动作拆开:
 
 | 形态 | 说明 |
 |---|---|
-| HTTP API | 11 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
+| HTTP API | 12 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
 | CLI | 13 个命令,复用同一套 HTTP API,不绕过服务端校验 |
 | Web 门户 | Vue 3 单页应用,覆盖投票端与运营端全流程 |
 
@@ -187,6 +187,19 @@ internal/di         Wire 装配          internal/config   viper 配置 + 运行
 
 ## 开发
 
+仓库根目录的 `Makefile` 是统一入口。Linux/macOS 直接 `make <target>`；Windows 在 Git for Windows 的 bash 里跑 `mingw32-make <target>`（Makefile 已自动处理 `CGO_ENABLED`）。
+
+```bash
+make help              # 列出全部目标
+make check             # 提交前门禁:vet + gofmt + 前端 lint + tsc
+make ci                # 复现 CI:go test ./... + 覆盖率门槛
+make test              # 全部测试
+make cover             # 覆盖率门槛(THRESHOLD=90 可覆盖默认值)
+make web-lint web-typecheck web-test   # 前端检查
+```
+
+等价的原始命令：
+
 ```bash
 go build ./...                  # 构建
 go vet ./...                    # 静态检查
@@ -196,9 +209,9 @@ go test ./...                   # 全部测试
 bash ./scripts/check-coverage.sh 80 coverage.out   # CI 实际执行的形式
 ```
 
-CI 定义在 `.github/workflows/ci.yml`,执行 `go test ./...` 加覆盖率门槛。PostgreSQL 集成测试走 testcontainers,Docker 不可用时自动跳过。
+CI 定义在 `.github/workflows/ci.yml`,执行 `go test ./...` 加覆盖率门槛。PostgreSQL 集成测试走 testcontainers:本地 Docker 不可用时跳过,**CI 环境下 Docker 缺失会直接失败**,避免"跳过"被误读成"通过"。
 
-当前覆盖率 81.4%,距 80% 门槛只剩 1.4 个百分点余量 —— **新增代码请一并补测**。
+当前覆盖率 81.8%,距 80% 门槛只剩 1.8 个百分点余量 —— **新增代码请一并补测**。
 
 ## 项目状态与限制
 

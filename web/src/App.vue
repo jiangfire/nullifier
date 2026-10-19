@@ -2011,7 +2011,31 @@ function handleTabKeydown(
               <h2>计票与审计</h2>
               <p class="panel-tip">用一条顺序化流程完成提案、计票和审计。</p>
             </div>
+            <div class="header-actions">
+              <button
+                class="btn btn-secondary"
+                type="button"
+                :disabled="portal.opsProposalsState.loading"
+                @click="portal.loadAllProposals(false)"
+              >
+                {{
+                  portal.opsProposalsState.loading
+                    ? '加载中...'
+                    : '加载全部提案'
+                }}
+              </button>
+            </div>
           </header>
+
+          <datalist id="ops-proposal-options">
+            <option
+              v-for="item in portal.opsProposalsState.proposals"
+              :key="item.id"
+              :value="item.id"
+            >
+              {{ item.title || item.id }}
+            </option>
+          </datalist>
 
           <div class="summary-strip summary-strip-compact">
             <article class="summary-item">
@@ -2021,6 +2045,10 @@ function handleTabKeydown(
             <article class="summary-item">
               <span>proposal_id</span>
               <strong>{{ portal.selectedProposalId || '-' }}</strong>
+            </article>
+            <article class="summary-item">
+              <span>可选提案</span>
+              <strong>{{ portal.opsProposalsState.proposals.length }}</strong>
             </article>
             <article class="summary-item">
               <span>Admin Token</span>
@@ -2244,6 +2272,7 @@ function handleTabKeydown(
                 <input
                   id="ops-decrypt-proposal-id"
                   v-model.trim="portal.decryptForm.proposalId"
+                  list="ops-proposal-options"
                   :aria-invalid="
                     portal.decryptErrors.proposalId ? 'true' : 'false'
                   "
@@ -2390,6 +2419,7 @@ function handleTabKeydown(
                 <input
                   id="ops-publish-proposal-id"
                   v-model.trim="portal.publishForm.proposalId"
+                  list="ops-proposal-options"
                   :aria-invalid="
                     portal.publishErrors.proposalId ? 'true' : 'false'
                   "
@@ -2475,6 +2505,7 @@ function handleTabKeydown(
                 <input
                   id="ops-result-proposal-id"
                   v-model.trim="portal.resultForm.proposalId"
+                  list="ops-proposal-options"
                   :aria-invalid="
                     portal.resultErrors.proposalId ? 'true' : 'false'
                   "
@@ -2537,6 +2568,7 @@ function handleTabKeydown(
                 <input
                   id="ops-credential-proposal-id"
                   v-model.trim="portal.credentialStatusForm.proposalId"
+                  list="ops-proposal-options"
                   :aria-invalid="
                     portal.credentialStatusErrors.proposalId ? 'true' : 'false'
                   "
@@ -2621,6 +2653,7 @@ function handleTabKeydown(
                 <input
                   id="ops-anchor-proposal-id"
                   v-model.trim="portal.anchorForm.proposalId"
+                  list="ops-proposal-options"
                   :aria-invalid="
                     portal.anchorErrors.proposalId ? 'true' : 'false'
                   "

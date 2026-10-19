@@ -65,3 +65,13 @@ pnpm exec tsc --noEmit
 pnpm run test
 pnpm run build
 ```
+
+从仓库根目录也可以用 Makefile（Windows 下在 Git Bash 里用 `mingw32-make`）：
+
+```bash
+make web-lint
+make web-typecheck
+make web-test
+make web-build
+make web-format-check
+```

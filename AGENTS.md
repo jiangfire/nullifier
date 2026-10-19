@@ -4,10 +4,19 @@
 
 ## Setup commands
 
+推荐用仓库根目录的 `Makefile` 作为统一入口（Windows 下在 Git for Windows 的 bash 里跑 `mingw32-make <target>`，Linux/macOS 直接 `make <target>`；`make help` 列出全部目标）：
+
+- `make deps` / `make build` / `make run` / `make test` / `make vet` / `make fmt-check` / `make cover`
+- `make check` — 提交前快速门禁（vet + gofmt + 前端 lint + tsc）
+- `make ci` — 复现 CI 流水线（`go test ./...` + 覆盖率门槛）
+- `make web-install` / `web-dev` / `web-build` / `web-test` / `web-lint` / `web-typecheck` / `web-format`
+
+等价的原始命令：
+
 - 安装依赖：`go mod download`；前端 `pnpm --dir web install`
 - 启动服务：`go run ./cmd/server`（默认 SQLite 文件库 `anonvote.db`）
 - 构建：`go build ./...`；前端 `pnpm --dir web run build`
-- 测试：`go test ./...`（**Windows 需 `CGO_ENABLED=1`**，`gorm.io/driver/sqlite` 依赖 cgo）
+- 测试：`go test ./...`（**Windows 需 `CGO_ENABLED=1`**，`gorm.io/driver/sqlite` 依赖 cgo；Makefile 在 Windows 上已自动导出该变量）
 - 静态检查：`go vet ./...` 与 `gofmt -l ./cmd ./internal ./tests`（应无输出）
 - 覆盖率门槛：`./scripts/check-coverage.ps1`（PowerShell）/ `bash ./scripts/check-coverage.sh`（Bash），默认阈值 80%
 - 前端：`pnpm --dir web run dev`（rsbuild，默认 :3000）、`run build`、`run test`（vitest）、`exec tsc --noEmit`
