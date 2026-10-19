@@ -1,12 +1,19 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { apiCall } from '../lib/api';
 import { localInputToRfc3339, toLocalDateTimeInput } from '../lib/datetime';
+import { describeApiError } from '../lib/error-messages';
 import {
   buildPortalSearch,
   getDefaultSection,
   isSectionAllowed,
   parsePortalRoute,
 } from '../lib/navigation';
+import {
+  appendOptionRow,
+  canRemoveOptionRow,
+  normalizeOptionList,
+  removeOptionRow,
+} from '../lib/options';
 import type {
   AnchorItem,
   CredentialStatusItem,
@@ -141,14 +148,6 @@ function splitShares(raw: string): string[] {
     .split(/[\s,]+/)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
-}
-
-function normalizeOptions(raw: string): string[] {
-  return raw
-    .split(/\r?\n|,/)
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
-    .filter((item, index, array) => array.indexOf(item) === index);
 }
 
 function decodeProposalDescription(raw: string): {
@@ -314,7 +313,7 @@ export function useVotePortal() {
   const createProposalForm = reactive({
     title: '',
     description: '',
-    optionsText: '',
+    options: ['', ''] as string[],
     startsAtLocal: '',
     endsAtLocal: '',
   });
@@ -785,7 +784,11 @@ export function useVotePortal() {
       addNotice(
         'error',
         '生成失败',
-        result.error ?? '无法根据选项生成投票凭据',
+        describeApiError(
+          result.error,
+          result.code,
+          '该提案还没初始化解密，请先在「计票与审计」完成「初始化解密」',
+        ),
       );
       return false;
     }
@@ -822,7 +825,11 @@ export function useVotePortal() {
     healthState.ok = false;
     healthState.text = '服务不可用';
     if (showNotice) {
-      addNotice('error', '连接失败', result.error ?? '无法访问后端服务');
+      addNotice(
+        'error',
+        '连接失败',
+        describeApiError(result.error, result.code, '无法访问后端服务'),
+      );
     }
   }
 
@@ -839,7 +846,11 @@ export function useVotePortal() {
     if (!result.ok) {
       hallState.proposals = [];
       if (showNotice) {
-        addNotice('error', '加载失败', result.error ?? '无法获取提案');
+        addNotice(
+          'error',
+          '加载失败',
+          describeApiError(result.error, result.code, '无法获取开放提案'),
+        );
       }
       return;
     }
@@ -880,7 +891,11 @@ export function useVotePortal() {
     if (!result.ok) {
       opsProposalsState.proposals = [];
       if (showNotice) {
-        addNotice('error', '加载失败', result.error ?? '无法获取提案列表');
+        addNotice(
+          'error',
+          '加载失败',
+          describeApiError(result.error, result.code, '无法获取提案列表'),
+        );
       }
       return;
     }
@@ -937,7 +952,11 @@ export function useVotePortal() {
     credentialLoading.value = false;
 
     if (!result.ok) {
-      addNotice('error', '签发失败', result.error ?? '后端未返回凭证');
+      addNotice(
+        'error',
+        '签发失败',
+        describeApiError(result.error, result.code, '后端未返回凭证'),
+      );
       return false;
     }
     const payload = toObject(result.data);
@@ -1018,7 +1037,11 @@ export function useVotePortal() {
     voteLoading.value = false;
 
     if (!result.ok) {
-      addNotice('error', '投票失败', result.error ?? '请检查投票凭据');
+      addNotice(
+        'error',
+        '投票失败',
+        describeApiError(result.error, result.code, '请检查投票凭据'),
+      );
       return false;
     }
 
@@ -1049,7 +1072,11 @@ export function useVotePortal() {
     if (!result.ok) {
       hasVoted.value = null;
       if (showNotice) {
-        addNotice('error', '查询失败', result.error ?? '无法查询状态');
+        addNotice(
+          'error',
+          '查询失败',
+          describeApiError(result.error, result.code, '无法查询投票状态'),
+        );
       }
       return;
     }
@@ -1064,6 +1091,24 @@ export function useVotePortal() {
     }
   }
 
+  /** 追加一个候选项输入行。 */
+  function addProposalOption(): void {
+    createProposalForm.options = appendOptionRow(createProposalForm.options);
+  }
+
+  /** 删除指定候选项输入行；行数已到下限时不动。 */
+  function removeProposalOption(index: number): void {
+    createProposalForm.options = removeOptionRow(
+      createProposalForm.options,
+      index,
+    );
+  }
+
+  /** 当前还能不能继续删除候选项行。 */
+  function canRemoveProposalOption(): boolean {
+    return canRemoveOptionRow(createProposalForm.options);
+  }
+
   async function createProposal(): Promise<boolean> {
     clearErrorGroup(createProposalErrors);
     if (!adminTokenReady.value) {
@@ -1075,7 +1120,7 @@ export function useVotePortal() {
       createProposalErrors.title = '请填写标题';
     }
 
-    const options = normalizeOptions(createProposalForm.optionsText);
+    const options = normalizeOptionList(createProposalForm.options);
     if (options.length < 2) {
       createProposalErrors.options = '请至少提供 2 个投票选项';
     }
@@ -1123,7 +1168,11 @@ export function useVotePortal() {
     createProposalLoading.value = false;
 
     if (!result.ok) {
-      addNotice('error', '创建失败', result.error ?? '提案创建失败');
+      addNotice(
+        'error',
+        '创建失败',
+        describeApiError(result.error, result.code, '提案创建失败'),
+      );
       return false;
     }
 
@@ -1184,12 +1233,11 @@ export function useVotePortal() {
     decryptLoading.value = false;
 
     if (!result.ok) {
-      const detail = result.error?.includes(
-        'proposal decryption must be prepared before voting opens',
-      )
-        ? '当前提案已经进入投票窗口。请把 starts_at 设为未来时间后再初始化解密，或新建一个“待开始”的提案。'
-        : (result.error ?? '无法初始化解密会话');
-      addNotice('error', '初始化失败', detail);
+      addNotice(
+        'error',
+        '初始化失败',
+        describeApiError(result.error, result.code, '无法初始化解密会话'),
+      );
       return false;
     }
 
@@ -1237,7 +1285,15 @@ export function useVotePortal() {
     publishLoading.value = false;
 
     if (!result.ok) {
-      addNotice('error', '发布失败', result.error ?? '发布结果失败');
+      addNotice(
+        'error',
+        '发布失败',
+        describeApiError(
+          result.error,
+          result.code,
+          '发布结果失败，请确认已提交足够的解密份额',
+        ),
+      );
       return false;
     }
 
@@ -1267,7 +1323,15 @@ export function useVotePortal() {
     if (!result.ok) {
       resultSummary.value = '';
       resultTally.value = [];
-      addNotice('error', '查询失败', result.error ?? '无法获取计票结果');
+      addNotice(
+        'error',
+        '查询失败',
+        describeApiError(
+          result.error,
+          result.code,
+          '该提案还没有发布结果，或结果尚未成功解密',
+        ),
+      );
       return false;
     }
 
@@ -1307,7 +1371,15 @@ export function useVotePortal() {
 
     if (!result.ok) {
       anchors.value = [];
-      addNotice('error', '查询失败', result.error ?? '无法获取审计锚点');
+      addNotice(
+        'error',
+        '查询失败',
+        describeApiError(
+          result.error,
+          result.code,
+          '该提案还没有可核验的审计锚点',
+        ),
+      );
       return;
     }
 
@@ -1366,7 +1438,11 @@ export function useVotePortal() {
 
     if (!result.ok) {
       credentialStatuses.value = [];
-      addNotice('error', '查询失败', result.error ?? '无法获取凭证状态');
+      addNotice(
+        'error',
+        '查询失败',
+        describeApiError(result.error, result.code, '该提案还没有签发任何凭证'),
+      );
       return false;
     }
 
@@ -1478,7 +1554,7 @@ export function useVotePortal() {
     syncRouteToUrl();
 
     setProposalWindow('scheduled');
-    createProposalForm.optionsText = '候选人 A\n候选人 B';
+    createProposalForm.options = ['候选人 A', '候选人 B'];
     voteForm.nullifier = newNullifier();
 
     await checkHealth(false);
@@ -1551,6 +1627,9 @@ export function useVotePortal() {
     createProposalLoading,
     createProposalErrors,
     createProposal,
+    addProposalOption,
+    removeProposalOption,
+    canRemoveProposalOption,
     setProposalWindow,
 
     decryptForm,

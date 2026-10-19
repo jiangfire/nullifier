@@ -17,6 +17,8 @@ export interface ApiCallResult<T = unknown> {
   status: number;
   data: T | null;
   error: string | null;
+  /** 后端错误码（INVALID_REQUEST / NOT_FOUND / UNAUTHORIZED …），用于生成人话提示。 */
+  code: string | null;
   rawText: string;
 }
 
@@ -77,6 +79,19 @@ function extractError(payload: unknown, status: number): string {
   return `请求失败（HTTP ${status}）`;
 }
 
+function extractCode(payload: unknown): string | null {
+  if (typeof payload === 'object' && payload !== null) {
+    const candidate = payload as Record<string, unknown>;
+    if (
+      typeof candidate.code === 'string' &&
+      candidate.code.trim().length > 0
+    ) {
+      return candidate.code.trim();
+    }
+  }
+  return null;
+}
+
 export async function apiCall<T = unknown>(
   options: ApiCallOptions,
 ): Promise<ApiCallResult<T>> {
@@ -123,6 +138,7 @@ export async function apiCall<T = unknown>(
         status: response.status,
         data: null,
         error: extractError(parsed, response.status),
+        code: extractCode(parsed),
         rawText,
       };
     }
@@ -132,6 +148,7 @@ export async function apiCall<T = unknown>(
       status: response.status,
       data: (parsed as T) ?? null,
       error: null,
+      code: null,
       rawText,
     };
   } catch (error) {
@@ -141,6 +158,7 @@ export async function apiCall<T = unknown>(
       status: 0,
       data: null,
       error: `网络请求失败：${message}`,
+      code: null,
       rawText: '',
     };
   }

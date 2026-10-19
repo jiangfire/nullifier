@@ -9,6 +9,15 @@ export type SectionId =
   | 'vote'
   | 'ops';
 
+/** 运营端「计票与审计」内部的六个步骤。 */
+export type OpsStepId =
+  | 'create'
+  | 'decrypt'
+  | 'publish'
+  | 'result'
+  | 'credential'
+  | 'anchor';
+
 export interface SectionMeta {
   id: SectionId;
   workspace: SectionScope;

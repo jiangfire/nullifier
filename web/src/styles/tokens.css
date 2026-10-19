@@ -1,0 +1,81 @@
+/* 设计令牌：颜色 / 圆角 / 间距 / 字体 / 阴影。
+   所有组件只允许引用这里的变量，不允许出现裸色值。 */
+:root {
+  color-scheme: light;
+
+  /* 表面与文字 */
+  --c-bg: #f6f7f9;
+  --c-surface: #ffffff;
+  --c-surface-2: #fafbfc;
+  --c-surface-3: #f2f4f7;
+  --c-border: #e4e7ec;
+  --c-border-strong: #d0d5dd;
+
+  --c-text: #101828;
+  --c-text-muted: #667085;
+  --c-text-subtle: #98a2b3;
+  --c-text-inverse: #ffffff;
+
+  /* 语义色：品牌绿为唯一强调色，其余仅用于状态 */
+  --c-brand: #047857;
+  --c-brand-hover: #036c4d;
+  --c-brand-soft: #ecfdf5;
+  --c-brand-border: #a7f3d0;
+
+  --c-danger: #b42318;
+  --c-danger-soft: #fef3f2;
+  --c-danger-border: #fecdca;
+
+  --c-warn: #b54708;
+  --c-warn-soft: #fffaeb;
+  --c-warn-border: #fedf89;
+
+  --c-info: #175cd3;
+  --c-info-soft: #eff8ff;
+  --c-info-border: #b2ddff;
+
+  /* 圆角：只有四档，杜绝随手取值 */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-pill: 999px;
+
+  /* 间距：4 的倍数 */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+
+  /* 字体 */
+  --font-sans:
+    'Fira Sans', 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Segoe UI',
+    sans-serif;
+  --font-mono:
+    'Fira Code', 'IBM Plex Mono', 'JetBrains Mono', 'SFMono-Regular',
+    'Consolas', monospace;
+
+  --t-page: 1.25rem;
+  --t-section: 1rem;
+  --t-body: 0.875rem;
+  --t-label: 0.8125rem;
+  --t-caption: 0.75rem;
+
+  --lh-tight: 1.3;
+  --lh-body: 1.6;
+
+  /* 阴影：仅两级，面板之间靠边框分层 */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-md: 0 4px 12px rgba(16, 24, 40, 0.08);
+  --shadow-lg: 0 16px 40px rgba(16, 24, 40, 0.16);
+
+  --focus-ring: 0 0 0 3px rgba(4, 120, 87, 0.25);
+
+  --sidebar-w: 248px;
+  --topbar-h: 60px;
+}
