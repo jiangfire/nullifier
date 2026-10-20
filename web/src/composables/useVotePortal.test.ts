@@ -60,9 +60,13 @@ interface FetchCall {
   body: Record<string, unknown> | null;
 }
 
-function stubFetch(
-  routes: Array<{ match: (url: string) => boolean; payload: unknown }>,
-): FetchCall[] {
+interface FetchRoute {
+  match: (url: string) => boolean;
+  payload: unknown;
+  status?: number;
+}
+
+function stubFetch(routes: FetchRoute[]): FetchCall[] {
   const calls: FetchCall[] = [];
   vi.stubGlobal(
     'fetch',
@@ -74,9 +78,10 @@ function stubFetch(
       }
       calls.push({ url, body });
       const route = routes.find((item) => item.match(url));
+      const status = route?.status ?? 200;
       return {
-        ok: true,
-        status: 200,
+        ok: status >= 200 && status < 300,
+        status,
         text: async () => JSON.stringify(route ? route.payload : {}),
       };
     }),
@@ -260,5 +265,75 @@ describe('凭证与会话卫生', () => {
       (item) => item.level === 'error',
     );
     expect(stillThere.length).toBe(errors.length);
+  });
+});
+
+describe('查询投票状态', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('可以主动查询并更新「是否已投票」', async () => {
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('/vote-status'),
+        payload: { has_voted: true },
+      },
+    ]);
+    const portal = setupPortal();
+
+    await portal.fetchVoteStatus();
+
+    const statusCall = calls.find((call) => call.url.includes('/vote-status'));
+    expect(statusCall).toBeDefined();
+    expect(statusCall?.url).toContain('/api/v1/proposals/p1/vote-status');
+    expect(statusCall?.body?.user_id).toBe('u-1');
+    expect(portal.hasVoted.value).toBe(true);
+  });
+
+  it('查询失败时留下常驻的行内错误', async () => {
+    stubFetch([
+      {
+        match: (url) => url.includes('/vote-status'),
+        payload: { error: { code: 'INTERNAL_ERROR' } },
+        status: 500,
+      },
+    ]);
+    const portal = setupPortal();
+
+    await portal.fetchVoteStatus();
+
+    expect(portal.voteStatusError.value).not.toBe('');
+    expect(portal.hasVoted.value).toBeNull();
+  });
+
+  it('查询成功后清掉上一次的行内错误', async () => {
+    let failing = true;
+    const calls: FetchCall[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        const body = init?.body
+          ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+          : null;
+        calls.push({ url, body });
+        const status = failing ? 500 : 200;
+        failing = false;
+        return {
+          ok: status === 200,
+          status,
+          text: async () => JSON.stringify({ has_voted: false }),
+        };
+      }),
+    );
+    const portal = setupPortal();
+
+    await portal.fetchVoteStatus();
+    expect(portal.voteStatusError.value).not.toBe('');
+
+    await portal.fetchVoteStatus();
+    expect(portal.voteStatusError.value).toBe('');
+    expect(portal.hasVoted.value).toBe(false);
   });
 });

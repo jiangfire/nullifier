@@ -23,6 +23,10 @@ async function submit(): Promise<void> {
     emit('submitted');
   }
 }
+
+async function checkStatus(): Promise<void> {
+  await portal.fetchVoteStatus();
+}
 </script>
 
 <template>
@@ -98,6 +102,27 @@ async function submit(): Promise<void> {
               {{ item.title || item.id }}
             </button>
           </div>
+          <div class="row">
+            <button
+              class="btn btn--secondary btn--sm"
+              type="button"
+              :disabled="
+                portal.voteStatusLoading ||
+                !portal.walletReady ||
+                portal.voteForm.proposalId.trim() === ''
+              "
+              @click="checkStatus"
+            >
+              {{ portal.voteStatusLoading ? '查询中…' : '查询投票状态' }}
+            </button>
+          </div>
+          <p
+            v-if="portal.voteStatusError"
+            class="field-error"
+            role="alert"
+          >
+            {{ portal.voteStatusError }}
+          </p>
         </div>
       </li>
 

@@ -316,6 +316,8 @@ export function useVotePortal() {
   const voteLoading = ref(false);
   const voteStatusLoading = ref(false);
   const hasVoted = ref<boolean | null>(null);
+  // 投票状态的查询错误常驻显示在投票面板上，不只靠一条会被划走的通知。
+  const voteStatusError = ref('');
   const selectedVoteOption = ref('');
   const showAdvancedVoteFields = ref(false);
 
@@ -1120,8 +1122,12 @@ export function useVotePortal() {
   }
 
   async function fetchVoteStatus(showNotice = true): Promise<void> {
+    voteStatusError.value = '';
     if (!walletReady.value || voteForm.proposalId.trim() === '') {
-      addNotice('error', '查询失败', '请先准备凭证与提案');
+      voteStatusError.value = '请先准备凭证与提案';
+      if (showNotice) {
+        addNotice('error', '查询失败', voteStatusError.value);
+      }
       return;
     }
 
@@ -1140,12 +1146,13 @@ export function useVotePortal() {
 
     if (!result.ok) {
       hasVoted.value = null;
+      voteStatusError.value = describeApiError(
+        result.error,
+        result.code,
+        '无法查询投票状态',
+      );
       if (showNotice) {
-        addNotice(
-          'error',
-          '查询失败',
-          describeApiError(result.error, result.code, '无法查询投票状态'),
-        );
+        addNotice('error', '查询失败', voteStatusError.value);
       }
       return;
     }
@@ -1698,6 +1705,7 @@ export function useVotePortal() {
     voteForm,
     voteLoading,
     voteStatusLoading,
+    voteStatusError,
     hasVoted,
     selectedVoteOption,
     ballotTargetCurrent,
