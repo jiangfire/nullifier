@@ -15,7 +15,7 @@
 
 ## 0. 一句话架构
 
-匿名投票系统：**发资格的人看不到选谁**（盲签名凭证）→ **记选票的人看不到是谁**（votes 表无用户标识）→
+匿名投票系统：**发资格的人看不到选谁**（凭证与选票内容完全无关）→ **记选票的人看不到是谁**（votes 表无用户标识）→
 **验票真伪但不验身份**（零知识证明）。Go 后端（Gin + GORM + Wire）+ Vue 3 门户 + 复用同一套 HTTP API 的 CLI。
 
 技术栈：Go 1.25.4 · Gin 1.12 · GORM 1.31 · Wire · gnark 0.7 · circl blindrsa（kryptology 1.8）· kyber v3 · SQLite/PostgreSQL · Vue 3.5 + TypeScript 5.9 + Rsbuild
@@ -122,9 +122,9 @@
 **模式**：仓储接口方法签名都带 `ctx`；`SaveWithParticipation` 用 `clause.OnConflict{DoNothing}` + `RowsAffected == 0` 检测重复参与，冲突时返回 `ErrDuplicateParticipation`。
 
 **陷阱**：
-- `db.go:40-53` —— PostgreSQL **没有设置连接池**（`SetMaxOpenConns` / `SetMaxIdleConns` / `SetConnMaxLifetime`），用 GORM 默认值。
+- `db.go:40-53` —— PostgreSQL 的**连接池参数**由 `db.max_open_conns` / `db.max_idle_conns` / `db.conn_max_lifetime_seconds` 配置（默认 25 / 5 / 3600 秒），为 0 表示不改动 `database/sql` 默认值。
 - `db.go:56-63` —— SQLite 文件库**没开 WAL**，也没设 busy timeout。
-- `migration.go:26-28` —— 每次启动都会回填 `options_json`（`WHERE options_json IS NULL OR = ''` → `'[]'`）。生产环境启动即改表，多副本同时启动有竞争风险。
+- `migration.go:26-28` —— 每次迁移都会回填 `options_json`（`WHERE options_json IS NULL OR = ''` → `'[]'`）。**release 模式启动不再自动迁移**，改表要走独立的 `nullifier-server -migrate` 步骤（`config.AutoMigrate`）。
 - `db_env.go:23-25` —— `GO_ENV=test` 时 SQLite 强制切 `:memory:`。
 
 ### 1.6 密码学层 —— `internal/infrastructure/crypto/`
@@ -141,7 +141,7 @@
 **陷阱**：
 - `gnark_proof_verifier.go:25-31` —— **`vk_path` 为空时 `Verify` 直接 `return nil`**，任何非空 proof 都通过。`requireVerifyMode` 只由 vk_path 是否为空决定。
 - `gnark_proof_verifier.go:64-67` —— 加载 vk 后，`public_witness` 是**必填**，缺失即验证失败。
-- `kyber_elgamal.go:258-262` —— KDF 是裸 `sha256("enc:"||shared)` / `sha256("auth:"||shared)`，没有 HKDF、没有 salt。
+- `kyber_elgamal.go` —— 密钥派生用 **HKDF-SHA256**（`crypto/hkdf`），salt 每次加密随机生成并随密文传输，info 绑定协议版本、用途与双方公钥。密文格式 **v2**，与 v0.1.0 的 v1 密文不兼容。
 - `kryptology_credential_issuer.go:163-179` —— 盲签名全流程在**服务端内部**完成（服务端自己 Blind 再 Finalize），客户端不参与。
 - `kryptology_credential_issuer.go:194` `VerifyCredential` —— **生产路径从不调用**，只有单测调用。投票时是拿提交的签名和库里存的签名做 `bytes.Equal` 比对（`voting.go:166`）。
 
@@ -229,20 +229,23 @@ publish        → 提案必须已关闭
 
 ---
 
-## 3. 已知陷阱（Top 12，改动时优先检查）
+## 3. 已知陷阱（改动时优先检查）
+
+> 本清单随代码更新。**已修掉的问题不再列在这里**，但历史结论保留在
+> `docs/release-review-2026-10-20.md`。
 
 1. **`vk_path` 为空 = 关闭证明验证。** `gnark_proof_verifier.go:55`。开发配置 `configs/config.yaml` 就是 `vk_path: ""`。
 2. **`configs/config.production.yaml` 不会被自动加载。** viper 只认 `config.*`。
-3. **生产配置里 `admin_bearer_token: ""` 且 `production.env.example` 没有该变量** → 每次重启 token 都变，多副本各持不同 token。
-4. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。
-5. **覆盖率门槛只覆盖 5 个包**（usecase / config / di / http / http-middleware），`internal/infrastructure/crypto`（77.7%）、`internal/infrastructure/persistence`（59.3%）、`cmd/cli`（24.6%）、`cmd/server`（**0%**）**都不在门槛内**。门槛口径 82.30%，**全仓口径 62.0%**（2026-10-20 实测），余量仅 2.3 个百分点；其中 usecase 单包 79.8%（已低于 80%）。
-6. **登录态的 admin token 会写进生产日志**（`cmd/server/main.go:44-48`）—— 配置态的 token 也以 Info 级别打印。
-7. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go:234`）和 `isProposalClosed`（`tally.go:386`）。改时间规则要同时改两处。
-8. **`ballot-draft` 是公共路由且无模式开关** —— 生产环境也会暴露（此时返回的假 proof 会在验证阶段被拒，但接口本身不该在生产可达）。
-9. **proof 没有绑定到请求字段**：`PublicInputs()`（`voting.go:60-69`）造了 `proposal_id` / `nullifier`，但 `Verify`（`gnark_proof_verifier.go:48-80`）**只读 `public_witness`**。`encrypted_vote` 也不在任何公开输入里。
-10. **CLI 的 URL 路径二次转义**，含空格 / `/` / `%` 的 proposal id 必然 404（见 §1.8）。
-11. **门户/CLI 会把明文选项（`selected_option`）发到服务端**，而服务端根本不读这个字段 —— 明文选项白白上了网。
-12. **门户切换选项不会作废已生成的凭据**，提交时后端也不校验 → 改了选项直接提交会投出旧选项（静默错票）。
+3. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项。
+4. **覆盖率门槛只覆盖 5 个包**（usecase / config / di / http / http-middleware），`internal/infrastructure/crypto`（78.1%）、`internal/infrastructure/persistence`（58.6%）、`cmd/cli`（24.6%）、`cmd/server`（**0%**）**都不在门槛内**。门槛口径 83.40%，**全仓口径 62.7%**（2026-10-20 实测），余量 3.4 个百分点；其中 usecase 单包 79.8%（已低于 80%）。
+5. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go:234`）和 `isProposalClosed`（`tally.go:386`）。改时间规则要同时改两处。
+6. **`ballot-draft` 是公共路由且无模式开关** —— 生产环境也会暴露（此时返回的假 proof 会在验证阶段被拒，但接口本身不该在生产可达）。修复任务见 v1.0.0 计划 T1。
+7. **proof 没有绑定到请求字段**：`PublicInputs()`（`voting.go:60-69`）造了 `proposal_id` / `nullifier`，但 `Verify`（`gnark_proof_verifier.go:48-80`）**只读 `public_witness`**。`encrypted_vote` 也不在任何公开输入里。修复任务见 v1.0.0 计划 T15。
+8. **release 模式不再启动即改表** —— 必须先跑 `nullifier-server -migrate`，忘了会直接启动失败（`persistence.SchemaReady` 检查）。开发模式仍然自动迁移。
+9. **盲签名全流程在服务端内部完成**（`kryptology_credential_issuer.go:163-179`）—— 服务端自己 Blind 再 Finalize，客户端不参与，**不是真盲签名**。v1.0.0 计划 T17 改成两段式。
+10. **凭证签发端点在 admin 分组下**（`server.go:47-48`）—— 每个投票人都得持有 admin token，且运营方天然掌握「哪个凭证给了谁」。v1.0.0 计划 T9 改为凭证池 + 匿名随机领取。
+11. **密文格式 v2 与 v0.1.0 不兼容** —— v1 密文会被直接拒绝（`unsupported ciphertext version`），旧的加密选票解不开。密钥派生用 HKDF-SHA256（`crypto/hkdf`）。
+12. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go:60`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
 
 ---
 

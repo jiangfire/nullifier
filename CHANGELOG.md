@@ -24,6 +24,12 @@
 - 门户的管理令牌改存 `sessionStorage`，不再明文留在 `localStorage`。
 - 门户切换提案时重置「是否已投票」，错误提示不再 4.2 秒自动消失。
 - PowerShell 版覆盖率脚本此前把 `$Profile` 当字面量文件名写出，现在正确插值。
+- 管理令牌改为常数时间比较（先做 SHA-256 摘要再逐字节比，避免长度与前缀成为
+  计时侧信道），并拒绝含 CR/LF/NUL 的畸形 `Authorization` 头 —— 此前
+  `Bearer <token>\r\n` 里的尾随 CRLF 会被 `TrimSpace` 悄悄裁掉而当成合法头放行。
+- 引导浮层补焦点陷阱与 Esc 关闭：此前焦点不进浮层，Tab 会跑到后面的页面里。
+- 门户补「查询投票状态」按钮：此前该能力只在投票成功后的副作用里被触发，
+  投票人无法在投票前主动查询。
 
 ### 变更
 
@@ -34,13 +40,27 @@
 - `crypto.vk_path` 为空时启动明确告警「证明校验已关闭」。
 - 覆盖率门槛脚本不再覆盖 `GOMODCACHE` / `GOCACHE`，CI 的依赖缓存不再失效。
 - `cmd/cli` 新增 `version` 命令，共 14 个命令。
+- **改表从服务启动里拆出来**：新增 `nullifier-server -migrate`（跑完迁移即退出），
+  `release` 模式默认不在启动时改表。忘跑迁移时服务会**直接启动失败**并提示，
+  而不是等第一个请求打进来才报「no such table」。迁移步骤不要求
+  `CRYPTO_VK_PATH` 与 `SERVER_ADMIN_BEARER_TOKEN`。
+- PostgreSQL 连接池参数显式配置（`db.max_open_conns` / `db.max_idle_conns` /
+  `db.conn_max_lifetime_seconds`，默认 25 / 5 / 3600 秒），不再依赖
+  `database/sql` 的「不限制连接数」默认值。
+- **选票密文格式升到 v2**：密钥派生改用 HKDF-SHA256（RFC 5869，标准库
+  `crypto/hkdf`），salt 每次加密随机生成并随密文传输，info 绑定协议版本、用途与
+  双方公钥。**这是一次协议变更：v0.1.0 的旧密文（v1 格式）会被直接拒绝，
+  升级后旧的加密选票无法解密。**
 
 ### 文档
 
 - README 补「当前版本边界」告示，匿名性描述与实现对齐（原描述与实际行为相反）。
-- 覆盖率徽章改为全仓口径（60.1%），正文区分门槛口径与全仓口径。
+- **盲签名如实描述**：文档里写明盲化步骤在服务端内部完成，**当前不具备真正的
+  盲签名性质**（签发方看得见被签内容），真正的两段式盲签名是 v1.0.0 的任务。
+- 覆盖率徽章改为全仓口径（62.7%），正文区分门槛口径（83.4%）与全仓口径。
 - 新增 `docs/project-map.md`（分层上下文索引）、`docs/release-plan-v0.1.0.md`（发版计划）、
-  `docs/release-review-2026-10-20.md`（发版前整体 review）。
+  `docs/release-review-2026-10-20.md`（发版前整体 review）、
+  `docs/release-plan-v1.0.0.md`（v1.0.0 实施计划）。
 
 ### 测试
 
@@ -60,6 +80,9 @@
 - 没有真实的选票零知识电路，`verifying.key` 无法由本仓库生成。
 - 密文由服务端生成，服务端在生成凭据时就知道选了哪个。
 - 盲签名的盲化在服务端内部完成，不具备真正的盲化性质。
+- 凭证签发端点在 admin 分组下：每个投票人都得持有 admin token 才能领凭证，
+  运营方也天然掌握「哪个凭证给了谁」的对应关系。
 - 门户 7 个 `.vue` 面板仍无自动化测试。
+- `cmd/server` 覆盖率仍为 0%，`cmd/cli` 仅 24.6%，两者都不在覆盖率门槛内。
 
 [0.1.0]: https://github.com/jiangfire/nullifier/releases/tag/v0.1.0

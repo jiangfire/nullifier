@@ -9,7 +9,7 @@
   <a href="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml"><img src="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-yellow.svg" alt="License: AGPL-3.0" /></a>
   <img src="https://img.shields.io/badge/go-1.25.4-00ADD8?logo=go&logoColor=white" alt="Go 1.25.4" />
-  <img src="https://img.shields.io/badge/coverage-62.0%25%20(repo)-yellow.svg" alt="Coverage 62.0% (repo-wide)" />
+  <img src="https://img.shields.io/badge/coverage-62.7%25%20(repo)-yellow.svg" alt="Coverage 62.7% (repo-wide)" />
 </p>
 
 ---
@@ -21,6 +21,7 @@
 nullifier 把这两个动作拆开:
 
 - **发资格的人看不到选谁** —— 凭证用 RSA-PSS 签名签发(基于 RFC9474 盲签名库)。签发方看得到 `user_id` 和设备公钥(本来就是投票人提供的),但看不到选票内容:凭证与选票内容完全无关。
+  ⚠️ 但要说清楚:**盲化步骤目前在服务端内部完成**(服务端自己 Blind 再 Finalize),因此**这还不是真正的盲签名** —— 签发方看得见被签的凭证内容。真正的两段式盲签名是 v1.0.0 的任务。
 - **记选票的人看不到是谁** —— `votes` 表只有 `proposal_id`、`nullifier`、`cipher` 三列,没有用户标识。"是否参与"单独存进 `vote_participations`,且只存 `hash(user_id)`,不与票内容关联。
 - **验票真伪但不验身份** —— 服务端用 gnark 验证零知识证明,证明"这张票是按合法凭证生成的",证明本身不携带任何身份信息。
 
@@ -40,7 +41,7 @@ nullifier 把这两个动作拆开:
 
 | 能力 | 说明 |
 |---|---|
-| 凭证签名 | RSA-PSS 签名(基于 RFC9474 盲签名库);签发方看不到选票内容,因为凭证与选票无关 |
+| 凭证签名 | RSA-PSS 签名(基于 RFC9474 盲签名库);签发方看不到选票内容,因为凭证与选票无关 —— **但盲化在服务端内部完成,尚不是真盲签名** |
 | 零知识验票 | gnark 验证选票合法性,证明不携带身份 —— **尚无真实选票电路,开发模式下不验 proof** |
 | 防重放 | 每票一个 `nullifier`,重复投票直接拒绝 |
 | 防冒充 | `proposal_id + user_id + user_pub_key + credential_signature` 四元组校验 |
@@ -245,10 +246,10 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 | 口径 | 数值 | 覆盖范围 |
 |---|---|---|
-| 门槛口径 | **82.3%** | `scripts/check-coverage.sh` 选中的 5 个包:usecase / config / di / http / http-middleware |
-| 全仓口径 | **62.0%** | `./...` 全部包(2026-10-20 实测) |
+| 门槛口径 | **83.4%** | `scripts/check-coverage.sh` 选中的 5 个包:usecase / config / di / http / http-middleware |
+| 全仓口径 | **62.7%** | `./...` 全部包(2026-10-20 实测) |
 
-门槛余量只有 2.3 个百分点,且 `internal/infrastructure/crypto`、`internal/infrastructure/persistence`、`cmd/cli`、`cmd/server` **不在门槛内** —— 这些包的覆盖率回退不会让 CI 失败。**新增代码请一并补测**。
+门槛余量只有 3.4 个百分点,且 `internal/infrastructure/crypto`(78.1%)、`internal/infrastructure/persistence`(58.6%)、`cmd/cli`(24.6%)、`cmd/server`(0%) **不在门槛内** —— 这些包的覆盖率回退不会让 CI 失败。**新增代码请一并补测**。
 
 ## 项目状态与限制
 
@@ -256,6 +257,8 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 - **证明链尚未实现。** 服务端只有 proof 验证器的骨架:没有真实选票电路、没有密钥生成流程、没有客户端 prover。`crypto.vk_path` 为空时任何非空 proof 都会通过(开发模式);加载 vk 后 `public_witness` 变成必填,而现有客户端都拿不到它。
 - **`ballot-draft` 是开发联调接口**,返回的是便于串通流程的草稿数据。**密文由服务端生成,服务端在生成时就知道选了哪个** —— 这是当前版本最大的匿名性缺口。生产环境应由真实钱包/客户端生成 proof 与密文;后端只负责验证,不代替用户端生成证明。这条链路尚未完成。
+- **凭证签发不是真盲签名。** 用的是 RFC9474 盲签名库,但 `Prepare → Blind → BlindSign → Finalize` 全在服务端进程内完成,签发方看得见被签的凭证内容。真正的两段式盲签名(客户端提交盲化消息 → 服务端签 → 客户端解盲)是 v1.0.0 的任务。
+- **凭证签发端点在 admin 分组下**,意味着每个投票人都得持有 admin token 才能领凭证 —— 这也让运营方天然掌握「哪个凭证给了谁」的对应关系。改成「凭证池 + 投票人匿名随机领取」是 v1.0.0 的任务。
 - **`decryption/setup` 拒绝"投票开放中"的提案**,运营上必须在 `starts_at` 之前完成初始化。
 - **生产部署必须显式设置** `SERVER_ADMIN_BEARER_TOKEN` 与 `SERVER_CORS_ALLOWED_ORIGINS`;`release` 模式下缺 admin token 会直接启动失败。`configs/config.production.yaml` **不会**被自动加载(viper 只找 `config.yaml`),详见该文件内的注释。
 
