@@ -246,11 +246,26 @@ jobs:
           fi
           printf 'attaching %d files\n' "${#files[@]}"
           printf ' - %s\n' "${files[@]}"
-          # 正文用 tag 里的说明，而不是自动生成的提交列表：这次发版的边界
+          # 正文用 tag 里的发版说明，而不是自动生成的提交列表：这次发版的边界
           # （内测版、证明链未实现、密文格式 v2）比提交列表重要得多。
-          git for-each-ref --format='%(contents:body)' "refs/tags/$TAG" > notes.md
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --verify-tag \
-            --notes-file notes.md \
-            "${files[@]}"
+          #
+          # 从 API 取而不是 git for-each-ref：runner 上的 checkout 可能把注解 tag
+          # 落成轻量引用，那样 %(contents) 拿到的是提交信息而不是 tag 说明。
+          notes_file="release-notes.md"
+          if [ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" --jq '.object.type')" = "tag" ]; then
+            tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG" --jq '.object.sha')"
+            gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" --jq '.message' > "${notes_file}"
+          fi
+          if [ -s "${notes_file}" ]; then
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --verify-tag \
+              --notes-file "${notes_file}" \
+              "${files[@]}"
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --verify-tag \
+              --generate-notes \
+              "${files[@]}"
+          fi
