@@ -1,5 +1,8 @@
 <script setup lang="ts">
-defineProps<{
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { FocusTrap } from '../lib/focus-trap';
+
+const props = defineProps<{
   open: boolean;
 }>();
 
@@ -7,11 +10,59 @@ const emit = defineEmits<{
   start: [role: 'user' | 'admin'];
   dismiss: [];
 }>();
+
+const dialogRef = ref<HTMLElement | null>(null);
+let trap: FocusTrap | null = null;
+
+function onKeydown(event: KeyboardEvent): void {
+  if (!props.open) {
+    return;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    emit('dismiss');
+    return;
+  }
+  if (event.key === 'Tab') {
+    // 焦点留在浮层内，键盘用户不会走到后面的页面里去。
+    if (trap?.handleTab(event.shiftKey)) {
+      event.preventDefault();
+    }
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('keydown', onKeydown);
+});
+
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeydown);
+  trap?.deactivate();
+  trap = null;
+});
+
+watch(
+  () => props.open,
+  async (open) => {
+    if (!open) {
+      trap?.deactivate();
+      trap = null;
+      return;
+    }
+    await nextTick();
+    if (!dialogRef.value) {
+      return;
+    }
+    trap = new FocusTrap(dialogRef.value, document);
+    trap.activate();
+  },
+);
 </script>
 
 <template>
   <div v-if="open" class="guide-overlay" @click.self="emit('dismiss')">
     <div
+      ref="dialogRef"
       class="guide-dialog"
       role="dialog"
       aria-modal="true"
