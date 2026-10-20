@@ -239,11 +239,11 @@ publish        → 提案必须已关闭
 3. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项。
 4. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（9 个受控包：usecase / config / di / http / http-middleware / crypto / persistence / cmd-cli / cmd-server）。单个包回退会直接让 CI 变红，但门槛本身还比各包当前水位低 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。门槛口径 79.0%，**全仓口径 74.1%**（2026-10-20 实测）；最低的一档是 `internal/infrastructure/persistence`（60.1%）。
 5. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go:234`）和 `isProposalClosed`（`tally.go:386`）。改时间规则要同时改两处。
-6. **`ballot-draft` 是公共路由且无模式开关** —— 生产环境也会暴露（此时返回的假 proof 会在验证阶段被拒，但接口本身不该在生产可达）。修复任务见 v1.0.0 计划 T1。
-7. **proof 没有绑定到请求字段**：`PublicInputs()`（`voting.go:60-69`）造了 `proposal_id` / `nullifier`，但 `Verify`（`gnark_proof_verifier.go:48-80`）**只读 `public_witness`**。`encrypted_vote` 也不在任何公开输入里。修复任务见 v1.0.0 计划 T15。
+6. **`ballot-draft` 是公共路由且无模式开关** —— 生产环境也会暴露（此时返回的假 proof 会在验证阶段被拒，但接口本身不该在生产可达）。修复任务见路线图 T1。
+7. **proof 没有绑定到请求字段**：`PublicInputs()`（`voting.go:60-69`）造了 `proposal_id` / `nullifier`，但 `Verify`（`gnark_proof_verifier.go:48-80`）**只读 `public_witness`**。`encrypted_vote` 也不在任何公开输入里。修复任务见路线图 T15。
 8. **release 模式不再启动即改表** —— 必须先跑 `nullifier-server -migrate`，忘了会直接启动失败（`persistence.SchemaReady` 检查）。开发模式仍然自动迁移。
-9. **盲签名全流程在服务端内部完成**（`kryptology_credential_issuer.go:163-179`）—— 服务端自己 Blind 再 Finalize，客户端不参与，**不是真盲签名**。v1.0.0 计划 T17 改成两段式。
-10. **凭证签发端点在 admin 分组下**（`server.go:47-48`）—— 每个投票人都得持有 admin token，且运营方天然掌握「哪个凭证给了谁」。v1.0.0 计划 T9 改为凭证池 + 匿名随机领取。
+9. **盲签名全流程在服务端内部完成**（`kryptology_credential_issuer.go:163-179`）—— 服务端自己 Blind 再 Finalize，客户端不参与，**不是真盲签名**。路线图 T17 改成两段式。
+10. **凭证改为匿名随机领取后，服务端无法强制一人一票** —— 随机领取意味着服务端看不出同一个人领了几次。路线图 §2.3 用资格证明补回。
 11. **密文格式 v2 与 v0.1.0 不兼容** —— v1 密文会被直接拒绝（`unsupported ciphertext version`），旧的加密选票解不开。密钥派生用 HKDF-SHA256（`crypto/hkdf`）。
 12. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go:60`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
 

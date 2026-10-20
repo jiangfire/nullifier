@@ -19,9 +19,9 @@
 >
 > **R18 只修了一半**：`hasVoted` 跨提案重置已由 `eb1d488` 修完，但「查询投票状态」的
 > **UI 入口仍缺** —— `fetchVoteStatus` 已实现并导出（`useVotePortal.ts:1122`/`:1711`），
-> 唯一调用点在 `submitVote` 内部（`:1118`），没有按钮能主动触发。列为 v1.0.0 计划的 T11。
+> 唯一调用点在 `submitVote` 内部（`:1118`），没有按钮能主动触发。列为路线图的 T11。
 >
-> 剩余项的完整计划见 [`docs/release-plan-v1.0.0.md`](./release-plan-v1.0.0.md)。
+> 剩余项的完整计划见 [`docs/roadmap.md`](./roadmap.md)（产品路线图）。
 
 ---
 

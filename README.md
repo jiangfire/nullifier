@@ -33,7 +33,7 @@ nullifier 把这两个动作拆开:
 >
 > - **没有真实的选票零知识电路。** `crypto.vk_path` 为空时,服务端的 proof 验证器接受任何非空 proof;仓库里唯一的 gnark 电路是测试用的玩具电路。生产配置指向的 `verifying.key` 无法由本仓库生成。
 > - **密文由服务端生成。** `POST /api/v1/proposals/:id/ballot-draft` 接收明文选项并加密,因此**服务端在生成凭据时就知道你选了哪个**。本文档与门户界面都不再声称"服务端看不到选项"。
-> - **只适合内测与开发**,不要用于真实投票。补齐证明链的工作见 [`docs/release-plan-v0.1.0.md`](./docs/release-plan-v0.1.0.md) 的 v1.0.0 里程碑。
+> - **只适合内测与开发**,不要用于真实投票。补齐证明链的工作见 [`docs/roadmap.md`](./docs/roadmap.md) 的 v1.0.0 里程碑。
 
 ## 特性
 
@@ -264,7 +264,7 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 - **`decryption/setup` 拒绝"投票开放中"的提案**,运营上必须在 `starts_at` 之前完成初始化。
 - **生产部署必须显式设置** `SERVER_ADMIN_BEARER_TOKEN` 与 `SERVER_CORS_ALLOWED_ORIGINS`;`release` 模式下缺 admin token 会直接启动失败。`configs/config.production.yaml` **不会**被自动加载(viper 只找 `config.yaml`),详见该文件内的注释。
 
-当前实现口径见 [`docs/techspec.md`](./docs/techspec.md),分层上下文索引见 [`docs/project-map.md`](./docs/project-map.md)。
+当前实现口径见 [`docs/techspec.md`](./docs/techspec.md),分层上下文索引见 [`docs/project-map.md`](./docs/project-map.md),产品路线图见 [`docs/roadmap.md`](./docs/roadmap.md)。
 
 ## 贡献
 

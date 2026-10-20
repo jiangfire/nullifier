@@ -256,7 +256,7 @@ web/                        # Vue 3 前端门户
 - **格式版本升到 v2，与 v0.1.0 的密文不兼容**：v1 密文会被直接拒绝
   （`unsupported ciphertext version`）。升级后旧的加密选票无法解密。
 
-> 补齐上述链路的顺序与工作量评估见 `docs/release-plan-v1.0.0.md`。
+> 补齐上述链路的顺序与工作量评估见 [`docs/roadmap.md`](./roadmap.md)（产品路线图）。
 
 ## 7. 前端与 CLI
 
