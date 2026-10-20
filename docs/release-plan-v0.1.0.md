@@ -205,3 +205,56 @@ docs: restate the coverage badge and add the changelog
 | M8 的 CI 新增前端检查 | 可能让 CI 变红 | 本地已验证 lint/tsc/vitest 全绿；workflow 用 `--frozen-lockfile` |
 
 每个提交都独立可 revert，不需要 `git revert` 序列。
+
+---
+
+## 8. 落地状态（2026-10-20）
+
+M1–M8 的代码与文档**已全部落地**，分支 `release/v0.1.0-prep`（从 `main` @ `2398b00` 切出）。
+实际提交与计划略有出入（拆得更细），以提交为准：
+
+| 里程碑 | commit | 状态 |
+|---|---|---|
+| M1 | `cb78f32` `fix(vote): return 400 instead of 500 for invalid proofs` | ✅ |
+| M2 | `54e1650` `fix(config): require an explicit admin token in release mode` | ✅ |
+| M3 | `8100728` `fix(cli): stop double-escaping URL paths and leaking ballot choices` | ✅ |
+| M4 | `795f2cf` `fix(web): bind ballot material to the selected option` | ✅ |
+| M5 | `eb1d488` `fix(web): keep the admin token out of localStorage and fix stale vote state` | ✅ |
+| M6 | `78ce0c7` `docs: align the anonymity claims with the actual implementation` | ✅ |
+| M7 | `7ed2eb1` `test(http): cover real groth16 verification through the handler` | ✅ |
+| M8 | `92e860f` / `e8bf315` / `b6f9f71` / `d9c1c3a` / `da7c5e7` / `b84a5d6` | ✅ |
+
+M8 实际拆成 6 个提交：pnpm 构建脚本放行、CLI `version` 命令、PowerShell 覆盖率脚本
+插值修复、CI 补 gofmt 与前端、发布流水线、文档。
+
+**落地过程中新发现并已修掉的问题**（不在原 review 清单里）：
+
+- `scripts/check-coverage.ps1` 的 `-coverprofile=$Profile` 在 PowerShell 参数模式下不插值，
+  go test 把 `$Profile` 当字面量文件名写出 —— **门槛在 Windows 上从未真正生效**。
+- 发布流水线最初用 `CGO_ENABLED=0` 交叉编译，实测产物启动即 FATAL
+  （`go-sqlite3 requires cgo to work`），而默认配置就是 sqlite。已改为各平台原生构建 +
+  冒烟启动测试。
+
+### 尚未落地（等决策门拍板）
+
+| 决策门 | 影响的改动 | 我的建议 |
+|---|---|---|
+| G2 | 非 debug 模式隐藏门户的「按选项生成凭据」按钮 | 保留现状也可发内测版，标注边界 |
+| G3 | `ballot-draft` 非 debug 模式返回 404 | 建议做，R8 |
+| G4 | 盲签名改文档措辞 | 建议做，小时级 |
+| G1 / G5 | 版本定位与版本号 | 内测版 / `0.1.0` |
+
+### 验证状态
+
+| 检查 | 结果 |
+|---|---|
+| `go build` / `go vet` / `gofmt -l` | ✅ 全绿 |
+| `go test ./...`（12 包） | ✅ 全绿 |
+| 覆盖率门槛（bash） | ✅ 82.30% ≥ 80% |
+| 覆盖率门槛（PowerShell，修复后） | ✅ 82.30% ≥ 80% |
+| `pnpm install --frozen-lockfile` | ✅ 通过 |
+| 前端 lint / tsc / vitest（57 用例）/ 生产构建 | ✅ 全绿 |
+| 发布流水线的构建 + 冒烟 + 打包（本地模拟） | ✅ 通过 |
+| PostgreSQL testcontainers 集成测试 | ⚠️ 本机无 Docker，**CI 会实跑**，分支未本地验证 |
+| 门户 7 个 `.vue` 面板浏览器渲染 | ⚠️ 无自动化覆盖 |
+
