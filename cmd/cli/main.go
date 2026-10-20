@@ -48,6 +48,9 @@ type ballotFile struct {
 	PublicWitness  string `json:"public_witness,omitempty"`
 }
 
+// version 由构建时的 -ldflags "-X main.version=..." 注入。
+var version = "dev"
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -108,6 +111,9 @@ func run(args []string) int {
 		err = c.cmdListAnchors(rest[1:])
 	case "help", "-h", "--help":
 		printRootUsage()
+		return 0
+	case "version":
+		fmt.Println(version)
 		return 0
 	default:
 		printRootUsage()
@@ -697,6 +703,7 @@ func printRootUsage() {
 
 命令:
   health
+  version
   proposals-open
   proposal-create   -title -description -options -start -end
   credential-issue  -proposal -user [-pubkey] [-out]  (需要 admin token)

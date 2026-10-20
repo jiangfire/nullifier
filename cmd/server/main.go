@@ -9,6 +9,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// version 由构建时的 -ldflags "-X main.version=..." 注入。
+var version = "dev"
+
 func main() {
 	bootstrapLogger, err := zap.NewProduction()
 	if err != nil {
@@ -37,6 +40,7 @@ func main() {
 		adminTokenSource = "generated"
 	}
 	logger.Info("effective configuration",
+		zap.String("version", version),
 		zap.String("server_mode", cfg.GinMode),
 		zap.String("server_address", cfg.ServerAddress),
 		zap.String("db_driver", cfg.DB.Driver),
