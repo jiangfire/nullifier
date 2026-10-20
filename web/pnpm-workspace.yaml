@@ -1,2 +1,14 @@
+# 依赖的构建脚本需要显式批准，否则 pnpm 10+ 会直接拒绝安装
+# （ERR_PNPM_IGNORED_BUILDS），CI 里 `pnpm install --frozen-lockfile` 会失败。
+#
+# esbuild 需要跑安装脚本下载平台二进制；core-js 的 postinstall 会打广告。
+#
+# 两个键都写上：pnpm 10/11 用 onlyBuiltDependencies，pnpm 12 起改用 allowBuilds
+# （旧的 onlyBuiltDependencies 与 package.json 里的 pnpm 字段都已被忽略）。
 onlyBuiltDependencies:
   - core-js
+  - esbuild
+
+allowBuilds:
+  core-js: true
+  esbuild: true
