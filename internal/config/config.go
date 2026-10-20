@@ -87,8 +87,18 @@ func Load() (*Config, error) {
 		CredentialIssuerRotateAfter: time.Duration(v.GetInt("crypto.issuer_rotate_days")) * 24 * time.Hour,
 		DB:                          dbCfg,
 	}
-	if requiresVerifyingKey(cfg.GinMode) && strings.TrimSpace(cfg.VerifyingKeyPath) == "" {
-		return nil, fmt.Errorf("crypto.vk_path is required when server.mode=%q", cfg.GinMode)
+	if requiresVerifyingKey(cfg.GinMode) {
+		if strings.TrimSpace(cfg.VerifyingKeyPath) == "" {
+			return nil, fmt.Errorf("crypto.vk_path is required when server.mode=%q", cfg.GinMode)
+		}
+		// 生产模式下临时 token 每次重启都会变，多副本之间还不一样，
+		// 会让运营门户与 CLI 随机失联 —— 必须显式配置。
+		if strings.TrimSpace(cfg.AdminBearerToken) == "" {
+			return nil, fmt.Errorf(
+				"server.admin_bearer_token is required when server.mode=%q (set SERVER_ADMIN_BEARER_TOKEN)",
+				cfg.GinMode,
+			)
+		}
 	}
 
 	return cfg, nil

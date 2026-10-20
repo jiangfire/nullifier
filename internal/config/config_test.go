@@ -57,7 +57,7 @@ func TestLoad_RequiresVKInReleaseMode(t *testing.T) {
 	require.Contains(t, err.Error(), "crypto.vk_path is required")
 }
 
-func TestLoad_AllowsMissingAdminTokenInReleaseMode(t *testing.T) {
+func TestLoad_RequiresAdminTokenInReleaseMode(t *testing.T) {
 	oldWD, err := os.Getwd()
 	require.NoError(t, err)
 
@@ -69,6 +69,25 @@ func TestLoad_AllowsMissingAdminTokenInReleaseMode(t *testing.T) {
 
 	t.Setenv("SERVER_MODE", "release")
 	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "server.admin_bearer_token is required")
+}
+
+func TestLoad_AllowsMissingAdminTokenInDebugMode(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("CRYPTO_VK_PATH", "")
 	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
 
 	cfg, err := Load()

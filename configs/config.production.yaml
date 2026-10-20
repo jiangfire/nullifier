@@ -1,10 +1,25 @@
+# nullifier 生产配置
+#
+# ⚠️ 这个文件**不会**被自动加载：viper 只找名为 `config.yaml` 的配置文件
+#    （见 internal/config/config.go 的 SetConfigName("config")）。
+#    两种用法二选一：
+#      1) 把本文件复制成 configs/config.yaml（会覆盖开发配置，注意先备份）；
+#      2) 保持本文件名，完全用 configs/production.env.example 里的环境变量驱动。
+#
+# 启动日志会打印实际生效的 server.mode / db.driver / db.database / admin token 来源，
+# 上线后请先核一眼这行日志，确认没有误跑在开发配置上。
+
 server:
   address: ":8080"
   mode: "release"
+  # 必须显式设置。留空在 release 模式下会导致服务启动失败。
   admin_bearer_token: ""
+  # 填门户的真实来源。多个用空格分隔，不要用逗号。
+  # 留空的话，门户与后端不同源时浏览器会拦掉所有请求。
   cors_allowed_origins: []
 
 crypto:
+  # release 模式必填。
   vk_path: "./keys/verifying.key"
   issuer_key_path: "issuer_keys.json"
   issuer_rotate_days: 90
