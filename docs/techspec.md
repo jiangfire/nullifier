@@ -141,10 +141,18 @@ web/                        # Vue 3 前端门户
 - `server.admin_bearer_token` 若为空，会在启动期自动生成并写回内存配置
 - 自动生成的 token 会通过启动日志打印到控制台，仅对当前进程实例有效
 
-### 4.4 自动迁移
+### 4.4 迁移
 
-- 服务启动时自动执行 `persistence.AutoMigrate`
-- 当前会迁移这些实体：
+- **迁移是独立步骤**：`nullifier-server -migrate` 跑完迁移即退出。
+  迁移只需要数据库连接，不要求 `crypto.vk_path` 与 `server.admin_bearer_token`。
+- 服务启动时是否自动迁移由 `server.auto_migrate` 决定：
+  - 非 `release/prod/production` 模式默认 `true`（开发期省事）
+  - `release/prod/production` 模式默认 `false` —— 多副本同时启动会争 DDL 锁，
+    改表应当是一个能单独执行、单独回滚的步骤
+  - 可用环境变量 `SERVER_AUTO_MIGRATE` 或配置文件 `server.auto_migrate` 覆盖
+- 关闭自动迁移时，启动前会检查表结构是否就绪（`persistence.SchemaReady`）；
+  **未就绪则服务直接启动失败**，不会等到第一个请求打进来才报「no such table」。
+- `persistence.AutoMigrate` 会迁移这些实体：
   - `Vote`
   - `Proposal`
   - `Credential`
@@ -155,6 +163,16 @@ web/                        # Vue 3 前端门户
 - 同时包含两类兼容迁移：
   - 历史 `credentials` 表补 `proposal_id`
   - 历史 `proposals` 表补 `options_json`
+
+### 4.5 连接池
+
+- PostgreSQL 的连接池参数显式配置，不再依赖 `database/sql` 的默认值（不限制连接数）：
+  - `db.max_open_conns`（`DB_MAX_OPEN_CONNS`，默认 25）
+  - `db.max_idle_conns`（`DB_MAX_IDLE_CONNS`，默认 5）
+  - `db.conn_max_lifetime_seconds`（`DB_CONN_MAX_LIFETIME_SECONDS`，默认 3600）
+- 为 0 表示不改动 `database/sql` 的默认值。
+- 优先级与其它 `db.*` 一致：环境变量高于配置文件。
+- 启动日志打印实际生效的连接池参数。
 
 ## 5. HTTP API
 

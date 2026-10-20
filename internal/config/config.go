@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,9 +21,23 @@ type Config struct {
 	CredentialIssuerKeyPath     string
 	CredentialIssuerRotateAfter time.Duration
 	DB                          *persistence.DBConfig
+	// AutoMigrate 决定启动时是否自动改表。
+	// release 模式默认关闭：多副本同时启动会争 DDL 锁，而且改表应该是
+	// 一个能单独执行、能单独回滚的步骤，而不是服务启动的副作用。
+	AutoMigrate bool
 }
 
 func Load() (*Config, error) {
+	return load(false)
+}
+
+// LoadForMigration 加载配置，但不要求 release 模式下的 vk_path 与 admin token。
+// 迁移步骤只需要数据库连接，不该被应用运行时的密钥卡住。
+func LoadForMigration() (*Config, error) {
+	return load(true)
+}
+
+func load(forMigration bool) (*Config, error) {
 	v := viper.New()
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
@@ -88,17 +103,27 @@ func Load() (*Config, error) {
 		dbCfg.ConnMaxLifetime = time.Duration(n) * time.Second
 	}
 
+	ginMode := v.GetString("server.mode")
 	cfg := &Config{
 		ServerAddress:               v.GetString("server.address"),
-		GinMode:                     v.GetString("server.mode"),
+		GinMode:                     ginMode,
 		CORSAllowedOrigins:          v.GetStringSlice("server.cors_allowed_origins"),
 		AdminBearerToken:            strings.TrimSpace(v.GetString("server.admin_bearer_token")),
 		VerifyingKeyPath:            v.GetString("crypto.vk_path"),
 		CredentialIssuerKeyPath:     v.GetString("crypto.issuer_key_path"),
 		CredentialIssuerRotateAfter: time.Duration(v.GetInt("crypto.issuer_rotate_days")) * 24 * time.Hour,
 		DB:                          dbCfg,
+		AutoMigrate:                 !requiresVerifyingKey(ginMode),
 	}
-	if requiresVerifyingKey(cfg.GinMode) {
+	// 显式配置优先于按模式推导的默认值；环境变量优先于配置文件。
+	if raw := strings.TrimSpace(v.GetString("server.auto_migrate")); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("server.auto_migrate must be a boolean: %w", err)
+		}
+		cfg.AutoMigrate = parsed
+	}
+	if !forMigration && requiresVerifyingKey(cfg.GinMode) {
 		if strings.TrimSpace(cfg.VerifyingKeyPath) == "" {
 			return nil, fmt.Errorf("crypto.vk_path is required when server.mode=%q", cfg.GinMode)
 		}

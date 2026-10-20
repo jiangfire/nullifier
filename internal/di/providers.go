@@ -1,6 +1,8 @@
 package di
 
 import (
+	"fmt"
+
 	"anonvote/internal/config"
 	domaincrypto "anonvote/internal/domain/crypto"
 	"anonvote/internal/domain/repository"
@@ -31,10 +33,35 @@ func NewDB(cfg *config.Config) (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := persistence.AutoMigrate(db); err != nil {
-		return nil, err
+	// 自动迁移默认只在非 release 模式开启。release 模式下改表是一个
+	// 独立的步骤（见 Migrate），不该是服务启动的副作用。
+	if cfg.AutoMigrate {
+		if err := persistence.AutoMigrate(db); err != nil {
+			return nil, err
+		}
+		return db, nil
+	}
+	// 关掉自动迁移时，表结构必须已经就绪，否则服务起来之后第一个请求
+	// 才会报「no such table」。这里直接启动失败，把问题留在启动日志里。
+	if !persistence.SchemaReady(db) {
+		return nil, fmt.Errorf(
+			"database schema is not initialized: run `nullifier-server -migrate` before starting the service",
+		)
 	}
 	return db, nil
+}
+
+// Migrate 执行数据库结构迁移，是一个可以单独跑、单独回滚的步骤。
+func Migrate(cfg *config.Config) error {
+	db, err := persistence.NewDB(cfg.DB)
+	if err != nil {
+		return err
+	}
+	sqlDB, err := db.DB()
+	if err == nil {
+		defer func() { _ = sqlDB.Close() }()
+	}
+	return persistence.AutoMigrate(db)
 }
 
 func NewVoteRepository(db *gorm.DB) repository.VoteRepository {

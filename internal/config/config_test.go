@@ -283,6 +283,134 @@ db:
 	require.Equal(t, 120*time.Second, cfg.DB.ConnMaxLifetime)
 }
 
+func TestLoad_AutoMigrateDefaultsByMode(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("SERVER_AUTO_MIGRATE", "")
+	t.Setenv("CRYPTO_VK_PATH", "")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.AutoMigrate, "开发模式应当自动迁移")
+}
+
+func TestLoad_AutoMigrateDisabledInReleaseMode(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "release")
+	t.Setenv("SERVER_AUTO_MIGRATE", "")
+	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "secret")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.False(t, cfg.AutoMigrate, "release 模式不应在启动时改表")
+}
+
+func TestLoad_AutoMigrateOverriddenByEnv(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "release")
+	t.Setenv("SERVER_AUTO_MIGRATE", "true")
+	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "secret")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.AutoMigrate)
+}
+
+func TestLoad_AutoMigrateOverriddenByConfigFile(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "release")
+	t.Setenv("SERVER_AUTO_MIGRATE", "")
+	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "secret")
+
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(`
+server:
+  mode: "release"
+  auto_migrate: true
+`), 0o600))
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.True(t, cfg.AutoMigrate)
+}
+
+func TestLoad_AutoMigrateRejectsNonBoolean(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("SERVER_AUTO_MIGRATE", "maybe")
+
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "server.auto_migrate")
+}
+
+// 迁移步骤不该依赖只有应用运行时才需要的密钥。
+func TestLoadForMigration_SkipsReleaseRequirements(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "release")
+	t.Setenv("SERVER_AUTO_MIGRATE", "")
+	t.Setenv("CRYPTO_VK_PATH", "")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+
+	_, err = Load()
+	require.Error(t, err, "普通加载仍应要求 release 模式的密钥")
+
+	cfg, err := LoadForMigration()
+	require.NoError(t, err)
+	require.Equal(t, "release", cfg.GinMode)
+}
+
 func TestLoad_InvalidConfig(t *testing.T) {
 	oldWD, err := os.Getwd()
 	require.NoError(t, err)

@@ -23,6 +23,7 @@ func TestProviders_WiringSmoke(t *testing.T) {
 		VerifyingKeyPath:            "",
 		CredentialIssuerKeyPath:     filepath.Join(t.TempDir(), "issuer_keys.json"),
 		CredentialIssuerRotateAfter: 24 * time.Hour,
+		AutoMigrate:                 true,
 		DB: &persistence.DBConfig{
 			Driver:   "sqlite",
 			Database: ":memory:",
@@ -116,6 +117,58 @@ func TestNewDB_InvalidConfig(t *testing.T) {
 	require.Error(t, err)
 }
 
+// 关闭自动迁移、且表结构还没建时，服务必须直接起不来 ——
+// 而不是等第一个请求打进来才报「no such table」。
+func TestNewDB_SkipsMigrationWhenDisabled(t *testing.T) {
+	cfg := &config.Config{
+		AutoMigrate: false,
+		DB: &persistence.DBConfig{
+			Driver:   "sqlite",
+			Database: ":memory:",
+		},
+	}
+
+	_, err := NewDB(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "schema is not initialized")
+}
+
+func TestNewDB_MigratesWhenEnabled(t *testing.T) {
+	cfg := &config.Config{
+		AutoMigrate: true,
+		DB: &persistence.DBConfig{
+			Driver:   "sqlite",
+			Database: ":memory:",
+		},
+	}
+
+	db, err := NewDB(cfg)
+	require.NoError(t, err)
+	require.True(t, db.Migrator().HasTable(&entity.Vote{}))
+}
+
+// 独立的迁移步骤：不管自动迁移开没开，都会把表建出来。
+func TestMigrate_CreatesTables(t *testing.T) {
+	cfg := &config.Config{
+		AutoMigrate: false,
+		DB: &persistence.DBConfig{
+			Driver:   "sqlite",
+			Database: filepath.Join(t.TempDir(), "migrate.db"),
+		},
+	}
+
+	require.NoError(t, Migrate(cfg))
+
+	db, err := NewDB(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	require.True(t, db.Migrator().HasTable(&entity.Vote{}))
+}
+
 func TestInitializeServer(t *testing.T) {
 	cfg := &config.Config{
 		ServerAddress:               ":0",
@@ -123,6 +176,7 @@ func TestInitializeServer(t *testing.T) {
 		VerifyingKeyPath:            "",
 		CredentialIssuerKeyPath:     filepath.Join(t.TempDir(), "issuer_keys.json"),
 		CredentialIssuerRotateAfter: 24 * time.Hour,
+		AutoMigrate:                 true,
 		DB: &persistence.DBConfig{
 			Driver:   "sqlite",
 			Database: ":memory:",

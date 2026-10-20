@@ -160,13 +160,33 @@ internal/di         Wire 装配          internal/config   viper 配置 + 运行
 | `DB_USER` | `db.user` | — | |
 | `DB_PASSWORD` | `db.password` | — | |
 | `DB_SSLMODE` | `db.sslmode` | — | 如 `disable` |
+| `DB_MAX_OPEN_CONNS` | `db.max_open_conns` | `25` | 连接池上限,并发高时按 PG 的 `max_connections` 调整 |
+| `DB_MAX_IDLE_CONNS` | `db.max_idle_conns` | `5` | 连接池闲置连接数 |
+| `DB_CONN_MAX_LIFETIME_SECONDS` | `db.conn_max_lifetime_seconds` | `3600` | 连接最大存活时间(秒) |
 | `CRYPTO_VK_PATH` | `crypto.vk_path` | 空 | **生产模式必填** |
 | `CRYPTO_ISSUER_KEY_PATH` | `crypto.issuer_key_path` | `issuer_keys.json` | 签发密钥持久化 |
 | `CRYPTO_ISSUER_ROTATE_DAYS` | `crypto.issuer_rotate_days` | `90` | 签发密钥轮换周期 |
 | `SERVER_ADMIN_BEARER_TOKEN` | `server.admin_bearer_token` | 空 | 为空则启动时生成临时 token 并打印日志 |
 | `SERVER_MODE` | `server.mode` | `release` | `release`/`prod`/`production` 时强制要求 `vk_path` |
+| `SERVER_AUTO_MIGRATE` | `server.auto_migrate` | 非 release 模式 `true` | `release` 模式默认 `false`:改表是独立步骤 |
 
 生产部署参考 `configs/config.production.yaml` 与 `configs/production.env.example`。
+
+### 生产部署顺序:先迁移,再启动
+
+`release` 模式下服务**不会**在启动时改表 —— 多副本同时启动会争 DDL 锁,而且改表应该是一个
+能单独执行、能单独回滚的步骤。发布顺序是:
+
+```bash
+nullifier-server -migrate   # 迁移表结构,跑完即退出
+nullifier-server             # 再起服务
+```
+
+迁移步骤只需要数据库连接,不要求 `CRYPTO_VK_PATH` 与 `SERVER_ADMIN_BEARER_TOKEN`。
+如果忘了先迁移,服务会**直接启动失败**并提示跑 `-migrate`,而不是等第一个请求打进来才报
+「no such table」。
+
+需要临时恢复旧的「启动即迁移」行为时,设 `SERVER_AUTO_MIGRATE=true`。
 
 ## HTTP API
 

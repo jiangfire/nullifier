@@ -28,6 +28,24 @@ func AutoMigrate(db *gorm.DB) error {
 		Update("options_json", "[]").Error
 }
 
+// SchemaReady 判断数据库结构是否已就绪。
+//
+// 关闭自动迁移时用它做启动前的检查：表不存在就立刻失败，
+// 而不是等第一个请求打进来才报「no such table」。
+func SchemaReady(db *gorm.DB) bool {
+	if db == nil {
+		return false
+	}
+	migrator := db.Migrator()
+	return migrator.HasTable(&entity.Vote{}) &&
+		migrator.HasTable(&entity.Proposal{}) &&
+		migrator.HasTable(&entity.Credential{}) &&
+		migrator.HasTable(&entity.VoteParticipation{}) &&
+		migrator.HasTable(&entity.DecryptionSession{}) &&
+		migrator.HasTable(&entity.TallyResult{}) &&
+		migrator.HasTable(&entity.AuditAnchor{})
+}
+
 func migrateLegacyCredentialSchema(db *gorm.DB) error {
 	if !db.Migrator().HasTable(&entity.Credential{}) {
 		return nil

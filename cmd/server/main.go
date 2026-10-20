@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"strings"
 
 	"anonvote/internal/config"
@@ -13,19 +14,28 @@ import (
 var version = "dev"
 
 func main() {
+	migrateOnly := flag.Bool(
+		"migrate",
+		false,
+		"run database schema migrations and exit (run this before starting the server)",
+	)
+	flag.Parse()
+
 	bootstrapLogger, err := zap.NewProduction()
 	if err != nil {
 		panic(err)
 	}
 	defer func() { _ = bootstrapLogger.Sync() }()
 
-	cfg, err := config.Load()
+	// 迁移步骤只需要数据库连接，不该被 release 模式才需要的密钥卡住。
+	var cfg *config.Config
+	if *migrateOnly {
+		cfg, err = config.LoadForMigration()
+	} else {
+		cfg, err = config.Load()
+	}
 	if err != nil {
 		bootstrapLogger.Fatal("load config", zap.Error(err))
-	}
-	generatedAdminToken, err := config.EnsureAdminBearerToken(cfg)
-	if err != nil {
-		bootstrapLogger.Fatal("prepare admin token", zap.Error(err))
 	}
 
 	logger, err := di.NewLogger(cfg)
@@ -33,6 +43,19 @@ func main() {
 		bootstrapLogger.Fatal("create logger", zap.Error(err))
 	}
 	defer func() { _ = logger.Sync() }()
+
+	if *migrateOnly {
+		if err := di.Migrate(cfg); err != nil {
+			logger.Fatal("run schema migrations", zap.Error(err))
+		}
+		logger.Info("schema migrations completed", zap.String("db_database", cfg.DB.Database))
+		return
+	}
+
+	generatedAdminToken, err := config.EnsureAdminBearerToken(cfg)
+	if err != nil {
+		logger.Fatal("prepare admin token", zap.Error(err))
+	}
 
 	// 打印实际生效的配置：最常见的上线事故是「以为加载了生产配置，实际跑的是开发配置」。
 	adminTokenSource := "configured"
@@ -48,6 +71,7 @@ func main() {
 		zap.Int("db_max_open_conns", cfg.DB.MaxOpenConns),
 		zap.Int("db_max_idle_conns", cfg.DB.MaxIdleConns),
 		zap.Duration("db_conn_max_lifetime", cfg.DB.ConnMaxLifetime),
+		zap.Bool("db_auto_migrate", cfg.AutoMigrate),
 		zap.Int("cors_allowed_origins", len(cfg.CORSAllowedOrigins)),
 		zap.String("admin_token_source", adminTokenSource),
 		zap.Bool("proof_verification_enabled", strings.TrimSpace(cfg.VerifyingKeyPath) != ""),
@@ -65,6 +89,13 @@ func main() {
 	if strings.TrimSpace(cfg.VerifyingKeyPath) == "" {
 		logger.Warn(
 			"crypto.vk_path is empty: vote proof verification is DISABLED, any non-empty proof will be accepted",
+		)
+	}
+
+	// 关闭自动迁移时，运维必须知道表结构得自己先迁。
+	if !cfg.AutoMigrate {
+		logger.Warn(
+			"schema auto-migration is DISABLED: run `nullifier-server -migrate` before starting the service",
 		)
 	}
 

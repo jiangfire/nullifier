@@ -17,6 +17,9 @@ server:
   # 填门户的真实来源。多个用空格分隔，不要用逗号。
   # 留空的话，门户与后端不同源时浏览器会拦掉所有请求。
   cors_allowed_origins: []
+  # release 模式下默认不在启动时改表：先跑 `nullifier-server -migrate`，再起服务。
+  # 临时想恢复旧行为时改成 true。
+  auto_migrate: false
 
 crypto:
   # release 模式必填。
