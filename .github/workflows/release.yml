@@ -220,6 +220,14 @@ jobs:
     needs: [verify, build, web]
     runs-on: ubuntu-latest
     steps:
+      # gh release create --verify-tag 要用本地 git 解析 tag，没有仓库会直接失败
+      # （failed to run git: fatal: not a git repository）。fetch-depth: 0 才会把
+      # tag 一起取下来。
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -238,8 +246,11 @@ jobs:
           fi
           printf 'attaching %d files\n' "${#files[@]}"
           printf ' - %s\n' "${files[@]}"
+          # 正文用 tag 里的说明，而不是自动生成的提交列表：这次发版的边界
+          # （内测版、证明链未实现、密文格式 v2）比提交列表重要得多。
+          git for-each-ref --format='%(contents:body)' "refs/tags/$TAG" > notes.md
           gh release create "$TAG" \
             --title "$TAG" \
             --verify-tag \
-            --generate-notes \
+            --notes-file notes.md \
             "${files[@]}"

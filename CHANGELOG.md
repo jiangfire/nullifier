@@ -91,6 +91,8 @@
   生成 sha256 校验和，最后创建 GitHub Release。
 - 发布流水线的 macOS Intel 构建从 `macos-13` 改到 `macos-15-intel`：GitHub 已下线
   `macos-13` 标签，用它会让该 job 永远排队、整个发版卡住。
+- 发布 job 补上 checkout：`gh release create --verify-tag` 要用本地 git 解析 tag，
+  没有仓库会直接失败。Release 正文改用 tag 里的发版说明，而不是自动生成的提交列表。
 
 ### 已知限制
 
