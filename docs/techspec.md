@@ -184,7 +184,10 @@ web/                        # Vue 3 前端门户
 - `POST /api/v1/votes`
   - 要求 `proposal_id`、`encrypted_vote`、`proof`、`nullifier`、`user_id`、`user_pub_key`、`credential_signature`，全部必填（HTTP 层与 usecase 层都强制，不存在匿名免凭证投票的路径）
   - 当前服务端会校验 proof、密文格式、凭证归属、防重投
+  - **proof 校验失败返回 400 `INVALID_REQUEST`**（客户端输入问题，不归为服务端故障）
   - 落票与参与记录要么在同一事务里完成，要么都不做；不存在“记了票但没记参与状态”的路径
+  - 请求体里的 `selected_option` 服务端**不消费**，也不应发送（明文选项上服务端会抵消
+    “选票是加密的”这个属性）；门户与 CLI 均已移除该字段
 - `POST /api/v1/proposals/:proposal_id/vote-status`
   - 必须带当前凭证材料，不接受裸 `user_id` 枚举
 - `POST /api/v1/proposals/:proposal_id/decryption/setup`
@@ -206,9 +209,19 @@ web/                        # Vue 3 前端门户
 
 当前实现边界如下：
 
+- **尚无真实的选票零知识电路。** 仓库里唯一的 gnark 电路是测试文件中的玩具电路
+  （`tests/e2e/api_test.go` 的 `Y = X³ + X + 5`），生产配置的 `crypto.vk_path`
+  指向的 `verifying.key` **无法由本仓库生成**。
+- `crypto.vk_path` 为空时，proof 验证器接受任何非空 proof（`requireVerifyMode=false`）。
+  载入 vk 后 `public_witness` 变为必填，而现有客户端都拿不到它。
+- 服务端不校验 proof 与 `proposal_id` / `nullifier` / 密文的绑定：`PublicInputs()`
+  构造了 `proposal_id` 与 `nullifier`，但验证器只读取 `public_witness`。
 - 后端负责验证 proof，不负责替用户端生成真实 proof。
-- `ballot-draft` 只用于开发联调，返回的是便于串流程的草稿数据。
+- `ballot-draft` 只用于开发联调，返回的是便于串流程的草稿数据。**密文由服务端生成，
+  服务端在生成时就知道选了哪个** —— 这是当前版本最大的匿名性缺口。
 - 真实生产部署仍应由客户端自行生成密文和证明。
+
+> 补齐上述链路的顺序与工作量评估见 `docs/release-plan-v0.1.0.md` 的 v1.0.0 里程碑。
 
 ## 7. 前端与 CLI
 

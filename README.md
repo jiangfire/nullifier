@@ -9,7 +9,7 @@
   <a href="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml"><img src="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-yellow.svg" alt="License: AGPL-3.0" /></a>
   <img src="https://img.shields.io/badge/go-1.25.4-00ADD8?logo=go&logoColor=white" alt="Go 1.25.4" />
-  <img src="https://img.shields.io/badge/coverage-81.8%25-brightgreen.svg" alt="Coverage 81.8%" />
+  <img src="https://img.shields.io/badge/coverage-60.1%25%20(repo)-yellow.svg" alt="Coverage 60.1% (repo-wide)" />
 </p>
 
 ---
@@ -20,11 +20,19 @@
 
 nullifier 把这两个动作拆开:
 
-- **发资格的人看不到选谁** —— 凭证用 RSA 盲签名签发(RFC9474)。签发方看到的是被盲化的随机串,选票内容留在用户手里。
+- **发资格的人看不到选谁** —— 凭证用 RSA-PSS 签名签发(基于 RFC9474 盲签名库)。签发方看得到 `user_id` 和设备公钥(本来就是投票人提供的),但看不到选票内容:凭证与选票内容完全无关。
 - **记选票的人看不到是谁** —— `votes` 表只有 `proposal_id`、`nullifier`、`cipher` 三列,没有用户标识。"是否参与"单独存进 `vote_participations`,且只存 `hash(user_id)`,不与票内容关联。
 - **验票真伪但不验身份** —— 服务端用 gnark 验证零知识证明,证明"这张票是按合法凭证生成的",证明本身不携带任何身份信息。
 
 结果是:管理员能看到计票结果和审计锚点,但拿到数据库也回答不了"某个人投了什么"。
+
+> ### ⚠️ 当前版本边界(v0.1.0 内测版)
+>
+> 这个版本把「选票内容与投票人身份分离」的**存储与接口骨架**跑通了,但**证明链还没有实现**。请在下面的「项目状态与限制」里读完整说明,不要把当前实现当成生产能力:
+>
+> - **没有真实的选票零知识电路。** `crypto.vk_path` 为空时,服务端的 proof 验证器接受任何非空 proof;仓库里唯一的 gnark 电路是测试用的玩具电路。生产配置指向的 `verifying.key` 无法由本仓库生成。
+> - **密文由服务端生成。** `POST /api/v1/proposals/:id/ballot-draft` 接收明文选项并加密,因此**服务端在生成凭据时就知道你选了哪个**。本文档与门户界面都不再声称"服务端看不到选项"。
+> - **只适合内测与开发**,不要用于真实投票。补齐证明链的工作见 [`docs/release-plan-v0.1.0.md`](./docs/release-plan-v0.1.0.md) 的 v1.0.0 里程碑。
 
 ## 特性
 
@@ -32,8 +40,8 @@ nullifier 把这两个动作拆开:
 
 | 能力 | 说明 |
 |---|---|
-| 盲签名凭证 | RFC9474 RSA blind signature,签发方只见盲化串,不见选票内容 |
-| 零知识验票 | gnark 验证选票合法性,证明不携带身份 |
+| 凭证签名 | RSA-PSS 签名(基于 RFC9474 盲签名库);签发方看不到选票内容,因为凭证与选票无关 |
+| 零知识验票 | gnark 验证选票合法性,证明不携带身份 —— **尚无真实选票电路,开发模式下不验 proof** |
 | 防重放 | 每票一个 `nullifier`,重复投票直接拒绝 |
 | 防冒充 | `proposal_id + user_id + user_pub_key + credential_signature` 四元组校验 |
 | 选择性披露 | 只能回答"你投过票吗",不能回答"你投了什么" |
@@ -211,16 +219,25 @@ bash ./scripts/check-coverage.sh 80 coverage.out   # CI 实际执行的形式
 
 CI 定义在 `.github/workflows/ci.yml`,执行 `go test ./...` 加覆盖率门槛。PostgreSQL 集成测试走 testcontainers:本地 Docker 不可用时跳过,**CI 环境下 Docker 缺失会直接失败**,避免"跳过"被误读成"通过"。
 
-当前覆盖率 81.8%,距 80% 门槛只剩 1.8 个百分点余量 —— **新增代码请一并补测**。
+覆盖率有两个口径,别混用:
+
+| 口径 | 数值 | 覆盖范围 |
+|---|---|---|
+| 门槛口径 | **81.8%** | `scripts/check-coverage.sh` 选中的 5 个包:usecase / config / di / http / http-middleware |
+| 全仓口径 | **60.1%** | `./...` 全部包(2026-10-20 实测) |
+
+门槛余量只有 1.8 个百分点,且 `internal/infrastructure/crypto`、`internal/infrastructure/persistence`、`cmd/cli`、`cmd/server` **不在门槛内** —— 这些包的覆盖率回退不会让 CI 失败。**新增代码请一并补测**。
 
 ## 项目状态与限制
 
 这是个在推进中的实现,接手前请知道边界在哪:
 
-- **`ballot-draft` 是开发联调接口**,返回的是便于串通流程的草稿数据。生产环境应由真实钱包/客户端生成 proof 与密文;后端只负责验证,不代替用户端生成证明。这条链路尚未完成。
+- **证明链尚未实现。** 服务端只有 proof 验证器的骨架:没有真实选票电路、没有密钥生成流程、没有客户端 prover。`crypto.vk_path` 为空时任何非空 proof 都会通过(开发模式);加载 vk 后 `public_witness` 变成必填,而现有客户端都拿不到它。
+- **`ballot-draft` 是开发联调接口**,返回的是便于串通流程的草稿数据。**密文由服务端生成,服务端在生成时就知道选了哪个** —— 这是当前版本最大的匿名性缺口。生产环境应由真实钱包/客户端生成 proof 与密文;后端只负责验证,不代替用户端生成证明。这条链路尚未完成。
 - **`decryption/setup` 拒绝"投票开放中"的提案**,运营上必须在 `starts_at` 之前完成初始化。
+- **生产部署必须显式设置** `SERVER_ADMIN_BEARER_TOKEN` 与 `SERVER_CORS_ALLOWED_ORIGINS`;`release` 模式下缺 admin token 会直接启动失败。`configs/config.production.yaml` **不会**被自动加载(viper 只找 `config.yaml`),详见该文件内的注释。
 
-当前实现口径见 [`docs/techspec.md`](./docs/techspec.md)。
+当前实现口径见 [`docs/techspec.md`](./docs/techspec.md),分层上下文索引见 [`docs/project-map.md`](./docs/project-map.md)。
 
 ## 贡献
 

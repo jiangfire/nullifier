@@ -249,7 +249,9 @@ async function submit(): Promise<void> {
         <div id="guide-anchor-user-vote-submit" class="flow-body">
           <h2 class="card-title">提交选票</h2>
           <p class="card-sub">
-            提交后服务端只保存加密后的选票，计票前不会知道你选了谁。
+            提交后服务端保存的是加密选票，计票需要凑齐门限份额才能还原。
+            但当前版本密文由服务端生成，生成时服务端能看到你选的选项 ——
+            客户端本地加密是下一版本的目标。
           </p>
           <button
             class="btn btn--primary"
