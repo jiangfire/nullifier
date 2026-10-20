@@ -146,7 +146,8 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 	}
 
 	if err := uc.verifier.Verify(req.Proof, req.PublicInputs()); err != nil {
-		return fmt.Errorf("invalid proof: %w", err)
+		// 证明校验失败是客户端输入问题，必须映射到 400 而不是 500。
+		return fmt.Errorf("%w: invalid proof: %v", ErrInvalidRequest, err)
 	}
 	if uc.encrypter != nil {
 		if err := uc.encrypter.ValidateCiphertext(req.EncryptedVote); err != nil {

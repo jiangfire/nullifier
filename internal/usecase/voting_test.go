@@ -268,6 +268,8 @@ func TestVotingUseCase_Submit_InvalidProof(t *testing.T) {
 	err := uc.Submit(context.Background(), req)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid proof")
+	// 证明校验失败是客户端输入问题，必须映射到 400 而不是 500。
+	assert.ErrorIs(t, err, ErrInvalidRequest)
 }
 
 func TestVotingUseCase_Submit_WithPublicWitness(t *testing.T) {

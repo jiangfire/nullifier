@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"anonvote/internal/config"
 	"anonvote/internal/di"
 
@@ -22,12 +24,6 @@ func main() {
 	if err != nil {
 		bootstrapLogger.Fatal("prepare admin token", zap.Error(err))
 	}
-	if generatedAdminToken {
-		bootstrapLogger.Warn(
-			"server.admin_bearer_token is empty; generated a temporary admin token for this process",
-			zap.String("admin_token", cfg.AdminBearerToken),
-		)
-	}
 
 	logger, err := di.NewLogger(cfg)
 	if err != nil {
@@ -35,17 +31,35 @@ func main() {
 	}
 	defer func() { _ = logger.Sync() }()
 
+	// 打印实际生效的配置：最常见的上线事故是「以为加载了生产配置，实际跑的是开发配置」。
 	adminTokenSource := "configured"
-	adminTokenLogLevel := logger.Info
 	if generatedAdminToken {
 		adminTokenSource = "generated"
-		adminTokenLogLevel = logger.Warn
 	}
-	adminTokenLogLevel(
-		"admin bearer token ready",
-		zap.String("source", adminTokenSource),
-		zap.String("admin_token", cfg.AdminBearerToken),
+	logger.Info("effective configuration",
+		zap.String("server_mode", cfg.GinMode),
+		zap.String("server_address", cfg.ServerAddress),
+		zap.String("db_driver", cfg.DB.Driver),
+		zap.String("db_database", cfg.DB.Database),
+		zap.Int("cors_allowed_origins", len(cfg.CORSAllowedOrigins)),
+		zap.String("admin_token_source", adminTokenSource),
+		zap.Bool("proof_verification_enabled", strings.TrimSpace(cfg.VerifyingKeyPath) != ""),
 	)
+
+	// 临时 token 只对当前进程有效，必须让运维看见；
+	// 但配置态的 token 是长期密钥，不能进日志。
+	if generatedAdminToken {
+		logger.Warn(
+			"server.admin_bearer_token is empty; generated a temporary admin token for this process",
+			zap.String("admin_token", cfg.AdminBearerToken),
+		)
+	}
+
+	if strings.TrimSpace(cfg.VerifyingKeyPath) == "" {
+		logger.Warn(
+			"crypto.vk_path is empty: vote proof verification is DISABLED, any non-empty proof will be accepted",
+		)
+	}
 
 	server, err := di.InitializeServer(cfg)
 	if err != nil {
