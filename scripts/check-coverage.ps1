@@ -12,17 +12,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not $env:GOMODCACHE) {
-    $env:GOMODCACHE = Join-Path (Get-Location) ".gomodcache"
-}
-if (-not $env:GOCACHE) {
-    $env:GOCACHE = Join-Path (Get-Location) ".gocache"
-}
+# 不覆盖 GOMODCACHE / GOCACHE：CI 里 actions/setup-go 已经把它们指向带缓存的
+# 目录，脚本再改会让 cache 失效，并把整个模块集重新下载一遍。
+# GOSUMDB 保持 off 是为了让离线/沙箱环境可用；go.sum 仍然逐个校验哈希。
 if (-not $env:GOSUMDB) {
     $env:GOSUMDB = "off"
 }
-New-Item -ItemType Directory -Force -Path $env:GOMODCACHE | Out-Null
-New-Item -ItemType Directory -Force -Path $env:GOCACHE | Out-Null
 
 go test -coverprofile=$Profile $Packages
 if ($LASTEXITCODE -ne 0) {

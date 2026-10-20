@@ -15,10 +15,11 @@ else
   )
 fi
 
-export GOMODCACHE="${GOMODCACHE:-$(pwd)/.gomodcache}"
-export GOCACHE="${GOCACHE:-$(pwd)/.gocache}"
+# 不覆盖 GOMODCACHE / GOCACHE：CI 里 actions/setup-go 已经把它们指向带缓存的
+# 目录，脚本再改成工作区内的目录会让 cache: true 失效，并把整个模块集
+# 重新下载一遍。
+# GOSUMDB 保持 off 是为了让离线/沙箱环境可用；go.sum 仍然逐个校验哈希。
 export GOSUMDB="${GOSUMDB:-off}"
-mkdir -p "${GOMODCACHE}" "${GOCACHE}"
 
 go test -coverprofile="${PROFILE}" "${PACKAGES[@]}"
 

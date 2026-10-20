@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"anonvote/internal/config"
+	domaincrypto "anonvote/internal/domain/crypto"
 	"anonvote/internal/domain/entity"
 	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	"anonvote/internal/infrastructure/persistence"
@@ -553,6 +554,19 @@ func doGetProposalCredentialStatuses(
 func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.KyberElGamal, *gorm.DB) {
 	t.Helper()
 
+	proofVerifier, err := cryptoinfra.NewGnarkProofVerifier("")
+	require.NoError(t, err)
+	return buildFullStackEngineWithVerifier(t, proofVerifier)
+}
+
+// buildFullStackEngineWithVerifier 用指定的 proof 验证器装配完整链路，
+// 供「真实 gnark 验证」类测试使用。
+func buildFullStackEngineWithVerifier(
+	t *testing.T,
+	proofVerifier domaincrypto.ProofVerifier,
+) (*gin.Engine, *cryptoinfra.KyberElGamal, *gorm.DB) {
+	t.Helper()
+
 	db, err := persistence.NewDB(&persistence.DBConfig{
 		Driver:   "sqlite",
 		Database: ":memory:",
@@ -568,8 +582,6 @@ func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.KyberElGamal,
 	resultRepo := persistence.NewTallyResultRepository(db)
 	anchorRepo := persistence.NewAuditAnchorRepository(db)
 
-	proofVerifier, err := cryptoinfra.NewGnarkProofVerifier("")
-	require.NoError(t, err)
 	encrypter := cryptoinfra.NewKyberElGamal()
 	issuer := cryptoinfra.NewKryptologyCredentialIssuerWithFile("", 0)
 	merkleBuilder := cryptoinfra.NewGnarkMerkleRootBuilder()
