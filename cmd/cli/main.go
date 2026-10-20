@@ -316,9 +316,8 @@ func (c *cli) cmdVoteSubmit(args []string) error {
 	if strings.TrimSpace(ballot.PublicWitness) != "" {
 		body["public_witness"] = ballot.PublicWitness
 	}
-	if strings.TrimSpace(ballot.SelectedOption) != "" {
-		body["selected_option"] = ballot.SelectedOption
-	}
+	// 不发送 selected_option：服务端不消费这个字段，而明文选项上服务端
+	// 会抵消「选票是加密的」这个属性。
 	var out map[string]any
 	if err := c.postJSON("/api/v1/votes", body, false, &out); err != nil {
 		return err
@@ -395,6 +394,10 @@ func (c *cli) cmdDecryptSetup(args []string) error {
 	if strings.TrimSpace(*proposalID) == "" {
 		return errors.New("必须提供 -proposal")
 	}
+	if strings.TrimSpace(*outFile) == "" {
+		// 门限份额只返回一次，服务端不保存明文；必须落到文件里，不能打到 stdout。
+		return errors.New("必须提供 -out：门限解密份额只会返回一次，需要保存到文件")
+	}
 	var out map[string]any
 	if err := c.postJSON(
 		fmt.Sprintf("/api/v1/proposals/%s/decryption/setup", url.PathEscape(strings.TrimSpace(*proposalID))),
@@ -404,14 +407,10 @@ func (c *cli) cmdDecryptSetup(args []string) error {
 	); err != nil {
 		return err
 	}
-	if *outFile != "" {
-		if err := writeJSON(*outFile, out); err != nil {
-			return err
-		}
-		fmt.Printf("解密会话已写入 %s\n", *outFile)
-		return nil
+	if err := writeJSON(*outFile, out); err != nil {
+		return err
 	}
-	printJSON(out)
+	fmt.Printf("解密会话已写入 %s\n", *outFile)
 	return nil
 }
 
@@ -560,7 +559,17 @@ func (c *cli) buildURL(path string, query map[string]string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	base.Path = strings.TrimRight(base.Path, "/") + path
+	// path 的各段已经被 url.PathEscape 转义过一次。base.Path 要放解码后的形式，
+	// base.RawPath 放转义后的形式；否则 url.URL.String() 会再转义一次，
+	// 含空格或 "/" 的 id 会变成 %2520 / %252F。
+	decoded, err := url.PathUnescape(path)
+	if err != nil {
+		return "", err
+	}
+	basePrefix := strings.TrimRight(base.Path, "/")
+	baseEscapedPrefix := strings.TrimRight(base.EscapedPath(), "/")
+	base.Path = basePrefix + decoded
+	base.RawPath = baseEscapedPrefix + path
 	values := base.Query()
 	for k, v := range query {
 		if strings.TrimSpace(v) != "" {
@@ -696,15 +705,16 @@ func printRootUsage() {
   vote-submit       -credential-file -ballot-file
   vote-status       -proposal -credential-file
   credentials-list  -proposal
-  decrypt-setup     -proposal [-threshold 2] [-trustees 3] [-out]
+  decrypt-setup     -proposal (-out file) [-threshold 2] [-trustees 3]
   result-publish    -proposal (-shares a,b | -shares-file file)
   result-get        -proposal
   anchors-list      -proposal
 
 示例:
-  go run ./cmd/cli -admin-token dev-admin-token proposal-create -title "Board" -options "A,B" -start 2026-03-10T10:00:00Z -end 2026-03-10T12:00:00Z
+  go run ./cmd/cli -admin-token dev-admin-token proposal-create -title "Board" -options "A,B" -start 2026-12-01T10:00:00Z -end 2026-12-01T12:00:00Z
   go run ./cmd/cli -admin-token dev-admin-token credential-issue -proposal p-1 -user u-1001 -out cred-u1001.json
   go run ./cmd/cli ballot-draft -proposal p-1 -option A -out ballot.json
   go run ./cmd/cli vote-submit -credential-file cred-u1001.json -ballot-file ballot.json
+  go run ./cmd/cli -admin-token dev-admin-token decrypt-setup -proposal p-1 -out shares.json
   go run ./cmd/cli -admin-token dev-admin-token credentials-list -proposal p-1`)
 }
