@@ -1,0 +1,245 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches VERSION
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          expected="v${version}"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "tag $GITHUB_REF_NAME does not match VERSION file ($expected)"
+            exit 1
+          fi
+          echo "releasing $GITHUB_REF_NAME"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Gofmt
+        run: |
+          out="$(gofmt -l ./cmd ./internal ./tests)"
+          if [ -n "$out" ]; then
+            echo "gofmt failed, these files need formatting:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: Tests
+        run: go test ./...
+
+      - name: Coverage gate
+        run: bash ./scripts/check-coverage.sh 80 coverage.ci.out
+
+  # 每个平台在它自己的 runner 上原生构建：默认的 sqlite 驱动走 mattn/go-sqlite3，
+  # 需要 cgo。CGO_ENABLED=0 的交叉编译产物编译得过，但启动即 FATAL
+  # （"go-sqlite3 requires cgo to work"），所以这里绝不能关掉 cgo。
+  build:
+    name: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            os: linux
+          - runner: ubuntu-24.04-arm
+            os: linux
+          - runner: macos-13
+            os: darwin
+          - runner: macos-latest
+            os: darwin
+          - runner: windows-latest
+            os: windows
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Ensure MinGW is on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'C:\mingw64\bin' >> "$GITHUB_PATH"
+
+      # 以 runner 实际架构为准，不写死，避免 macos-latest 之类的标签换了架构后
+      # 产物文件名和内容对不上。
+      - name: Resolve target
+        id: meta
+        shell: bash
+        run: echo "arch=$(go env GOARCH)" >> "$GITHUB_OUTPUT"
+
+      - name: Build server and CLI
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          arch="${{ steps.meta.outputs.arch }}"
+          ext=""
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            ext=".exe"
+          fi
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+            -o "dist/nullifier-server-${{ matrix.os }}-$arch${ext}" ./cmd/server
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+            -o "dist/nullifier-cli-${{ matrix.os }}-$arch${ext}" ./cmd/cli
+          ./dist/nullifier-cli-${{ matrix.os }}-$arch${ext} version
+
+      # 冒烟测试：产物必须真的能起来。cgo 缺失、动态库缺失、配置解析失败
+      # 这类问题在上面的编译步骤里全都看不出来。
+      - name: Smoke test the server binary
+        shell: bash
+        env:
+          SERVER_MODE: debug
+          DB_DRIVER: sqlite
+          DB_PATH: smoke-test.db
+        run: |
+          set -uo pipefail
+          ./dist/nullifier-server-* > smoke.log 2>&1 &
+          pid=$!
+          sleep 6
+          if grep -q "FATAL" smoke.log; then
+            echo "server exited with a fatal error:"
+            cat smoke.log
+            exit 1
+          fi
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "server exited before the smoke window elapsed:"
+            cat smoke.log
+            exit 1
+          fi
+          kill "$pid" 2>/dev/null || true
+          echo "server stayed up for the smoke window"
+
+      - name: Package binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          arch="${{ steps.meta.outputs.arch }}"
+          out="nullifier-${{ matrix.os }}-$arch"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            # Git Bash 不带 zip，用 PowerShell 压缩；-Path 'dist/*' 会把条目放在归档根目录
+            powershell.exe -NoProfile -Command "Compress-Archive -Path 'dist/*' -DestinationPath '$out.zip' -Force"
+          else
+            # -j 去掉 dist/ 前缀，条目同样落在归档根目录
+            zip -j "$out.zip" dist/*
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$out.zip" > "$out.zip.sha256"
+          else
+            # macOS 没有 sha256sum，只有 shasum
+            shasum -a 256 "$out.zip" > "$out.zip.sha256"
+          fi
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.os }}-${{ steps.meta.outputs.arch }}
+          path: |
+            nullifier-*.zip
+            nullifier-*.zip.sha256
+
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm --dir web run lint
+
+      - name: Type check
+        run: pnpm --dir web exec tsc --noEmit
+
+      - name: Unit tests
+        run: pnpm --dir web run test
+
+      - name: Build portal
+        run: pnpm --dir web run build
+
+      - name: Package portal
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          (cd web/dist && zip -r "$GITHUB_WORKSPACE/nullifier-web-${version}.zip" *)
+          sha256sum "nullifier-web-${version}.zip" > "nullifier-web-${version}.zip.sha256"
+
+      - name: Upload portal
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: |
+            nullifier-web-*.zip
+            nullifier-web-*.zip.sha256
+
+  release:
+    name: release
+    needs: [verify, build, web]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find artifacts -type f | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no artifacts to attach"
+            exit 1
+          fi
+          printf 'attaching %d files\n' "${#files[@]}"
+          printf ' - %s\n' "${files[@]}"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --verify-tag \
+            --generate-notes \
+            "${files[@]}"
