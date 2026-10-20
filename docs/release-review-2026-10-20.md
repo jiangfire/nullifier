@@ -212,6 +212,10 @@
 | **`cmd/server`** | **0.0%** | ❌ |
 | **全仓合计** | **60.1%** | — |
 
+> 表里的 60.1% 是**审查当时的全仓合计**。今天同一个数字的含义已经变了 ——
+> 现在的全仓口径是 74.1%，而 60.1% 是 `internal/infrastructure/persistence`
+> 单包的最低档（见 README 与 `AGENTS.md` 的覆盖率两口径）。最新数值以 README 为准。
+
 复现命令：`go test -count=1 -coverprofile=all.out ./... && go tool cover -func=all.out | tail -1`
 
 **影响**：
@@ -646,12 +650,14 @@ export GOCACHE="${GOCACHE:-$(pwd)/.gocache}"
 - [ ] **B20**（R28）CLI 优先读 `NULLIFIER_ADMIN_TOKEN`，help 示例不展示 token
 - [ ] **B21**（C6）覆盖率门槛纳入 `crypto` / `persistence` / `cmd/cli` / `cmd/server`，并给 `cmd/server` 补冒烟测试
 
-### 4.4 发版流程（目前完全缺失）
+### 4.4 发版流程（**审查当时完全缺失，现已全部落地**）
 
-- [ ] **C1** 约定版本号来源（`VERSION` 文件 or tag 推导），`web/package.json` 与之对齐
-- [ ] **C2** 建 `CHANGELOG.md`
-- [ ] **C3** 加 release workflow（打 tag → 构建前后端产物 → 建 Release）
-- [ ] **C4** 打 tag（仓库目前 `git tag -l` 为空，**从未发过版**）
+> 本节用本节自己的编号（**P1–P4**）。§2 的 CRITICAL 发现也用 C 编号（C1–C6），两套不是一回事，别串。
+
+- [x] **P1** 约定版本号来源（`VERSION` 文件 or tag 推导），`web/package.json` 与之对齐
+- [x] **P2** 建 `CHANGELOG.md`
+- [x] **P3** 加 release workflow（打 tag → 构建前后端产物 → 建 Release）
+- [x] **P4** 打 tag —— **v0.1.0 已于 2026-10-20 发布**（原快照此处写的是「仓库目前 `git tag -l` 为空，从未发过版」）
 
 ### 4.5 文档
 

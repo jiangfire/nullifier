@@ -141,7 +141,7 @@
 **陷阱**：
 - `gnark_proof_verifier.go:25-31` —— **`vk_path` 为空时 `Verify` 直接 `return nil`**，任何非空 proof 都通过。`requireVerifyMode` 只由 vk_path 是否为空决定。
 - `gnark_proof_verifier.go:64-67` —— 加载 vk 后，`public_witness` 是**必填**，缺失即验证失败。
-- `kyber_elgamal.go` —— 密钥派生用 **HKDF-SHA256**（`crypto/hkdf`），salt 每次加密随机生成并随密文传输，info 绑定协议版本、用途与双方公钥。密文格式 **v2**，与 v0.1.0 的 v1 密文不兼容。
+- `kyber_elgamal.go` —— 密钥派生用 **HKDF-SHA256**（`crypto/hkdf`），salt 每次加密随机生成并随密文传输，info 绑定协议版本、用途与双方公钥。密文格式 **v2**（v0.1.0 起即 v2），v1 密文会被直接拒绝。
 - `kryptology_credential_issuer.go:163-179` —— 盲签名全流程在**服务端内部**完成（服务端自己 Blind 再 Finalize），客户端不参与。
 - `kryptology_credential_issuer.go:194` `VerifyCredential` —— **生产路径从不调用**，只有单测调用。投票时是拿提交的签名和库里存的签名做 `bytes.Equal` 比对（`voting.go:166`）。
 
@@ -243,8 +243,8 @@ publish        → 提案必须已关闭
 7. **proof 没有绑定到请求字段**：`PublicInputs()`（`voting.go:60-69`）造了 `proposal_id` / `nullifier`，但 `Verify`（`gnark_proof_verifier.go:48-80`）**只读 `public_witness`**。`encrypted_vote` 也不在任何公开输入里。修复任务见路线图 T15。
 8. **release 模式不再启动即改表** —— 必须先跑 `nullifier-server -migrate`，忘了会直接启动失败（`persistence.SchemaReady` 检查）。开发模式仍然自动迁移。
 9. **盲签名全流程在服务端内部完成**（`kryptology_credential_issuer.go:163-179`）—— 服务端自己 Blind 再 Finalize，客户端不参与，**不是真盲签名**。路线图 T17 改成两段式。
-10. **凭证改为匿名随机领取后，服务端无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。路线图 T22 用资格证明补回（§2.3）。
-11. **密文格式 v2 与 v0.1.0 不兼容** —— v1 密文会被直接拒绝（`unsupported ciphertext version`），旧的加密选票解不开。密钥派生用 HKDF-SHA256（`crypto/hkdf`）。
+10. **凭证改为匿名随机领取后，服务端无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。路线图 T22 用资格证明补回（见 [`docs/roadmap.md`](./roadmap.md) §2.3）。
+11. **密文格式 v2（v0.1.0 起即 v2）** —— v1 密文会被直接拒绝（`unsupported ciphertext version`），旧的加密选票解不开。密钥派生用 HKDF-SHA256（`crypto/hkdf`）。
 12. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go:60`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
 
 ---

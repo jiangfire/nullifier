@@ -253,7 +253,7 @@ web/                        # Vue 3 前端门户
 - 密文格式：`version(1) | ephemeralLen(2) | ephemeral | saltLen(2) | salt |
   nonce(12) | payloadLen(4) | payload | tag(32)`
 - 认证标签覆盖临时公钥、salt、nonce 与 payload。
-- **格式版本升到 v2，与 v0.1.0 的密文不兼容**：v1 密文会被直接拒绝
+- **格式版本升到 v2，与 v0.1.0 之前的 v1 密文不兼容**：v1 密文会被直接拒绝（v0.1.0 自身即 v2 格式）
   （`unsupported ciphertext version`）。升级后旧的加密选票无法解密。
 
 > 补齐上述链路的顺序与工作量评估见 [`docs/roadmap.md`](./roadmap.md)（产品路线图）。
