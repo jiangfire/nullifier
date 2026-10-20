@@ -238,8 +238,25 @@ web/                        # Vue 3 前端门户
 - `ballot-draft` 只用于开发联调，返回的是便于串流程的草稿数据。**密文由服务端生成，
   服务端在生成时就知道选了哪个** —— 这是当前版本最大的匿名性缺口。
 - 真实生产部署仍应由客户端自行生成密文和证明。
+- **凭证签发不是真正的盲签名。** `kryptology_credential_issuer.go` 里
+  `Prepare → Blind → BlindSign → Finalize` 全在服务端进程内完成，服务端全程持有
+  被签消息 —— 等同于普通签名，签发方看得见签的是什么。真正的两段式盲签名是
+  v1.0.0 证明链阶段的任务。
 
-> 补齐上述链路的顺序与工作量评估见 `docs/release-plan-v0.1.0.md` 的 v1.0.0 里程碑。
+### 6.1 选票密文格式（v2）
+
+- 密钥派生用 **HKDF-SHA256**（RFC 5869，Go 1.24+ 标准库 `crypto/hkdf`）：
+  - 输入密钥材料是 ECDH 共享秘密
+  - `salt` 每次加密随机生成（32 字节），随密文一起传输
+  - `info` 绑定协议版本、用途（加密/认证）与双方公钥（上下文绑定），
+    因此同一份共享秘密不会在不同上下文里派生出同一把密钥
+- 密文格式：`version(1) | ephemeralLen(2) | ephemeral | saltLen(2) | salt |
+  nonce(12) | payloadLen(4) | payload | tag(32)`
+- 认证标签覆盖临时公钥、salt、nonce 与 payload。
+- **格式版本升到 v2，与 v0.1.0 的密文不兼容**：v1 密文会被直接拒绝
+  （`unsupported ciphertext version`）。升级后旧的加密选票无法解密。
+
+> 补齐上述链路的顺序与工作量评估见 `docs/release-plan-v1.0.0.md`。
 
 ## 7. 前端与 CLI
 

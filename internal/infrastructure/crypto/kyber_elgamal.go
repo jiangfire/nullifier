@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"crypto/hkdf"
 	"crypto/hmac"
 	crand "crypto/rand"
 	"crypto/sha256"
@@ -17,9 +18,20 @@ import (
 )
 
 const (
-	kyberCipherVersion = byte(1)
+	// 密文格式版本。v2 起用 HKDF 派生密钥并在密文里带上 salt，
+	// 与 v0.1.0 的密文不兼容：v1 密文会被直接拒绝（版本号不匹配）。
+	kyberCipherVersion = byte(2)
 	kyberNonceSize     = 12
 	kyberTagSize       = 32
+	kyberSaltSize      = 32
+	kyberKeySize       = 32
+)
+
+// HKDF 的 info 前缀：把协议版本与用途写进去，保证同一份共享秘密不会
+// 在不同用途下派生出同一把密钥。
+const (
+	kdfLabelEnc  = "nullifier/kyber-elgamal/v2/encryption-key"
+	kdfLabelAuth = "nullifier/kyber-elgamal/v2/authentication-key"
 )
 
 // KyberElGamal 使用 kyber 提供的曲线能力实现简化 ElGamal 封装（含完整性标签）。
@@ -142,21 +154,28 @@ func (k *KyberElGamal) Encrypt(publicKey []byte, plaintext []byte) ([]byte, erro
 	if _, err := io.ReadFull(crand.Reader, nonce); err != nil {
 		return nil, fmt.Errorf("generate nonce: %w", err)
 	}
+	salt := make([]byte, kyberSaltSize)
+	if _, err := io.ReadFull(crand.Reader, salt); err != nil {
+		return nil, fmt.Errorf("generate salt: %w", err)
+	}
 
-	encKey, authKey := deriveKeys(sharedBytes)
+	encKey, authKey, err := deriveKeys(sharedBytes, salt, ephemeralBytes, publicKey)
+	if err != nil {
+		return nil, err
+	}
 	cipherPayload := xorKeystream(plaintext, encKey, nonce)
 
-	mac := hmac.New(sha256.New, authKey)
-	mac.Write(nonce)
-	mac.Write(cipherPayload)
-	tag := mac.Sum(nil)
+	tag := computeTag(authKey, ephemeralBytes, salt, nonce, cipherPayload)
 
-	out := make([]byte, 0, 1+2+len(ephemeralBytes)+kyberNonceSize+4+len(cipherPayload)+kyberTagSize)
+	out := make([]byte, 0, 1+2+len(ephemeralBytes)+2+kyberSaltSize+kyberNonceSize+4+len(cipherPayload)+kyberTagSize)
 	out = append(out, kyberCipherVersion)
 	lenBuf := make([]byte, 2)
 	binary.BigEndian.PutUint16(lenBuf, uint16(len(ephemeralBytes)))
 	out = append(out, lenBuf...)
 	out = append(out, ephemeralBytes...)
+	binary.BigEndian.PutUint16(lenBuf, uint16(len(salt)))
+	out = append(out, lenBuf...)
+	out = append(out, salt...)
 	out = append(out, nonce...)
 	payloadLen := make([]byte, 4)
 	binary.BigEndian.PutUint32(payloadLen, uint32(len(cipherPayload)))
@@ -179,7 +198,7 @@ func (k *KyberElGamal) Decrypt(privateKey []byte, ciphertext []byte) ([]byte, er
 		return nil, fmt.Errorf("decode private key: %w", err)
 	}
 
-	ephemeralBytes, nonce, payload, tag, err := parseCiphertext(ciphertext)
+	ephemeralBytes, salt, nonce, payload, tag, err := parseCiphertext(ciphertext)
 	if err != nil {
 		return nil, err
 	}
@@ -194,9 +213,18 @@ func (k *KyberElGamal) Decrypt(privateKey []byte, ciphertext []byte) ([]byte, er
 	if err != nil {
 		return nil, fmt.Errorf("marshal shared point: %w", err)
 	}
+	// 收件方公钥由私钥推出，两边算得到同一份上下文。
+	recipientPoint := k.suite.Point().Mul(privateScalar, nil)
+	recipientBytes, err := recipientPoint.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("marshal recipient point: %w", err)
+	}
 
-	encKey, authKey := deriveKeys(sharedBytes)
-	if !verifyMAC(authKey, nonce, payload, tag) {
+	encKey, authKey, err := deriveKeys(sharedBytes, salt, ephemeralBytes, recipientBytes)
+	if err != nil {
+		return nil, err
+	}
+	if !verifyMAC(authKey, ephemeralBytes, salt, nonce, payload, tag) {
 		return nil, errors.New("ciphertext authentication failed")
 	}
 
@@ -204,7 +232,7 @@ func (k *KyberElGamal) Decrypt(privateKey []byte, ciphertext []byte) ([]byte, er
 }
 
 func (k *KyberElGamal) ValidateCiphertext(cipher []byte) error {
-	ephemeralBytes, _, payload, _, err := parseCiphertext(cipher)
+	ephemeralBytes, _, _, payload, _, err := parseCiphertext(cipher)
 	if err != nil {
 		return err
 	}
@@ -219,23 +247,30 @@ func (k *KyberElGamal) ValidateCiphertext(cipher []byte) error {
 	return nil
 }
 
-func parseCiphertext(cipher []byte) (ephemeral []byte, nonce []byte, payload []byte, tag []byte, err error) {
-	if len(cipher) < 1+2+kyberNonceSize+4+kyberTagSize {
-		return nil, nil, nil, nil, errors.New("ciphertext too short")
+func parseCiphertext(cipher []byte) (ephemeral []byte, salt []byte, nonce []byte, payload []byte, tag []byte, err error) {
+	if len(cipher) < 1+2+2+kyberSaltSize+kyberNonceSize+4+kyberTagSize {
+		return nil, nil, nil, nil, nil, errors.New("ciphertext too short")
 	}
 	if cipher[0] != kyberCipherVersion {
-		return nil, nil, nil, nil, errors.New("unsupported ciphertext version")
+		return nil, nil, nil, nil, nil, errors.New("unsupported ciphertext version")
 	}
 
-	ephemeralLen := int(binary.BigEndian.Uint16(cipher[1:3]))
-	minLen := 1 + 2 + ephemeralLen + kyberNonceSize + 4 + kyberTagSize
-	if ephemeralLen <= 0 || len(cipher) < minLen {
-		return nil, nil, nil, nil, errors.New("invalid ephemeral length")
+	offset := 1
+	ephemeralLen := int(binary.BigEndian.Uint16(cipher[offset : offset+2]))
+	offset += 2
+	if ephemeralLen <= 0 || len(cipher) < offset+ephemeralLen {
+		return nil, nil, nil, nil, nil, errors.New("invalid ephemeral length")
 	}
-
-	offset := 3
 	ephemeral = append([]byte(nil), cipher[offset:offset+ephemeralLen]...)
 	offset += ephemeralLen
+
+	saltLen := int(binary.BigEndian.Uint16(cipher[offset : offset+2]))
+	offset += 2
+	if saltLen <= 0 || len(cipher) < offset+saltLen {
+		return nil, nil, nil, nil, nil, errors.New("invalid salt length")
+	}
+	salt = append([]byte(nil), cipher[offset:offset+saltLen]...)
+	offset += saltLen
 
 	nonce = append([]byte(nil), cipher[offset:offset+kyberNonceSize]...)
 	offset += kyberNonceSize
@@ -243,22 +278,58 @@ func parseCiphertext(cipher []byte) (ephemeral []byte, nonce []byte, payload []b
 	payloadLen := int(binary.BigEndian.Uint32(cipher[offset : offset+4]))
 	offset += 4
 	if payloadLen < 0 {
-		return nil, nil, nil, nil, errors.New("invalid payload length")
+		return nil, nil, nil, nil, nil, errors.New("invalid payload length")
 	}
 	if len(cipher) != offset+payloadLen+kyberTagSize {
-		return nil, nil, nil, nil, errors.New("ciphertext length mismatch")
+		return nil, nil, nil, nil, nil, errors.New("ciphertext length mismatch")
 	}
 
 	payload = append([]byte(nil), cipher[offset:offset+payloadLen]...)
 	offset += payloadLen
 	tag = append([]byte(nil), cipher[offset:offset+kyberTagSize]...)
-	return ephemeral, nonce, payload, tag, nil
+	return ephemeral, salt, nonce, payload, tag, nil
 }
 
-func deriveKeys(shared []byte) (encKey []byte, authKey []byte) {
-	hash1 := sha256.Sum256(append([]byte("enc:"), shared...))
-	hash2 := sha256.Sum256(append([]byte("auth:"), shared...))
-	return hash1[:], hash2[:]
+// deriveKeys 用 HKDF-SHA256（RFC 5869）从共享秘密派生加密密钥与认证密钥。
+//
+// 相比「裸 SHA256 加个前缀」，HKDF 先做 Extract 再做 Expand，密钥材料
+// 的分配是标准构造；salt 每次加密随机生成并随密文传输；info 里绑定了
+// 协议版本、用途以及双方公钥（上下文绑定），因此同一份共享秘密不会在
+// 不同上下文里派生出同一把密钥。
+func deriveKeys(shared, salt, ephemeralPub, recipientPub []byte) (encKey, authKey []byte, err error) {
+	encKey, err = hkdf.Key(
+		sha256.New,
+		shared,
+		salt,
+		kdfInfo(kdfLabelEnc, ephemeralPub, recipientPub),
+		kyberKeySize,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("derive encryption key: %w", err)
+	}
+	authKey, err = hkdf.Key(
+		sha256.New,
+		shared,
+		salt,
+		kdfInfo(kdfLabelAuth, ephemeralPub, recipientPub),
+		kyberKeySize,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("derive authentication key: %w", err)
+	}
+	return encKey, authKey, nil
+}
+
+// kdfInfo 拼出 HKDF 的 info：标签 + 长度前缀的双方公钥。
+// 长度前缀避免不同字段的拼接产生歧义。
+func kdfInfo(label string, ephemeralPub, recipientPub []byte) string {
+	buf := make([]byte, 0, len(label)+len(ephemeralPub)+len(recipientPub)+8)
+	buf = append(buf, label...)
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(ephemeralPub)))
+	buf = append(buf, ephemeralPub...)
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(recipientPub)))
+	buf = append(buf, recipientPub...)
+	return string(buf)
 }
 
 func xorKeystream(data []byte, key []byte, nonce []byte) []byte {
@@ -285,11 +356,20 @@ func xorKeystream(data []byte, key []byte, nonce []byte) []byte {
 	return out
 }
 
-func verifyMAC(authKey, nonce, payload, tag []byte) bool {
+// computeTag 计算密文认证标签。
+// 覆盖临时公钥与 salt：这两项都参与密钥派生，漏掉会让攻击者有机会
+// 在不触发认证失败的情况下替换它们。
+func computeTag(authKey, ephemeral, salt, nonce, payload []byte) []byte {
 	mac := hmac.New(sha256.New, authKey)
+	mac.Write(ephemeral)
+	mac.Write(salt)
 	mac.Write(nonce)
 	mac.Write(payload)
-	expected := mac.Sum(nil)
+	return mac.Sum(nil)
+}
+
+func verifyMAC(authKey, ephemeral, salt, nonce, payload, tag []byte) bool {
+	expected := computeTag(authKey, ephemeral, salt, nonce, payload)
 	return hmac.Equal(expected, tag)
 }
 
