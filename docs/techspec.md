@@ -288,8 +288,13 @@ web/                        # Vue 3 前端门户
 ### 7.4 CLI
 
 - CLI 直接复用 HTTP API，不绕过服务端校验。
+- `decrypt-setup` 强制要求 `-out`：门限份额只返回一次、服务端不保存明文，
+  必须落到文件里（`0o600`），不能默认打到 stdout。
+- CLI 不发送 `selected_option`：服务端不消费该字段，明文选项上服务端会抵消
+  「选票是加密的」这个属性。
 - 当前命令：
   - `health`
+  - `version`
   - `proposals-open`
   - `proposal-create`
   - `credential-issue`

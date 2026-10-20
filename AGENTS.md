@@ -20,7 +20,7 @@
 - 静态检查：`go vet ./...` 与 `gofmt -l ./cmd ./internal ./tests`（应无输出）
 - 覆盖率门槛：`./scripts/check-coverage.ps1`（PowerShell）/ `bash ./scripts/check-coverage.sh`（Bash），默认阈值 80%
 - 前端：`pnpm --dir web run dev`（rsbuild，默认 :3000）、`run build`、`run test`（vitest）、`exec tsc --noEmit`
-- CLI 工作流：`go run ./cmd/cli help` 查看全部 13 个命令
+- CLI 工作流：`go run ./cmd/cli help` 查看全部 14 个命令
 
 ## Project layout
 
@@ -29,11 +29,11 @@
 - `internal/usecase` — 业务编排（Proposal / Register / Voting / Participation / Tally），`usecase/mocks` 为 gomock 生成物
 - `internal/infrastructure` — `http`（Gin 路由/中间件/错误映射）、`persistence`（GORM 仓储与自动迁移）、`crypto`（gnark / kyber / kryptology）
 - `internal/di` — Wire 依赖注入；`internal/config` — viper 配置加载与运行期校验
-- `tests/` — `unit` 同级 `_test.go`、`integration`（testcontainers + PG）、`e2e`
+- `tests/` — `integration`（testcontainers + PG）、`e2e`、`testutil`；**单元测试不在这里**，而是与实现同包的 `_test.go`（如 `internal/usecase/tally_test.go`）
 - `web/` — Vue 3 + TypeScript + Rsbuild 单页门户（`src/App.vue` 只做外壳与引导编排，页面拆在 `src/components/panels/`，设计令牌在 `src/styles/`，后端错误文案映射在 `src/lib/error-messages.ts`）
 - `configs/` — `config.yaml`（开发）、`config.production.yaml`、`production.env.example`
-- `docs/` — `techspec.md`（当前实现口径，改接口/流程优先更新）
-- `scripts/` — 覆盖率门槛脚本；`.github/workflows/ci.yml` — CI 定义
+- `docs/` — `techspec.md`（当前实现口径，改接口/流程优先更新）、`project-map.md`（**分层项目地图 / 上下文索引**：子系统职责、关键文件、模式、陷阱、验证手册；改动前先读对应章节，不必通读全仓）、`release-plan-v0.1.0.md`（v0.1.0 发版计划与决策门 G1–G5）、`release-review-2026-10-20.md`（发版前整体 review：6 个 CRITICAL + 29 个 REQUIRED + 20 个 NIT 的完整证据与修复顺序）
+- `scripts/` — 覆盖率门槛脚本；`.github/workflows/ci.yml` — CI 定义；`.github/workflows/release.yml` — tag 触发的发布流水线（原生构建 + 冒烟测试 + sha256 + GitHub Release）
 
 ## Code style
 
@@ -47,8 +47,9 @@
 
 - 后端用 Go 原生测试 + `testify`；集成测试集中在 `tests/integration`，HTTP 与持久化测试贴近实现文件
 - 前端用 vitest，测试文件与源码同目录（如 `web/src/lib/datetime.test.ts`）
-- 改动涉及接口、密码学或持久化逻辑时**必须补回归测试**；合入前至少 `go test ./...` 且覆盖率脚本通过（当前 81.8%，余量 1.8 个百分点，新增代码务必补测）
-- CI 实际执行：`go test ./...` + `bash ./scripts/check-coverage.sh 80 coverage.ci.out`
+- 改动涉及接口、密码学或持久化逻辑时**必须补回归测试**；合入前至少 `go test ./...` 且覆盖率脚本通过
+- 覆盖率有两个口径，别混用：**门槛口径 82.3%**（`check-coverage.sh` 只跑 usecase / config / di / http / http-middleware 五个包），**全仓口径 62.0%**（2026-10-20 实测）。门槛余量只有 2.3 个百分点，且 `internal/infrastructure/crypto`、`internal/infrastructure/persistence`、`cmd/cli`（24.6%）、`cmd/server`（0%）**不在门槛内** —— 这些包的覆盖率回退不会让 CI 失败
+- CI 实际执行：`go test ./...` + `bash ./scripts/check-coverage.sh 80 coverage.ci.out`，**另加** gofmt 检查、前端 lint / tsc / vitest（`.github/workflows/ci.yml`）
 
 ## PR & commit conventions
 

@@ -9,7 +9,7 @@
   <a href="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml"><img src="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-yellow.svg" alt="License: AGPL-3.0" /></a>
   <img src="https://img.shields.io/badge/go-1.25.4-00ADD8?logo=go&logoColor=white" alt="Go 1.25.4" />
-  <img src="https://img.shields.io/badge/coverage-60.1%25%20(repo)-yellow.svg" alt="Coverage 60.1% (repo-wide)" />
+  <img src="https://img.shields.io/badge/coverage-62.0%25%20(repo)-yellow.svg" alt="Coverage 62.0% (repo-wide)" />
 </p>
 
 ---
@@ -61,7 +61,7 @@ nullifier 把这两个动作拆开:
 | 形态 | 说明 |
 |---|---|
 | HTTP API | 12 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
-| CLI | 13 个命令,复用同一套 HTTP API,不绕过服务端校验 |
+| CLI | 14 个命令,复用同一套 HTTP API,不绕过服务端校验 |
 | Web 门户 | Vue 3 单页应用,覆盖投票端与运营端全流程 |
 
 ## 快速开始
@@ -217,16 +217,18 @@ go test ./...                   # 全部测试
 bash ./scripts/check-coverage.sh 80 coverage.out   # CI 实际执行的形式
 ```
 
-CI 定义在 `.github/workflows/ci.yml`,执行 `go test ./...` 加覆盖率门槛。PostgreSQL 集成测试走 testcontainers:本地 Docker 不可用时跳过,**CI 环境下 Docker 缺失会直接失败**,避免"跳过"被误读成"通过"。
+CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go test ./...` + 覆盖率门槛,并单独跑前端作业(lint / tsc / vitest)。PostgreSQL 集成测试走 testcontainers:本地 Docker 不可用时跳过,**CI 环境下 Docker 缺失会直接失败**,避免"跳过"被误读成"通过"。
+
+打 `v*` tag 会触发 `.github/workflows/release.yml`:校验 tag 与 `VERSION` 一致 → 各平台 runner 原生构建(保留 cgo,默认的 sqlite 驱动依赖它)→ 产物冒烟启动测试 → 打包并生成 sha256 → 创建 GitHub Release。
 
 覆盖率有两个口径,别混用:
 
 | 口径 | 数值 | 覆盖范围 |
 |---|---|---|
-| 门槛口径 | **81.8%** | `scripts/check-coverage.sh` 选中的 5 个包:usecase / config / di / http / http-middleware |
-| 全仓口径 | **60.1%** | `./...` 全部包(2026-10-20 实测) |
+| 门槛口径 | **82.3%** | `scripts/check-coverage.sh` 选中的 5 个包:usecase / config / di / http / http-middleware |
+| 全仓口径 | **62.0%** | `./...` 全部包(2026-10-20 实测) |
 
-门槛余量只有 1.8 个百分点,且 `internal/infrastructure/crypto`、`internal/infrastructure/persistence`、`cmd/cli`、`cmd/server` **不在门槛内** —— 这些包的覆盖率回退不会让 CI 失败。**新增代码请一并补测**。
+门槛余量只有 2.3 个百分点,且 `internal/infrastructure/crypto`、`internal/infrastructure/persistence`、`cmd/cli`、`cmd/server` **不在门槛内** —— 这些包的覆盖率回退不会让 CI 失败。**新增代码请一并补测**。
 
 ## 项目状态与限制
 
