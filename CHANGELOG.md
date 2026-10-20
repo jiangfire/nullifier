@@ -89,6 +89,8 @@
 - 新增 tag `v*` 触发的发布流水线：校验 tag 与 `VERSION` 一致，在各平台 runner 上原生
   构建（保留 cgo，否则默认的 sqlite 驱动无法启动），对产物做冒烟启动测试，打包并
   生成 sha256 校验和，最后创建 GitHub Release。
+- 发布流水线的 macOS Intel 构建从 `macos-13` 改到 `macos-15-intel`：GitHub 已下线
+  `macos-13` 标签，用它会让该 job 永远排队、整个发版卡住。
 
 ### 已知限制
 
