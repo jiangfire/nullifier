@@ -10,7 +10,7 @@
 > C4（静默投错票）、C5（文案与实现对齐）、C6（覆盖率口径）、R4（token 进日志）、
 > R5（生产 token）、R7（production.yaml 不生效）、R9/R10（覆盖率门槛与 CI）、
 > R11–R15、R17–R19、R23–R27、R29。
-> **未完成（需要 v1.0.0 里程碑）**：C1、C2、C3、R2、R3、R8、R12、R16、R20、R21。
+> **未完成（需要 v0.2.0 里程碑）**：C1、C2、C3、R2、R3、R8、R12、R16、R20、R21。
 >
 > **复核更正（2026-10-20 落地时核对代码）**：原快照把 R1、R28 列为未完成，实际不成立 ——
 > R1 已由 `cb78f32` 的启动告警覆盖（`vk_path` 为空时明确提示「证明校验已关闭」）；
@@ -573,7 +573,7 @@ export GOCACHE="${GOCACHE:-$(pwd)/.gocache}"
 | N3 | `internal/infrastructure/http/middleware/error_handler.go:68-69` | `INVALID_REQUEST` 直接回 `err.Error()`，会透出内部细节；其他 code 都做了归一化。前端 `error-messages.ts` 是按英文短语正则匹配的，改后端文案必须同步改前端映射。 |
 | N4 | `scripts/check-coverage.sh:20` | `export GOSUMDB="off"` 削弱了依赖校验，CI 里同样生效。建议只在本地脚本保留，CI 用默认值。 |
 | N5 | 仓库根 | 无 `CHANGELOG.md`、无 `VERSION` 文件、`.github/workflows/` 只有 `ci.yml`（无 release workflow）。打 tag 后没有自动化发版/产物流程。 |
-| N6 | `web/package.json:3` | 前端 `version: "1.0.0"`，后端无版本概念。发版要给版本号的话，需要先统一口径（建议：单一版本源，CI 里注入）。 |
+| N6 | `web/package.json:3` | 前端 `version` 原本写死 `"1.0.0"`，与后端无版本概念。**已修**：`web/package.json` 的 version 改为跟随仓库根的 `VERSION`（单一版本源），发布流水线在构建前注入。 |
 | N7 | 仓库根 | `coverage.out` / `coverage.gitbash.out` / `probe.out` / `internal_http.cover.out` 散落（已 gitignore，`make clean` 可清）。 |
 | N8 | `configs/config.yaml:4` | `admin_bearer_token: "dev-admin-token"` 明文在会被自动加载的默认配置里。配合 R7，这是「用开发 token 上生产」的完整路径，建议加注释警示。 |
 | N9 | `web/src/composables/useVotePortal.ts` | 死代码导出（grep 确认无消费方）：`showAdvancedVoteFields`（`:311`,`:1616`）、`startGuideJourney`（`:464`,`:1671`，与 `App.vue:166-171` 重复）、`openGuideMode`（`:454`,`:1669`）、`visibleSections`（`:402`,`:1575`）、`sections`（`:41`,`:1574`）、`workspaces`（`:36`,`:1573`）。 |

@@ -241,7 +241,7 @@ web/                        # Vue 3 前端门户
 - **凭证签发不是真正的盲签名。** `kryptology_credential_issuer.go` 里
   `Prepare → Blind → BlindSign → Finalize` 全在服务端进程内完成，服务端全程持有
   被签消息 —— 等同于普通签名，签发方看得见签的是什么。真正的两段式盲签名是
-  v1.0.0 证明链阶段的任务。
+  v0.2.0 证明链阶段的任务。
 
 ### 6.1 选票密文格式（v2）
 

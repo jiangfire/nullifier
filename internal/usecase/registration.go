@@ -193,7 +193,7 @@ func (uc *RegisterUseCase) FillCredentialPool(
 //
 // 代价要说清楚：服务端因此**无法强制一人一票** —— 任何人都能反复领取并投票。
 // 「一人一票」要靠资格证明（零知识证明「我符合资格」而不透露身份）来保证，
-// 那是 v1.0.0 证明链阶段的任务。
+// 那是 v0.2.0 证明链阶段的任务。
 func (uc *RegisterUseCase) ClaimCredential(
 	ctx context.Context,
 	proposalID string,
