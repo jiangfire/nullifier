@@ -29,6 +29,7 @@ func TestMapError(t *testing.T) {
 		{name: "session_exists", err: usecase.ErrSessionAlreadyExists, status: http.StatusConflict, code: "DECRYPTION_SESSION_EXISTS"},
 		{name: "result_published", err: usecase.ErrResultAlreadyPublished, status: http.StatusConflict, code: "RESULT_ALREADY_PUBLISHED"},
 		{name: "unauthorized", err: usecase.ErrUnauthorized, status: http.StatusUnauthorized, code: "UNAUTHORIZED"},
+		{name: "credential_pool_empty", err: usecase.ErrCredentialPoolEmpty, status: http.StatusConflict, code: "CREDENTIAL_POOL_EMPTY"},
 		{name: "not_found", err: repository.ErrNotFound, status: http.StatusNotFound, code: "NOT_FOUND"},
 		{name: "unknown", err: errors.New("x"), status: http.StatusInternalServerError, code: "INTERNAL_ERROR"},
 	}

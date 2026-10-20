@@ -20,6 +20,7 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 	}
 	voteRepository := NewVoteRepository(db)
 	credentialRepository := NewCredentialRepository(db)
+	credentialClaimRepository := NewCredentialClaimRepository(db)
 	proposalRepository := NewProposalRepository(db)
 	participationRepository := NewParticipationRepository(db)
 	decryptionSessionRepository := NewDecryptionSessionRepository(db)
@@ -41,7 +42,7 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		logger,
 	)
 	credentialIssuer := NewCredentialIssuer(cfg)
-	registerUseCase := NewRegisterUseCase(credentialRepository, proposalRepository, credentialIssuer, logger)
+	registerUseCase := NewRegisterUseCase(credentialRepository, proposalRepository, credentialIssuer, credentialClaimRepository, logger)
 	proposalUseCase := NewProposalUseCase(proposalRepository, logger)
 	participationUseCase := NewParticipationUseCase(participationRepository, credentialRepository, logger)
 	thresholdCrypto := NewThresholdCrypto()

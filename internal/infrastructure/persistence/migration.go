@@ -14,6 +14,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&entity.Vote{},
 		&entity.Proposal{},
 		&entity.Credential{},
+		&entity.CredentialClaim{},
 		&entity.VoteParticipation{},
 		&entity.DecryptionSession{},
 		&entity.TallyResult{},
@@ -40,6 +41,7 @@ func SchemaReady(db *gorm.DB) bool {
 	return migrator.HasTable(&entity.Vote{}) &&
 		migrator.HasTable(&entity.Proposal{}) &&
 		migrator.HasTable(&entity.Credential{}) &&
+		migrator.HasTable(&entity.CredentialClaim{}) &&
 		migrator.HasTable(&entity.VoteParticipation{}) &&
 		migrator.HasTable(&entity.DecryptionSession{}) &&
 		migrator.HasTable(&entity.TallyResult{}) &&

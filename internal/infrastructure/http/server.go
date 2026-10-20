@@ -48,6 +48,7 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 	admin.POST("/credentials", handler.IssueCredential)
 	admin.POST("/proposals", handler.CreateProposal)
 	admin.GET("/proposals/:proposal_id/credentials", handler.ListProposalCredentialStatuses)
+	admin.POST("/proposals/:proposal_id/credentials/pool", handler.FillCredentialPool)
 	admin.POST("/proposals/:proposal_id/decryption/setup", handler.SetupDecryptionSession)
 	admin.POST("/proposals/:proposal_id/results/publish", handler.PublishResult)
 

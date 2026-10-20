@@ -72,6 +72,10 @@ func NewCredentialRepository(db *gorm.DB) repository.CredentialRepository {
 	return persistence.NewCredentialRepository(db)
 }
 
+func NewCredentialClaimRepository(db *gorm.DB) repository.CredentialClaimRepository {
+	return persistence.NewCredentialClaimRepository(db)
+}
+
 func NewProposalRepository(db *gorm.DB) repository.ProposalRepository {
 	return persistence.NewProposalRepository(db)
 }
@@ -141,9 +145,10 @@ func NewRegisterUseCase(
 	repo repository.CredentialRepository,
 	proposalRepo repository.ProposalRepository,
 	issuer domaincrypto.CredentialIssuer,
+	claimRepo repository.CredentialClaimRepository,
 	logger *zap.Logger,
 ) *usecase.RegisterUseCase {
-	return usecase.NewRegisterUseCase(repo, proposalRepo, issuer, logger)
+	return usecase.NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, logger)
 }
 
 func NewProposalUseCase(

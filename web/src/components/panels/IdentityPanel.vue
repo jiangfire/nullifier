@@ -16,6 +16,13 @@ async function issue(): Promise<void> {
     emit('issued');
   }
 }
+
+async function claim(): Promise<void> {
+  const ok = await portal.claimCredential();
+  if (ok) {
+    emit('issued');
+  }
+}
 </script>
 
 <template>
@@ -42,13 +49,65 @@ async function issue(): Promise<void> {
     <div class="split">
       <form class="card" @submit.prevent="issue">
         <div class="card-head">
-          <h2 class="card-title">领取凭证</h2>
+          <h2 class="card-title">匿名领取凭证</h2>
           <span
             class="pill"
             :class="portal.walletReady ? 'pill--ok' : 'pill--warn'"
           >
             {{ portal.walletReady ? '已就绪' : '未就绪' }}
           </span>
+        </div>
+
+        <p class="card-sub">
+          不需要 Admin Token，也不需要填 user_id。浏览器随机生成一个公钥去领，
+          服务端随机给出一个凭证 —— 运营方和服务器都不知道这个凭证是谁的。
+        </p>
+
+        <label class="field" for="identity-claim-proposal-id">
+          <span class="field-label">
+            proposal_id
+            <span class="field-required" aria-hidden="true">*</span>
+          </span>
+          <input
+            id="identity-claim-proposal-id"
+            v-model.trim="portal.voteForm.proposalId"
+            placeholder="先在投票大厅选择一场提案"
+          />
+        </label>
+
+        <div class="row">
+          <button
+            class="btn btn--secondary btn--sm"
+            type="button"
+            :disabled="!portal.walletReady"
+            @click="portal.openCredentialImport()"
+          >
+            导入凭证文件
+          </button>
+          <button
+            class="btn btn--secondary btn--sm"
+            type="button"
+            :disabled="!portal.walletReady"
+            @click="portal.exportCredentialFile()"
+          >
+            导出凭证文件
+          </button>
+        </div>
+
+        <button
+          class="btn btn--primary"
+          type="button"
+          :disabled="portal.credentialLoading"
+          @click="claim"
+        >
+          {{ portal.credentialLoading ? '领取中…' : '匿名领取' }}
+        </button>
+      </form>
+
+      <form class="card" @submit.prevent="issue">
+        <div class="card-head">
+          <h2 class="card-title">按 user_id 签发凭证</h2>
+          <span class="pill pill--warn">管理面</span>
         </div>
 
         <label class="field" for="identity-proposal-id">

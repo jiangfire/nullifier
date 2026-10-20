@@ -576,6 +576,7 @@ func buildFullStackEngineWithVerifier(
 
 	voteRepo := persistence.NewVoteRepository(db)
 	credentialRepo := persistence.NewCredentialRepository(db)
+	credentialClaimRepo := persistence.NewCredentialClaimRepository(db)
 	proposalRepo := persistence.NewProposalRepository(db)
 	participationRepo := persistence.NewParticipationRepository(db)
 	sessionRepo := persistence.NewDecryptionSessionRepository(db)
@@ -597,7 +598,13 @@ func buildFullStackEngineWithVerifier(
 		encrypter,
 		logger,
 	)
-	registerUC := usecase.NewRegisterUseCase(credentialRepo, proposalRepo, issuer, logger)
+	registerUC := usecase.NewRegisterUseCaseWithPool(
+		credentialRepo,
+		proposalRepo,
+		issuer,
+		credentialClaimRepo,
+		logger,
+	)
 	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo, encrypter, merkleBuilder, logger)

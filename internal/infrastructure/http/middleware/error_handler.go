@@ -56,6 +56,9 @@ func mapError(err error) (int, string) {
 		return http.StatusConflict, "RESULT_ALREADY_PUBLISHED"
 	case errors.Is(err, usecase.ErrUnauthorized):
 		return http.StatusUnauthorized, "UNAUTHORIZED"
+	case errors.Is(err, usecase.ErrCredentialPoolEmpty):
+		// 凭证池领完是运营状态问题，不是服务端故障 —— 4xx，别进 500。
+		return http.StatusConflict, "CREDENTIAL_POOL_EMPTY"
 	case errors.Is(err, repository.ErrNotFound):
 		return http.StatusNotFound, "NOT_FOUND"
 	default:

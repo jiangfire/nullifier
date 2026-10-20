@@ -63,6 +63,9 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/proposals/open", h.ListOpenProposals)
 	r.POST("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
 	r.POST("/proposals/:proposal_id/ballot-draft", h.PrepareBallotDraft)
+	// 匿名领取凭证：请求体不含任何身份信息，服务端因此无从记录
+	// 「谁领了哪个凭证」。
+	r.POST("/proposals/:proposal_id/credentials/claim", h.ClaimCredential)
 	r.GET("/proposals/:proposal_id/results", h.GetResult)
 	r.GET("/proposals/:proposal_id/audit-anchors", h.ListAuditAnchors)
 }
@@ -191,6 +194,97 @@ func (h *Handler) IssueCredential(c *gin.Context) {
 		"signature":          base64.StdEncoding.EncodeToString(credential.Signature),
 		"issuer_key_version": credential.IssuerKeyVersion,
 		"issued_at":          credential.IssuedAt.Format("2006-01-02T15:04:05Z07:00"),
+	})
+}
+
+// claimCredentialPayload 是匿名领取凭证的请求体。
+//
+// **刻意没有任何身份字段**：领取者只提交自己的公钥，user_id 由服务端
+// 从凭证池里随机分配 —— 服务端因此无法把凭证和投票人对应起来。
+type claimCredentialPayload struct {
+	UserPubKey string `json:"user_pub_key" validate:"required,base64"`
+}
+
+// fillCredentialPoolPayload 是管理端备池的请求体。
+type fillCredentialPoolPayload struct {
+	Count int `json:"count" validate:"required,min=1,max=10000"`
+}
+
+// ClaimCredential 匿名领取一个凭证。
+func (h *Handler) ClaimCredential(c *gin.Context) {
+	if h.registerUC == nil {
+		c.Error(fmt.Errorf("register usecase is not configured"))
+		return
+	}
+
+	var payload claimCredentialPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+	if err := h.validate.Struct(payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+
+	pubKeyBytes, err := base64.StdEncoding.DecodeString(payload.UserPubKey)
+	if err != nil {
+		c.Error(fmt.Errorf("%w: user_pub_key must be base64", usecase.ErrInvalidRequest))
+		return
+	}
+
+	credential, err := h.registerUC.ClaimCredential(
+		c.Request.Context(),
+		c.Param("proposal_id"),
+		pubKeyBytes,
+	)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"id":                 credential.ID,
+		"proposal_id":        credential.ProposalID,
+		"user_id":            credential.UserID,
+		"user_pub_key":       base64.StdEncoding.EncodeToString(credential.UserPubKey),
+		"signature":          base64.StdEncoding.EncodeToString(credential.Signature),
+		"issuer_key_version": credential.IssuerKeyVersion,
+		"issued_at":          credential.IssuedAt.Format("2006-01-02T15:04:05Z07:00"),
+	})
+}
+
+// FillCredentialPool 管理端为提案备好待领取的凭证槽位。
+func (h *Handler) FillCredentialPool(c *gin.Context) {
+	if h.registerUC == nil {
+		c.Error(fmt.Errorf("register usecase is not configured"))
+		return
+	}
+
+	var payload fillCredentialPoolPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+	if err := h.validate.Struct(payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+
+	count, err := h.registerUC.FillCredentialPool(
+		c.Request.Context(),
+		c.Param("proposal_id"),
+		payload.Count,
+	)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"status":      "ok",
+		"proposal_id": c.Param("proposal_id"),
+		"count":       count,
 	})
 }
 

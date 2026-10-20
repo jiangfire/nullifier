@@ -16,6 +16,7 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		NewDB,
 		NewVoteRepository,
 		NewCredentialRepository,
+		NewCredentialClaimRepository,
 		NewProposalRepository,
 		NewParticipationRepository,
 		NewDecryptionSessionRepository,

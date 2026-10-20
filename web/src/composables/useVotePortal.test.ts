@@ -268,6 +268,56 @@ describe('凭证与会话卫生', () => {
   });
 });
 
+describe('匿名领取凭证', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('只提交公钥，不提交任何身份信息', async () => {
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('/credentials/claim'),
+        payload: {
+          proposal_id: 'p1',
+          user_id: 'pseudonym-from-pool',
+          user_pub_key: 'pub-from-server',
+          signature: 'sig',
+        },
+      },
+    ]);
+    const portal = setupPortal();
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(true);
+    const call = calls.find((item) => item.url.includes('/credentials/claim'));
+    expect(call).toBeDefined();
+    expect(call?.url).toContain('/api/v1/proposals/p1/credentials/claim');
+    // 请求体里只有公钥：没有 user_id，服务器无从知道是谁领的。
+    expect(call?.body).toHaveProperty('user_pub_key');
+    expect(call?.body).not.toHaveProperty('user_id');
+    expect(Object.keys(call?.body ?? {})).toEqual(['user_pub_key']);
+    expect(portal.wallet.userId).toBe('pseudonym-from-pool');
+  });
+
+  it('领取失败时给出提示', async () => {
+    stubFetch([
+      {
+        match: (url) => url.includes('/credentials/claim'),
+        payload: { error: { code: 'CREDENTIAL_POOL_EMPTY' } },
+        status: 409,
+      },
+    ]);
+    const portal = setupPortal();
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(false);
+    const errors = portal.notices.value.filter((item) => item.level === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+  });
+});
+
 describe('查询投票状态', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();

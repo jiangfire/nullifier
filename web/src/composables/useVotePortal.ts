@@ -976,6 +976,57 @@ export function useVotePortal() {
     }
   }
 
+  /**
+   * 匿名领取凭证。
+   *
+   * 请求里只有自己生成的公钥，没有任何身份信息：服务端随机给出一个凭证，
+   * 因此服务端与运营方都无法把凭证和投票人对应起来。
+   */
+  async function claimCredential(): Promise<boolean> {
+    clearErrorGroup(identityErrors);
+    if (voteForm.proposalId.trim() === '') {
+      identityErrors.userId = '请先选择 proposal_id，再领取该提案的凭证';
+      addNotice('error', '领取失败', identityErrors.userId);
+      return false;
+    }
+
+    const pubKey = regenerateBase64Key();
+    credentialLoading.value = true;
+    const result = await apiCall({
+      baseUrl: apiBaseUrl.value,
+      path: `/api/v1/proposals/${encodeURIComponent(voteForm.proposalId.trim())}/credentials/claim`,
+      method: 'POST',
+      body: {
+        user_pub_key: pubKey,
+      },
+    });
+    credentialLoading.value = false;
+
+    if (!result.ok) {
+      addNotice(
+        'error',
+        '领取失败',
+        describeApiError(result.error, result.code, '凭证池可能已经领完'),
+      );
+      return false;
+    }
+    const payload = toObject(result.data);
+    wallet.proposalId =
+      textOf(payload, 'proposal_id') || voteForm.proposalId.trim();
+    wallet.userId = textOf(payload, 'user_id');
+    wallet.userPubKey = textOf(payload, 'user_pub_key') || pubKey;
+    wallet.signature = textOf(payload, 'signature');
+    wallet.issuerKeyVersion = textOf(payload, 'issuer_key_version');
+    wallet.issuedAt = textOf(payload, 'issued_at');
+    hasVoted.value = null;
+    addNotice(
+      'success',
+      '凭证已领取',
+      '凭证与你的身份没有绑定，服务端也不知道是谁领的',
+    );
+    return true;
+  }
+
   async function issueCredential(): Promise<boolean> {
     clearErrorGroup(identityErrors);
     if (voteForm.proposalId.trim() === '') {
@@ -1698,6 +1749,7 @@ export function useVotePortal() {
     credentialFileInput,
     identityErrors,
     issueCredential,
+    claimCredential,
     openCredentialImport,
     importCredentialFile,
     exportCredentialFile,
