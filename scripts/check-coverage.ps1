@@ -19,12 +19,12 @@ if (-not $env:GOSUMDB) {
     $env:GOSUMDB = "off"
 }
 
-go test -coverprofile=$Profile $Packages
+go test "-coverprofile=$Profile" $Packages
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-$summary = go tool cover -func=$Profile | Select-String "total:"
+$summary = go tool cover "-func=$Profile" | Select-String "total:"
 if (-not $summary) {
     Write-Error "Cannot parse coverage summary."
     exit 1
