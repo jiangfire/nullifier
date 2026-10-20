@@ -262,7 +262,7 @@ export function useVotePortal() {
     localStorage.getItem(baseUrlStorageKey) ?? 'http://localhost:8080',
   );
   const adminBearerToken = ref(
-    localStorage.getItem(adminTokenStorageKey) ?? '',
+    sessionStorage.getItem(adminTokenStorageKey) ?? '',
   );
   const workspace = ref<WorkspaceId>('user');
   const activeSection = ref<SectionId>('overview');
@@ -440,6 +440,11 @@ export function useVotePortal() {
           noticeTimers.delete(item.id);
         }
       }
+    }
+    if (level === 'error') {
+      // 错误提示不自动消失：投票失败这类信息如果几秒后自己没了，
+      // 面板看起来和「就绪」状态一模一样，用户根本不会知道自己投失败了。
+      return;
     }
     const timer = window.setTimeout(() => {
       dismissNotice(notice.id);
@@ -1553,7 +1558,9 @@ export function useVotePortal() {
   });
 
   watch(adminBearerToken, (value) => {
-    localStorage.setItem(adminTokenStorageKey, value.trim());
+    // 管理令牌不落 localStorage：同源下的任意脚本、共享浏览器都能直接读到。
+    // sessionStorage 至少随标签页/会话结束而失效。
+    sessionStorage.setItem(adminTokenStorageKey, value.trim());
   });
 
   watch(selectedProposalId, (value) => {
@@ -1561,6 +1568,8 @@ export function useVotePortal() {
     if (id === '') {
       return;
     }
+    // 换提案就重置「是否已投票」：上一个提案的状态不能套到新提案上。
+    hasVoted.value = null;
     voteForm.proposalId = id;
     decryptForm.proposalId = id;
     publishForm.proposalId = id;

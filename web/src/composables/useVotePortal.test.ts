@@ -37,6 +37,24 @@ Object.defineProperty(globalThis, 'window', {
   configurable: true,
 });
 
+/** node 环境没有 sessionStorage，管理令牌不应该落到 localStorage。 */
+const sessionStore = new Map<string, string>();
+Object.defineProperty(globalThis, 'sessionStorage', {
+  value: {
+    getItem: (key: string) => sessionStore.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      sessionStore.set(key, value);
+    },
+    removeItem: (key: string) => {
+      sessionStore.delete(key);
+    },
+    clear: () => {
+      sessionStore.clear();
+    },
+  },
+  configurable: true,
+});
+
 interface FetchCall {
   url: string;
   body: Record<string, unknown> | null;
@@ -68,6 +86,7 @@ function stubFetch(
 
 function setupPortal() {
   storage.clear();
+  sessionStore.clear();
   storage.set('anonvote.front.base_url', 'http://localhost:8080');
 
   const portal = useVotePortal();
@@ -188,5 +207,58 @@ describe('投票凭据与当前意图的绑定', () => {
     expect(portal.voteForm.encryptedVote).toBe('cipher-imported');
     expect(portal.voteForm.ballotOption).toBe('B');
     expect(portal.voteForm.ballotProposalId).toBe('p1');
+  });
+});
+
+describe('凭证与会话卫生', () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('管理令牌只进 sessionStorage，不落 localStorage', async () => {
+    stubFetch([draftRoute]);
+    const portal = setupPortal();
+
+    portal.adminBearerToken.value = 'super-secret';
+    await nextTick();
+
+    expect(sessionStore.get('anonvote.front.admin_token')).toBe('super-secret');
+    expect(storage.get('anonvote.front.admin_token')).toBeUndefined();
+  });
+
+  it('换提案时重置「是否已投票」', async () => {
+    stubFetch([draftRoute]);
+    const portal = setupPortal();
+
+    portal.hasVoted.value = true;
+    portal.adoptProposal('p2');
+    await nextTick();
+
+    expect(portal.hasVoted.value).toBeNull();
+  });
+
+  it('错误提示不自动消失', async () => {
+    stubFetch([
+      draftRoute,
+      { match: (url) => url.includes('/api/v1/votes'), payload: { status: 'ok' } },
+    ]);
+    const portal = setupPortal();
+    await portal.prepareBallotByOption();
+
+    // 让投票失败：把材料清空到不满足提交条件。
+    portal.voteForm.encryptedVote = '';
+    await portal.submitVote();
+    await nextTick();
+
+    const errors = portal.notices.value.filter((item) => item.level === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+
+    // 模拟 4.2 秒过去：错误提示仍然在。
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await nextTick();
+    const stillThere = portal.notices.value.filter(
+      (item) => item.level === 'error',
+    );
+    expect(stillThere.length).toBe(errors.length);
   });
 });
