@@ -63,7 +63,7 @@ test: ## Run every test
 test-short: ## Run tests, skipping container-backed integration tests
 	$(GO) test -short ./...
 
-cover: ## Coverage gate (override with THRESHOLD=90)
+cover: ## Coverage gate (per-package floors in scripts/coverage-thresholds.txt)
 	bash ./scripts/check-coverage.sh $(or $(THRESHOLD),80) coverage.out
 
 # ---------- 静态检查 ----------
@@ -115,5 +115,5 @@ check: vet fmt-check web-lint web-typecheck ## Fast local gate before committing
 ci: test cover ## Reproduce the CI pipeline: go test ./... + coverage gate
 
 clean: ## Remove build output and coverage files
-	rm -f coverage.out coverage.ci.out coverage.gitbash.out probe.out
+	rm -f coverage*.out probe.out
 	rm -rf web/dist

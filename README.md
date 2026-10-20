@@ -9,7 +9,7 @@
   <a href="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml"><img src="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-yellow.svg" alt="License: AGPL-3.0" /></a>
   <img src="https://img.shields.io/badge/go-1.25.4-00ADD8?logo=go&logoColor=white" alt="Go 1.25.4" />
-  <img src="https://img.shields.io/badge/coverage-62.7%25%20(repo)-yellow.svg" alt="Coverage 62.7% (repo-wide)" />
+  <img src="https://img.shields.io/badge/coverage-74.1%25%20(repo)-yellow.svg" alt="Coverage 74.1% (repo-wide)" />
 </p>
 
 ---
@@ -203,6 +203,7 @@ nullifier-server             # 再起服务
 | `POST` | `/api/v1/proposals/:id/ballot-draft` | 生成选票草稿(开发联调) |
 | `GET` | `/api/v1/proposals/:id/results` | 已发布的计票结果 |
 | `GET` | `/api/v1/proposals/:id/audit-anchors` | 导出审计锚点 |
+| `POST` | `/api/v1/proposals/:id/credentials/claim` | 从凭证池随机领取一张凭证 |
 
 管理端点,需 `Authorization: Bearer <admin token>`:
 
@@ -211,6 +212,7 @@ nullifier-server             # 再起服务
 | `POST` | `/api/v1/credentials` | 签发匿名凭证 |
 | `POST` | `/api/v1/proposals` | 创建提案 |
 | `GET` | `/api/v1/proposals/:id/credentials` | 该提案下凭证的 `has_voted` 状态 |
+| `POST` | `/api/v1/proposals/:id/credentials/pool` | 往凭证池批量投放预签凭证 |
 | `POST` | `/api/v1/proposals/:id/decryption/setup` | 初始化门限解密会话 |
 | `POST` | `/api/v1/proposals/:id/results/publish` | 提交份额并发布结果 |
 
@@ -234,7 +236,7 @@ go build ./...                  # 构建
 go vet ./...                    # 静态检查
 gofmt -l ./cmd ./internal ./tests   # 格式检查(应无输出)
 go test ./...                   # 全部测试
-./scripts/check-coverage.ps1    # 覆盖率门槛(默认 80%)
+./scripts/check-coverage.ps1    # 覆盖率门槛(按包分档)
 bash ./scripts/check-coverage.sh 80 coverage.out   # CI 实际执行的形式
 ```
 
@@ -246,10 +248,10 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 | 口径 | 数值 | 覆盖范围 |
 |---|---|---|
-| 门槛口径 | **83.4%** | `scripts/check-coverage.sh` 选中的 5 个包:usecase / config / di / http / http-middleware |
-| 全仓口径 | **62.7%** | `./...` 全部包(2026-10-20 实测) |
+| 门槛口径 | **79.0%** | `scripts/check-coverage.sh` 选中的 9 个包:usecase / config / di / http / http-middleware / crypto / persistence / cmd-cli / cmd-server |
+| 全仓口径 | **74.1%** | `./...` 全部包(2026-10-20 实测) |
 
-门槛余量只有 3.4 个百分点,且 `internal/infrastructure/crypto`(78.1%)、`internal/infrastructure/persistence`(58.6%)、`cmd/cli`(24.6%)、`cmd/server`(0%) **不在门槛内** —— 这些包的覆盖率回退不会让 CI 失败。**新增代码请一并补测**。
+门槛是**逐包分档**的,每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`,单个包回退会直接让 CI 变红 —— 不再是"一个总和撑着,低覆盖率的包悄悄退化"。当前最低的一档是 `internal/infrastructure/persistence`(60.1%),抬门槛时它会先卡住。**新增代码请一并补测**。
 
 ## 项目状态与限制
 
@@ -258,7 +260,7 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 - **证明链尚未实现。** 服务端只有 proof 验证器的骨架:没有真实选票电路、没有密钥生成流程、没有客户端 prover。`crypto.vk_path` 为空时任何非空 proof 都会通过(开发模式);加载 vk 后 `public_witness` 变成必填,而现有客户端都拿不到它。
 - **`ballot-draft` 是开发联调接口**,返回的是便于串通流程的草稿数据。**密文由服务端生成,服务端在生成时就知道选了哪个** —— 这是当前版本最大的匿名性缺口。生产环境应由真实钱包/客户端生成 proof 与密文;后端只负责验证,不代替用户端生成证明。这条链路尚未完成。
 - **凭证签发不是真盲签名。** 用的是 RFC9474 盲签名库,但 `Prepare → Blind → BlindSign → Finalize` 全在服务端进程内完成,签发方看得见被签的凭证内容。真正的两段式盲签名(客户端提交盲化消息 → 服务端签 → 客户端解盲)是 v1.0.0 的任务。
-- **凭证签发端点在 admin 分组下**,意味着每个投票人都得持有 admin token 才能领凭证 —— 这也让运营方天然掌握「哪个凭证给了谁」的对应关系。改成「凭证池 + 投票人匿名随机领取」是 v1.0.0 的任务。
+- **凭证不再由 admin 逐个分发。** 改为「凭证池 + 投票人匿名随机领取」：admin 往池里批量投放预签凭证，投票人自己随机领一张（`POST /api/v1/proposals/:id/credentials/claim`），运营方不再天然掌握「哪个凭证给了谁」。**代价：服务端无法强制一人一票** —— 随机领取意味着服务端看不出同一个人领了几次，资格证明是后续要补的。
 - **`decryption/setup` 拒绝"投票开放中"的提案**,运营上必须在 `starts_at` 之前完成初始化。
 - **生产部署必须显式设置** `SERVER_ADMIN_BEARER_TOKEN` 与 `SERVER_CORS_ALLOWED_ORIGINS`;`release` 模式下缺 admin token 会直接启动失败。`configs/config.production.yaml` **不会**被自动加载(viper 只找 `config.yaml`),详见该文件内的注释。
 

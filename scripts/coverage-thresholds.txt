@@ -1,0 +1,22 @@
+# 覆盖率门槛（分档）
+#
+# 每行：<包路径> <最低覆盖率>
+# 末行的 total 是所有受控包的合计口径。
+#
+# 为什么分档而不是只看一个总和：一个笼统的总和会让 crypto / persistence /
+# cmd 这类覆盖率低的包悄悄回退 —— 总体数字被 usecase / http 撑着，
+# 单个包掉了 10 个百分点也看不出来。
+#
+# 门槛按各包 2026-10-20 的实测水位 -2% 设定，随版本逐步抬到 80%。
+# 抬门槛时先跑一次 `bash ./scripts/check-coverage.sh 80 coverage.out`
+# 看看现在的实际水位，再改这里的数字。
+internal/usecase 77
+internal/config 93
+internal/di 89
+internal/infrastructure/http 78
+internal/infrastructure/http/middleware 89
+internal/infrastructure/crypto 76
+internal/infrastructure/persistence 58
+cmd/cli 81
+cmd/server 75
+total 77

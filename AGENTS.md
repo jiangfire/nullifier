@@ -18,7 +18,7 @@
 - 构建：`go build ./...`；前端 `pnpm --dir web run build`
 - 测试：`go test ./...`（**Windows 需 `CGO_ENABLED=1`**，`gorm.io/driver/sqlite` 依赖 cgo；Makefile 在 Windows 上已自动导出该变量）
 - 静态检查：`go vet ./...` 与 `gofmt -l ./cmd ./internal ./tests`（应无输出）
-- 覆盖率门槛：`./scripts/check-coverage.ps1`（PowerShell）/ `bash ./scripts/check-coverage.sh`（Bash），默认阈值 80%
+- 覆盖率门槛：`./scripts/check-coverage.ps1`（PowerShell）/ `bash ./scripts/check-coverage.sh`（Bash）。**按包分档**：每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`，逐包判定；脚本的第一个参数是「表里没有的包」的兜底阈值，默认 80%
 - 前端：`pnpm --dir web run dev`（rsbuild，默认 :3000）、`run build`、`run test`（vitest）、`exec tsc --noEmit`
 - CLI 工作流：`go run ./cmd/cli help` 查看全部 14 个命令
 
@@ -48,7 +48,7 @@
 - 后端用 Go 原生测试 + `testify`；集成测试集中在 `tests/integration`，HTTP 与持久化测试贴近实现文件
 - 前端用 vitest，测试文件与源码同目录（如 `web/src/lib/datetime.test.ts`）
 - 改动涉及接口、密码学或持久化逻辑时**必须补回归测试**；合入前至少 `go test ./...` 且覆盖率脚本通过
-- 覆盖率有两个口径，别混用：**门槛口径 83.4%**（`check-coverage.sh` 只跑 usecase / config / di / http / http-middleware 五个包），**全仓口径 62.7%**（2026-10-20 实测）。门槛余量只有 3.4 个百分点，且 `internal/infrastructure/crypto`（78.1%）、`internal/infrastructure/persistence`（58.6%）、`cmd/cli`（24.6%）、`cmd/server`（0%）**不在门槛内** —— 这些包的覆盖率回退不会让 CI 失败
+- 覆盖率有两个口径，别混用：**门槛口径 79.0%**（`check-coverage.sh` 选中的 9 个包：usecase / config / di / http / http-middleware / crypto / persistence / cmd-cli / cmd-server），**全仓口径 74.1%**（2026-10-20 实测）。门槛是**逐包分档**的（门槛值见 `scripts/coverage-thresholds.txt`），单个包回退会直接让 CI 变红；`internal/infrastructure/persistence`（60.1%）是当前最低的一档，抬门槛时它会先卡住
 - CI 实际执行：`go test ./...` + `bash ./scripts/check-coverage.sh 80 coverage.ci.out`，**另加** gofmt 检查、前端 lint / tsc / vitest（`.github/workflows/ci.yml`）
 
 ## PR & commit conventions

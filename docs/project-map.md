@@ -237,7 +237,7 @@ publish        → 提案必须已关闭
 1. **`vk_path` 为空 = 关闭证明验证。** `gnark_proof_verifier.go:55`。开发配置 `configs/config.yaml` 就是 `vk_path: ""`。
 2. **`configs/config.production.yaml` 不会被自动加载。** viper 只认 `config.*`。
 3. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项。
-4. **覆盖率门槛只覆盖 5 个包**（usecase / config / di / http / http-middleware），`internal/infrastructure/crypto`（78.1%）、`internal/infrastructure/persistence`（58.6%）、`cmd/cli`（24.6%）、`cmd/server`（**0%**）**都不在门槛内**。门槛口径 83.40%，**全仓口径 62.7%**（2026-10-20 实测），余量 3.4 个百分点；其中 usecase 单包 79.8%（已低于 80%）。
+4. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（9 个受控包：usecase / config / di / http / http-middleware / crypto / persistence / cmd-cli / cmd-server）。单个包回退会直接让 CI 变红，但门槛本身还比各包当前水位低 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。门槛口径 79.0%，**全仓口径 74.1%**（2026-10-20 实测）；最低的一档是 `internal/infrastructure/persistence`（60.1%）。
 5. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go:234`）和 `isProposalClosed`（`tally.go:386`）。改时间规则要同时改两处。
 6. **`ballot-draft` 是公共路由且无模式开关** —— 生产环境也会暴露（此时返回的假 proof 会在验证阶段被拒，但接口本身不该在生产可达）。修复任务见 v1.0.0 计划 T1。
 7. **proof 没有绑定到请求字段**：`PublicInputs()`（`voting.go:60-69`）造了 `proposal_id` / `nullifier`，但 `Verify`（`gnark_proof_verifier.go:48-80`）**只读 `public_witness`**。`encrypted_vote` 也不在任何公开输入里。修复任务见 v1.0.0 计划 T15。
@@ -258,6 +258,7 @@ go vet ./...
 gofmt -l ./cmd ./internal ./tests      # 应无输出
 go test ./...                          # Windows 需 CGO_ENABLED=1
 bash ./scripts/check-coverage.sh 80 coverage.ci.out   # 用 Git Bash，不是 WSL
+#   覆盖率门槛按包分档，逐包判定；门槛值见 scripts/coverage-thresholds.txt
 
 # 前端
 pnpm --dir web run lint

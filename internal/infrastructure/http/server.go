@@ -4,6 +4,7 @@ import (
 	"anonvote/internal/config"
 	"anonvote/internal/infrastructure/http/middleware"
 	"io"
+	"net"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -62,6 +63,12 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 func (s *Server) Run() error {
 	s.logger.Info("http server starting", zap.String("addr", s.addr))
 	return s.engine.Run(s.addr)
+}
+
+// Serve 在已有的 listener 上提供服务。生产路径走 Run；测试用临时端口的
+// listener 驱动一次真实的监听、请求与关停，而不用占用固定端口。
+func (s *Server) Serve(l net.Listener) error {
+	return s.engine.RunListener(l)
 }
 
 func (s *Server) Engine() *gin.Engine {
