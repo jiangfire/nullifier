@@ -10,7 +10,18 @@
 > C4（静默投错票）、C5（文案与实现对齐）、C6（覆盖率口径）、R4（token 进日志）、
 > R5（生产 token）、R7（production.yaml 不生效）、R9/R10（覆盖率门槛与 CI）、
 > R11–R15、R17–R19、R23–R27、R29。
-> **未完成（需要 v1.0.0 里程碑）**：C1、C2、C3、R1、R2、R3、R8、R12、R16、R20–R22、R28。
+> **未完成（需要 v1.0.0 里程碑）**：C1、C2、C3、R2、R3、R8、R12、R16、R20、R21。
+>
+> **复核更正（2026-10-20 落地时核对代码）**：原快照把 R1、R28 列为未完成，实际不成立 ——
+> R1 已由 `cb78f32` 的启动告警覆盖（`vk_path` 为空时明确提示「证明校验已关闭」）；
+> R28 本就已有 `NULLIFIER_ADMIN_TOKEN` 环境变量入口（`cmd/cli/main.go:60`），
+> `-admin-token` 只是兜底。R23（CLI `public_witness`，`cmd/cli/main.go:322`）同理，代码里本就具备。
+>
+> **R18 只修了一半**：`hasVoted` 跨提案重置已由 `eb1d488` 修完，但「查询投票状态」的
+> **UI 入口仍缺** —— `fetchVoteStatus` 已实现并导出（`useVotePortal.ts:1122`/`:1711`），
+> 唯一调用点在 `submitVote` 内部（`:1118`），没有按钮能主动触发。列为 v1.0.0 计划的 T11。
+>
+> 剩余项的完整计划见 [`docs/release-plan-v1.0.0.md`](./release-plan-v1.0.0.md)。
 
 ---
 
