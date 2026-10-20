@@ -151,6 +151,7 @@ async function submit(): Promise<void> {
           <h2 class="card-title">生成投票凭据</h2>
           <p class="card-sub">
             凭据由服务端按你选中的选项生成，不需要手写 proof 或密文。
+            改选项会让已生成的凭据失效，需要重新生成。
           </p>
           <button
             class="btn btn--primary"
@@ -253,11 +254,16 @@ async function submit(): Promise<void> {
           <button
             class="btn btn--primary"
             type="button"
-            :disabled="portal.voteLoading || !portal.walletReady"
+            :disabled="
+              portal.voteLoading || !portal.walletReady || !portal.ballotTargetCurrent
+            "
             @click="submit"
           >
             {{ portal.voteLoading ? '提交中…' : '提交匿名选票' }}
           </button>
+          <p v-if="!portal.ballotTargetCurrent" class="field-error" role="alert">
+            投票凭据对应的选项与当前选择不一致，请重新生成凭据后再提交。
+          </p>
         </div>
       </li>
     </ol>

@@ -1,5 +1,10 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { apiCall } from '../lib/api';
+import {
+  hasBallotTargetDrifted,
+  isBallotTargetCurrent,
+  isTargetUnknown,
+} from '../lib/ballot';
 import { localInputToRfc3339, toLocalDateTimeInput } from '../lib/datetime';
 import { describeApiError } from '../lib/error-messages';
 import {
@@ -303,6 +308,10 @@ export function useVotePortal() {
     proof: '',
     nullifier: '',
     publicWitness: '',
+    // 这份凭据材料是针对哪个提案、哪个选项生成的。
+    // 选项或提案变了就必须作废它，否则会投出旧选项。
+    ballotProposalId: '',
+    ballotOption: '',
   });
   const voteLoading = ref(false);
   const voteStatusLoading = ref(false);
@@ -661,6 +670,36 @@ export function useVotePortal() {
     }
   }
 
+  function clearBallotMaterial(): void {
+    voteForm.encryptedVote = '';
+    voteForm.proof = '';
+    voteForm.ballotProposalId = '';
+    voteForm.ballotOption = '';
+  }
+
+  /** 绑定投票凭据材料的目标（提案 + 选项）。 */
+  function bindBallotMaterial(proposalId: string, option: string): void {
+    voteForm.ballotProposalId = proposalId.trim();
+    voteForm.ballotOption = option.trim();
+  }
+
+  /** 当前意图：材料必须对得上「哪个提案的哪个选项」。 */
+  const currentBallotTarget = computed(() => ({
+    proposalId: voteForm.proposalId.trim(),
+    option: selectedVoteOption.value.trim(),
+  }));
+
+  /** 材料绑定的目标。 */
+  const boundBallotTarget = computed(() => ({
+    proposalId: voteForm.ballotProposalId.trim(),
+    option: voteForm.ballotOption.trim(),
+  }));
+
+  /** 材料是否仍然对得上当前意图（用来禁用提交按钮）。 */
+  const ballotTargetCurrent = computed(() =>
+    isBallotTargetCurrent(boundBallotTarget.value, currentBallotTarget.value),
+  );
+
   function updateBallotJson(selectedOption: string): void {
     voteForm.ballotJson = JSON.stringify(
       {
@@ -690,6 +729,11 @@ export function useVotePortal() {
       addNotice('error', '填充失败', voteErrors.option);
       return;
     }
+    if (!ballotTargetCurrent.value) {
+      voteErrors.option = '投票凭据对应的选项与当前选择不一致，请重新生成凭据';
+      addNotice('error', '填充失败', voteErrors.option);
+      return;
+    }
     try {
       const current = voteForm.ballotJson.trim();
       const base = current === '' ? {} : (toObject(JSON.parse(current)) ?? {});
@@ -709,6 +753,11 @@ export function useVotePortal() {
       voteForm.nullifier = textOf(payload, 'nullifier');
       voteForm.publicWitness = textOf(payload, 'public_witness');
       voteForm.ballotJson = JSON.stringify(payload, null, 2);
+      // 材料本来没有绑定目标时（外部导入且没带 selected_option），
+      // 以用户这次显式写入的选项为准。
+      if (isTargetUnknown(boundBallotTarget.value)) {
+        bindBallotMaterial(voteForm.proposalId, selectedVoteOption.value);
+      }
       addNotice('success', '写入成功', '选项已同步到投票凭据 JSON');
     } catch {
       voteErrors.ballotJson = '当前投票凭据 JSON 不是合法格式';
@@ -744,6 +793,12 @@ export function useVotePortal() {
         textOf(parsed, 'public_witness') || textOf(parsed, 'publicWitness');
       const chosenOption =
         textOf(parsed, 'selected_option') || textOf(parsed, 'option');
+      // 外部导入的凭据：读到 selected_option 就绑定上，读不到就保持「不可判定」，
+      // 不去猜它的选项。
+      bindBallotMaterial(
+        textOf(parsed, 'proposal_id') || voteForm.proposalId,
+        chosenOption,
+      );
       if (chosenOption !== '') {
         selectedVoteOption.value = chosenOption;
       }
@@ -798,6 +853,10 @@ export function useVotePortal() {
     voteForm.proof = textOf(payload, 'proof');
     voteForm.nullifier = textOf(payload, 'nullifier') || newNullifier();
     const option = textOf(payload, 'option');
+    // 先绑定目标再回写选项：回写会触发下面的 watcher，watcher 是延迟执行的，
+    // 那时 ballotOption 已经是新值，不会误清刚拿到的材料。
+    voteForm.ballotProposalId = voteForm.proposalId.trim();
+    voteForm.ballotOption = (option || selectedVoteOption.value).trim();
     if (option !== '') {
       selectedVoteOption.value = option;
     }
@@ -997,6 +1056,12 @@ export function useVotePortal() {
       addNotice('error', '提交失败', voteErrors.option);
       return false;
     }
+    if (!ballotTargetCurrent.value) {
+      // 凭据是针对别的选项生成的：提交它会记下旧选项，而界面上显示的是新选项。
+      voteErrors.option = '投票凭据对应的选项与当前选择不一致，请重新生成凭据';
+      addNotice('error', '提交失败', voteErrors.option);
+      return false;
+    }
     if (voteForm.encryptedVote.trim() === '') {
       voteErrors.encryptedVote = 'encrypted_vote 不能为空';
     }
@@ -1020,9 +1085,8 @@ export function useVotePortal() {
       user_pub_key: wallet.userPubKey,
       credential_signature: wallet.signature,
     };
-    if (selectedVoteOption.value.trim() !== '') {
-      body.selected_option = selectedVoteOption.value.trim();
-    }
+    // 注意：不要发送 selected_option。服务端不消费这个字段，而明文选项上服务端
+    // 会抵消「选票是加密的」这个属性。选票是否对得上当前选项由本地绑定校验。
     if (voteForm.publicWitness.trim() !== '') {
       body.public_witness = voteForm.publicWitness.trim();
     }
@@ -1523,6 +1587,20 @@ export function useVotePortal() {
     }
   });
 
+  // 选项或提案变了，已生成的凭据就不再对应当前意图 —— 作废它，
+  // 否则会投出旧选项而界面上显示的是新选项。
+  watch([selectedVoteOption, () => voteForm.proposalId], () => {
+    if (!hasBallotTargetDrifted(boundBallotTarget.value, currentBallotTarget.value)) {
+      return;
+    }
+    clearBallotMaterial();
+    addNotice(
+      'info',
+      '目标已变更',
+      '投票凭据已清空，请按当前选项重新生成后再提交',
+    );
+  });
+
   watch([workspace, activeSection, selectedProposalId], () => {
     persistRouteToStorage();
     syncRouteToUrl();
@@ -1613,6 +1691,7 @@ export function useVotePortal() {
     voteStatusLoading,
     hasVoted,
     selectedVoteOption,
+    ballotTargetCurrent,
     showAdvancedVoteFields,
     voteErrors,
     applySelectedOptionToBallot,
