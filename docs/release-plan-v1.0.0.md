@@ -16,7 +16,7 @@
 
 | 层 | 内容 | 依赖 | 预估 |
 |---|---|---|---|
-| **Phase 1** 加固层 | 与证明链无关的 11 项（模式开关、常数时间比较、自动迁移、连接池、KDF、覆盖率扩包…） | 无 | 天级 |
+| **Phase 1** 加固层 | 与证明链无关的 12 项（模式开关、常数时间比较、自动迁移、连接池、KDF、覆盖率扩包…） | 无 | 天级 |
 | **Phase 2** 证明链 | C1/C2/C3/C5根治/R2/R3 六项 | Phase 1 的 T1/T2 | 周级 |
 | **Phase 3** 生产化 | 部署配置、端到端验收、发版 | Phase 2 | 天级 |
 
@@ -129,16 +129,22 @@
 | 预估 | 半天 |
 | 依赖 | 无 |
 
-#### T9 · 投票人领凭证的路径明确化（R21）
+#### T9 · 凭证池 + 投票人匿名随机领取（R21 / 决策门 G8）
+
+> **G8 已拍板（2026-10-20）**：不用一次性领票码，改为**投票人匿名随机领取**。
 
 | 项 | 内容 |
 |---|---|
-| 问题 | 凭证签发接口在 admin 分组下（`internal/infrastructure/http/server.go:47-48`），**投票人自己也必须持有 admin token 才能领凭证** —— 这意味着 admin token 会广泛分发给每个投票人，admin 权限与投票权限混为一谈。 |
-| 证据 | `internal/infrastructure/http/server.go:47-48` |
-| 改法 | **不要**为图顺降低凭证签发鉴权。正确做法：① 新增独立的「领凭证」端点，凭**一次性领票码**（admin 批量生成、线下分发、投票时核销）换取凭证；② 领票码存哈希、一次性、限流、可过期；③ admin 批量生成领票码的接口仍在 admin 分组下 |
-| 验收 | 端到端用例：领票码 → 领凭证 → 投票人投票，全程不需要 admin token；领票码二次使用返回 4xx |
+| 问题 | 凭证签发接口挂在 admin 分组下（`internal/infrastructure/http/server.go:47-48`），**投票人自己也必须持有 admin token 才能领凭证**。更致命的是：即便换成 admin 批量分发，**admin 手里有「谁领了哪个凭证」的台账** —— 而选票最终会绑定到凭证的 `user_id` / `user_pub_key`（`vote_participations` 存 `hash(user_id)`），于是 admin 可以把「这张票」关联到「这个人」。**这比 admin token 泄露更危险：它直接破坏选票与身份的不可关联性**，而这正是整个系统存在的理由。 |
+| 证据 | `internal/infrastructure/http/server.go:47-48`、`internal/usecase/voting.go:60-64`（公开输入含 `nullifier`，由 `user_id` 派生）、`internal/infrastructure/crypto/kryptology_credential_issuer.go:162-181`（凭证绑定 `user_id` + `user_pub_key`） |
+| 改法 | ① **凭证池**：admin 批量预生成 N 个凭证，**服务端不记录「谁对应哪个凭证」的台账**（凭证内容本身不含真人信息）；② **匿名领取**：新增**公开**端点 `POST /api/v1/credentials/claim`，请求体**不含任何身份信息**，服务端随机分配一个未领取的凭证并标记为已领取（一次性）；③ 客户端在领取时生成**全新的一次性 keypair** 并连同 pubkey 提交，服务端用 issuer key 对 `(领取随机 id, pubkey)` 签名；④ 领取端点**不写 IP、不写 User-Agent、不落任何可关联日志**，只记一条匿名计数；⑤ 投票时用该 keypair 签 nullifier，防重投靠 `nullifier` 唯一索引 |
+| **必须同时接受的代价** | **随机领取 = 服务端无法强制「一人一票」。** 任何人可以反复领取并重复投票（每次领取换一个身份）。「一人一票」要靠**资格证明**（零知识证明「我符合资格」而不透露身份）来保证 —— 这属于 v1.0.0 证明链的**第二条电路**（与选票电路分离），见 §3 Phase 2 之后的备注。**在资格证明落地前，这个系统防的是「重复投票」，不是「一人多票」。** 文档必须如实写清。 |
+| **残余风险** | ① **流量分析**：领取请求的 IP / 时间仍可能被用于弱关联 —— 因此要求服务端不记录 IP，并考虑前置代理；② **issuer key 在服务端**，服务端能签任意凭证，即服务端能自己造票 —— 属于信任假设，须写进文档与威胁模型；③ 凭证池耗尽后新投票人无票可领 —— 需要「按需补充池」的管理操作，且补充时机本身可能泄露信息（**建议在投票窗口开始前一次性备足**） |
+| 验收 | ① 端到端：匿名领取 → 投票，**全程不需要 admin token**，且服务端**没有**任何「凭证→领取者」的记录；② 领取端点返回的凭证不含任何真人标识字段；③ 回归测试：领取端点**不写** `user_id` / IP 到任何表与日志；④ 池耗尽后返回 4xx（明确错误信息）；⑤ 同一凭证二次领取返回 4xx |
 | 预估 | 2–3 天 |
-| 依赖 | 无，但**这是新增功能**，需要拍板 G8（见 §4） |
+| 依赖 | 无，但**这是新增功能**（新表 + 新端点 + 客户端改造） |
+
+**与旧路径的关系**：admin 逐个签发（`POST /api/v1/credentials`）保留，但**只用于「一人一票」由资格证明兜底的场景**；在资格证明落地前，文档应引导使用匿名领取。
 
 #### T10 · 覆盖率门槛扩到 crypto / persistence / cmd + `cmd/server` 冒烟测试（R9 / C6）
 
@@ -163,6 +169,17 @@
 | 依赖 | 无 |
 | 备注 | 这是 v0.1.0 计划 A8 的**剩余半项**（`hasVoted` 跨提案重置已由 `eb1d488` 修完），一并在这里收口 |
 
+#### T12 · 文档如实描述盲签名的真实性质（决策门 G4）
+
+| 项 | 内容 |
+|---|---|
+| 问题 | 盲签名的盲化在服务端内部完成：`internal/infrastructure/crypto/kryptology_credential_issuer.go:162-181` 在同一进程里依次 `Prepare` → `Blind` → `BlindSign` → `Finalize`，服务端全程持有明文消息 —— **不具备盲化性质**，等同普通签名。现有文档对此的表述不够明确。 |
+| 证据 | `kryptology_credential_issuer.go:162-181` |
+| 改法 | ① README「当前版本边界」与 `docs/techspec.md` 的密码学章节明确写出：**「签发方（服务端）在签发时就知道被签内容，当前不具备盲签名性质」**；② CHANGELOG 如实记录；③ 术语参考页同步；④ 明确写出「真正的两段式盲签名是 v1.0.0 证明链阶段的任务（T17）」，避免读者误以为已实现 |
+| 验收 | 三处文档措辞一致；`grep -rn "盲签名" README.md docs/ web/` 逐条核对无夸大表述 |
+| 预估 | 1 小时 |
+| 依赖 | 无 |
+
 ---
 
 ## 3. Phase 2 · 证明链（周级）
@@ -170,16 +187,16 @@
 **这是 v1.0.0 的主体，也是唯一的硬骨头。** 六项严格按顺序做，后一项依赖前一项。
 
 ```
-T12 电路 + 密钥  →  T13 客户端 prover  →  T14 proof 绑定
+T13 电路 + 密钥  →  T14 客户端 prover  →  T15 proof 绑定
                                               ↓
-                              T15 加密移到客户端 ←─ T14
+                              T16 加密移到客户端 ←─ T15
                                               ↓
-                              T16 真盲签名（两段式）←─ T13
+                              T17 真盲签名（两段式）←─ T14
                                               ↓
-                              T17 投票路径 VerifyCredential
+                              T18 投票路径 VerifyCredential
 ```
 
-#### T12 · 真实选票电路 + `verifying.key` 生成流程（C1）
+#### T13 · 真实选票电路 + `verifying.key` 生成流程（C1）
 
 | 项 | 内容 |
 |---|---|
@@ -190,7 +207,7 @@ T12 电路 + 密钥  →  T13 客户端 prover  →  T14 proof 绑定
 | 预估 | 3–5 天（含电路调参与性能评估） |
 | 依赖 | 需先拍板 G7（曲线与电路形状） |
 
-#### T13 · 客户端 prover（浏览器 WASM）（C2）
+#### T14 · 客户端 prover（浏览器 WASM）（C2）
 
 | 项 | 内容 |
 |---|---|
@@ -199,9 +216,9 @@ T12 电路 + 密钥  →  T13 客户端 prover  →  T14 proof 绑定
 | 改法 | ① 用 gnark 官方 wasm 模板产出 prover WASM，放进 `web/public/` 或独立静态目录；② 门户在浏览器内生成 proof **与 `public_witness`**（注意 `public_witness` 只能是公开输入部分，放整个 witness 会被 gnark 拒：报 `invalid witness size, got 2, expected 1`）；③ `ballot-draft` 降级为「仅返回选票选项与加密公钥」，**不再返回假 proof**；④ CLI 侧同步：CLI 目前已支持 `public_witness`（`cmd/cli/main.go:322`），但没有本地 prover —— 需明确 CLI 是否也要 prover（G9） |
 | 验收 | ① 浏览器端生成的 proof 能通过服务端 `Verify`（e2e 用例）；② `public_witness` 长度为电路公开输入个数 |
 | 预估 | 5–7 天 |
-| 依赖 | T12 |
+| 依赖 | T13 |
 
-#### T14 · proof 与 `proposal_id` / `nullifier` / 密文绑定（C3）
+#### T15 · proof 与 `proposal_id` / `nullifier` / 密文绑定（C3）
 
 | 项 | 内容 |
 |---|---|
@@ -209,10 +226,10 @@ T12 电路 + 密钥  →  T13 客户端 prover  →  T14 proof 绑定
 | 证据 | `internal/usecase/voting.go:60-64`、`:148`、`gnark_proof_verifier.go:64` |
 | 改法 | ① 电路公开输入改为 `(proposal_id, option_index, nullifier, ciphertext_hash)`；② `PublicInputs()` 按序拼出**完整的**公开输入数组（含 `hash(ciphertext)`），不再走 `public_witness` 这条旁路；③ `gnark_proof_verifier.go` 改为读 `inputs["public_witness"]` 的同时，**校验其内容与 `proposal_id`/`nullifier`/`hash(ciphertext)` 一致**（不一致直接失败）；④ 移除 `public_witness` 的自由文本入口 —— 公开输入由服务端根据请求字段**自己拼**，客户端不再能指定 |
 | 验收 | 回归测试：拿 A 提案的 proof 投 B 提案 → **400**；篡改 nullifier → 400；密文改了再投 → 400 |
-| 预估 | 2–3 天（依赖 T12 的电路公开输入形状） |
-| 依赖 | T12 |
+| 预估 | 2–3 天（依赖 T13 的电路公开输入形状） |
+| 依赖 | T13 |
 
-#### T15 · 加密移到客户端（C5 根治）
+#### T16 · 加密移到客户端（C5 根治）
 
 | 项 | 内容 |
 |---|---|
@@ -221,9 +238,9 @@ T12 电路 + 密钥  →  T13 客户端 prover  →  T14 proof 绑定
 | 改法 | ① 服务端只发**加密公钥 + 电路参数**，不再接受明文选项；② 浏览器端完成「选票 → 加密 → proof → 提交」全流程；③ 服务端接口改为接受 `{encrypted_vote, proof, nullifier, ...}`，**没有明文选项字段**；④ `ballot-draft` 端点随之删除（T1 已先把它关掉） |
 | 验收 | ① 服务端代码里**不存在**接收明文选项的字段（grep 验证）；② e2e：浏览器投票 → 服务端落库记录里没有可还原的选项 |
 | 预估 | 3–4 天 |
-| 依赖 | T12、T13、T14 |
+| 依赖 | T13、T14、T15 |
 
-#### T16 · 盲签名改真两段式（R2）
+#### T17 · 盲签名改真两段式（R2）
 
 | 项 | 内容 |
 |---|---|
@@ -232,10 +249,10 @@ T12 电路 + 密钥  →  T13 客户端 prover  →  T14 proof 绑定
 | 改法 | ① 拆成两个 HTTP 端点：客户端 → `POST /credentials/blind`（提交盲化后的消息）→ 服务端 `BlindSign` 返回盲签名 → 客户端 `Finalize` 得到最终签名 → `POST /credentials/attest`（提交最终签名 + 承诺）→ 服务端用 `Verify` 校验；② 客户端（浏览器 WASM）实现 `blindrsa` 的 client 侧（`Prepare`/`Blind`/`Finalize`）；③ 协议要绑定被盲化的消息承诺，防止「拿 A 的盲签名去签 B」 |
 | 验收 | ① 端到端：客户端拿到的凭证，服务端**全程只见盲化消息**；② 交叉攻击测试：用 A 的盲签名 finalize 出 B 的凭证 → 校验失败；③ 服务端代码里不再出现「同一个函数里 Prepare+BlindSign+Finalize」 |
 | 预估 | 5–7 天 |
-| 依赖 | T13（需要客户端承载 crypto）、T9（领票码路径） |
+| 依赖 | T14（需要客户端承载 crypto）、T9（领票码路径） |
 | 备注 | 代价高、收益是「签发方看不到被签内容」。若投票规模小、运营方可信度可接受，**改文档如实描述**（G4）也是合理选择 |
 
-#### T17 · 投票路径补 `VerifyCredential`（R3）
+#### T18 · 投票路径补 `VerifyCredential`（R3）
 
 | 项 | 内容 |
 |---|---|
@@ -244,29 +261,38 @@ T12 电路 + 密钥  →  T13 客户端 prover  →  T14 proof 绑定
 | 改法 | ① `Submit` 在落库前调用 `VerifyCredential(userID, userPubKey, credentialSignature)`，失败返回 401；② 需要在 `SubmitVoteRequest` 里带上签名与公钥（当前有 `CredentialSignature`，需确认公钥来源）；③ 补「伪造签名 → 401」回归测试 |
 | 验收 | 伪造签名的投票请求返回 401；合法凭证正常落库 |
 | 预估 | 1–2 天 |
-| 依赖 | T15（否则明文选项仍在服务端） |
+| 依赖 | T16（否则明文选项仍在服务端） |
 
 ---
 
-## 4. 决策门（Phase 2 开工前必须拍板）
+## 4. 决策门
+
+**已拍板（2026-10-20）**
+
+| # | 决策 | 结论 |
+|---|---|---|
+| **G4** | 盲签名：改实现还是改文档 | ✅ **先改文档如实描述**（任务 T21），两段式（T17）留到证明链阶段一起做 —— v1.0.0 承诺匿名性时必须补上 |
+| **G8** | 投票人领凭证的形态 | ✅ **凭证池 + 投票人匿名随机领取**（任务 T9）—— 不再用一次性领票码。核心理由：admin 逐个分发就等于 admin 知道哪个票是谁的，直接破坏不可关联性 |
+| **Phase 1 范围** | 这轮做哪些 | ✅ **T3–T11 这 9 项不依赖决策的**；T1（`ballot-draft` 非 debug 404）与 T2（门户隐藏按钮）**暂缓**，等另行拍板 G2/G3 |
+
+**待拍板**
 
 | # | 决策 | 选项 | 我的建议 | 卡住什么 |
 |---|---|---|---|---|
 | G1 | 版本定位 | 内测版 / 生产版 | **v1.0.0 走生产版**（本计划即为其执行计划）；v0.1.0 保持内测定位 | 全部 |
 | G2 | 门户「按选项生成凭据」按钮 | 保留并加警示 / 非 debug 隐藏 | **非 debug 隐藏** | T2 |
-| G3 | `ballot-draft` 生产可达性 | 保留 / 非 debug 404 | **非 debug 404** | T1、T15 |
-| G4 | 盲签名：改实现还是改文档 | 两段式（T16，周级）/ 修正文档（小时级） | **若 v1.0.0 要承诺匿名性 → 做 T16**；否则如实写文档 | T16 |
+| G3 | `ballot-draft` 生产可达性 | 保留 / 非 debug 404 | **非 debug 404** | T1、T16 |
 | G5 | 首个版本号 | `0.1.0` / 其他 | 已落地 `0.1.0`，v1.0.0 用 `1.0.0` | 无关 |
 | **G6** | **是否换纯 Go sqlite 驱动** | 保留 cgo（当前）/ 换 `modernc.org/sqlite` | **保留 cgo**：换驱动会波及持久化层方言差异测试（`entity/dialect_types_test.go`），收益只是「静态链接二进制」，不值 | 发布形态 |
-| **G7** | **电路形状与曲线** | Groth16/BN254（与现有 verifier 一致）/ 其他 | **Groth16/BN254**：现有 `gnark_proof_verifier.go` 硬编码了 `ecc.BN254`，换曲线等于重写验证器 | T12、T14 |
-| **G8** | **投票人领凭证的形态** | 一次性领票码（T9）/ 继续 admin token 分发 / 运营方线下签发 | **一次性领票码**：admin token 不该发到每个投票人手里 | T9、T16 |
-| **G9** | **CLI 是否需要本地 prover** | CLI 也做本地 prover / CLI 只做「带 proof 提交」 | **CLI 只带 proof 提交**（`public_witness` 入口已有）；生成 proof 放浏览器端，CLI 面向脚本化/运维场景 | T13 |
+| **G7** | **电路形状与曲线** | Groth16/BN254（与现有 verifier 一致）/ 其他 | **Groth16/BN254**：现有 `gnark_proof_verifier.go` 硬编码了 `ecc.BN254`，换曲线等于重写验证器 | T13、T15 |
+| **G8** | **投票人领凭证的形态** | 一次性领票码（T9）/ 继续 admin token 分发 / 运营方线下签发 | **一次性领票码**：admin token 不该发到每个投票人手里 | T9、T17 |
+| **G9** | **CLI 是否需要本地 prover** | CLI 也做本地 prover / CLI 只做「带 proof 提交」 | **CLI 只带 proof 提交**（`public_witness` 入口已有）；生成 proof 放浏览器端，CLI 面向脚本化/运维场景 | T14 |
 
 ---
 
 ## 5. Phase 3 · 生产化与发版
 
-#### T18 · 生产配置落地（R6 / R7）
+#### T19 · 生产配置落地（R6 / R7）
 
 | 项 | 内容 |
 |---|---|
@@ -277,7 +303,7 @@ T12 电路 + 密钥  →  T13 客户端 prover  →  T14 proof 绑定
 | 预估 | 半天 |
 | 依赖 | 无 |
 
-#### T19 · 端到端验收（本机无 Docker 的三个盲区）
+#### T20 · 端到端验收（本机无 Docker 的三个盲区）
 
 | 项 | 内容 |
 |---|---|
@@ -286,9 +312,9 @@ T12 电路 + 密钥  →  T13 客户端 prover  →  T14 proof 绑定
 | 改法 | ① Docker 环境跑通 `tests/integration`（CI 会实跑，本地补一份 compose）；② 引入 Playwright 覆盖关键路径（领凭证 → 投票 → 查询状态 → 计票）；③ 用 `hey`/`k6` 写并发投票脚本，验证防重投（唯一索引兜底）与容量 |
 | 验收 | 三项都有**可复现的脚本 + 输出**，并把结果贴进 PR |
 | 预估 | 2–3 天 |
-| 依赖 | T13（浏览器端投票链路才完整） |
+| 依赖 | T14（浏览器端投票链路才完整） |
 
-#### T20 · 发版（v1.0.0）
+#### T21 · 发版（v1.0.0）
 
 | 项 | 内容 |
 |---|---|
@@ -313,6 +339,8 @@ feat(db): configure the PostgreSQL connection pool
 fix(crypto): derive the shared secret with HKDF instead of a bare hash
 fix(web): trap focus and close the guide overlay with Escape
 feat(credential): issue credentials against one-time claim codes
+feat(credential): issue credentials from an anonymous claim pool
+docs: describe the blind signature for what it actually is
 test(ci): extend the coverage gate to crypto, persistence and cmd
 feat(web): add an explicit vote status lookup button
 feat(circuit): add the ballot circuit and the key generation flow
@@ -331,13 +359,13 @@ test(e2e): cover the browser voting flow and concurrent voting
 
 **No-Go（任一命中则不发 v1.0.0）**
 
-- [ ] T12–T17 六项证明链任务有任一未完成
+- [ ] T13–T18 六项证明链任务有任一未完成
 - [ ] 存在「服务端能拿到明文选项」的代码路径（grep 不到才过）
 - [ ] 存在「proof 可以跨提案复用」的路径
 - [ ] `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败
 - [ ] 覆盖率门槛退出码非 0
 - [ ] 前端 lint / tsc / vitest 任一失败
-- [ ] T19 的三项验收没有可复现输出
+- [ ] T20 的三项验收没有可复现输出
 - [ ] README / techspec / 门户三处的匿名性声明不一致
 
 **Go**
@@ -353,10 +381,10 @@ test(e2e): cover the browser voting flow and concurrent voting
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| T12 电路的证明生成太慢，浏览器端体验不可用 | 投票流程不可用 | T12 就带性能评估；必要时换电路形状（公开输入更少）而不是硬扛 |
-| T16 真盲签名改动面大，拖垮整个 v1.0.0 | 发版无限延期 | T16 单独成提交链；G4 允许退化为「改文档」，v1.0.0 先不做 T16 但**必须在 CHANGELOG 如实说明** |
+| T13 电路的证明生成太慢，浏览器端体验不可用 | 投票流程不可用 | T13 就带性能评估；必要时换电路形状（公开输入更少）而不是硬扛 |
+| T17 真盲签名改动面大，拖垮整个 v1.0.0 | 发版无限延期 | T17 单独成提交链；G4 允许退化为「改文档」，v1.0.0 先不做 T17 但**必须在 CHANGELOG 如实说明** |
 | T7 KDF 换协议使 v0.1.0 的密文永久不可解 | 旧数据丢失 | 明确标注密文格式版本；v1.0.0 前不要用旧数据做真实投票 |
-| T15 把加密移到客户端后，前端成为新的攻击面 | 密钥泄露 | proving key 只在前端，**不入服务端**；前端构建产物做完整性校验 |
+| T16 把加密移到客户端后，前端成为新的攻击面 | 密钥泄露 | proving key 只在前端，**不入服务端**；前端构建产物做完整性校验 |
 | T9 领票码引入新的状态机 | 新 bug 面 | 一次性 + 哈希存储 + 限流；先用最简单的同步实现，后续再优化 |
 | Phase 1 拖太久，Phase 2 无时间 | 计划整体延期 | Phase 1 与 Phase 2 **可并行**（除 T1/T2 依赖 Phase 2 的字段） |
 
