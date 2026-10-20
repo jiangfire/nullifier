@@ -187,6 +187,22 @@ jobs:
       - name: Install dependencies
         run: pnpm --dir web install --frozen-lockfile
 
+      # 单一版本源：仓库根的 VERSION。前端 package.json 的 version 跟着它走，
+      # 免得两处版本号各说各话（review N6）。
+      - name: Sync version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          node -e '
+            const fs = require("fs");
+            const path = "web/package.json";
+            const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+            pkg.version = process.argv[1];
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+          ' "$version"
+          echo "web/package.json version -> $version"
+
       - name: Lint
         run: pnpm --dir web run lint
 
