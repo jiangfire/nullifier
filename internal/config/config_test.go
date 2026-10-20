@@ -174,6 +174,115 @@ db:
 	require.Equal(t, "dbp", cfg.DB.Password)
 }
 
+func TestLoad_PoolConfigFromEnv(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("DB_DRIVER", "postgres")
+	t.Setenv("DB_MAX_OPEN_CONNS", "42")
+	t.Setenv("DB_MAX_IDLE_CONNS", "9")
+	t.Setenv("DB_CONN_MAX_LIFETIME_SECONDS", "120")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 42, cfg.DB.MaxOpenConns)
+	require.Equal(t, 9, cfg.DB.MaxIdleConns)
+	require.Equal(t, 120*time.Second, cfg.DB.ConnMaxLifetime)
+}
+
+func TestLoad_PoolConfigDefaults(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("DB_DRIVER", "postgres")
+	t.Setenv("DB_MAX_OPEN_CONNS", "")
+	t.Setenv("DB_MAX_IDLE_CONNS", "")
+	t.Setenv("DB_CONN_MAX_LIFETIME_SECONDS", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 25, cfg.DB.MaxOpenConns)
+	require.Equal(t, 5, cfg.DB.MaxIdleConns)
+	require.Equal(t, time.Hour, cfg.DB.ConnMaxLifetime)
+}
+
+func TestLoad_PoolConfigFromConfigFile(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("DB_DRIVER", "postgres")
+	t.Setenv("DB_MAX_OPEN_CONNS", "")
+	t.Setenv("DB_MAX_IDLE_CONNS", "")
+	t.Setenv("DB_CONN_MAX_LIFETIME_SECONDS", "")
+
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(`
+db:
+  driver: "postgres"
+  max_open_conns: 11
+  max_idle_conns: 3
+  conn_max_lifetime_seconds: 60
+`), 0o600))
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 11, cfg.DB.MaxOpenConns)
+	require.Equal(t, 3, cfg.DB.MaxIdleConns)
+	require.Equal(t, 60*time.Second, cfg.DB.ConnMaxLifetime)
+}
+
+// 与其它 db.* 一致：环境变量优先于配置文件。
+func TestLoad_PoolConfigEnvWinsOverConfigFile(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("DB_DRIVER", "postgres")
+	t.Setenv("DB_MAX_OPEN_CONNS", "42")
+	t.Setenv("DB_MAX_IDLE_CONNS", "9")
+	t.Setenv("DB_CONN_MAX_LIFETIME_SECONDS", "120")
+
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(`
+db:
+  driver: "postgres"
+  max_open_conns: 11
+  max_idle_conns: 3
+  conn_max_lifetime_seconds: 60
+`), 0o600))
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 42, cfg.DB.MaxOpenConns)
+	require.Equal(t, 9, cfg.DB.MaxIdleConns)
+	require.Equal(t, 120*time.Second, cfg.DB.ConnMaxLifetime)
+}
+
 func TestLoad_InvalidConfig(t *testing.T) {
 	oldWD, err := os.Getwd()
 	require.NoError(t, err)

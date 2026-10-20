@@ -76,6 +76,17 @@ func Load() (*Config, error) {
 	if ssl := v.GetString("db.sslmode"); ssl != "" {
 		dbCfg.SSLMode = ssl
 	}
+	// 连接池参数。优先级与其它 db.* 一致：环境变量高于配置文件；
+	// 两边都没给时保留 GetDBConfigFromEnv 里的默认值。
+	if n := v.GetInt("db.max_open_conns"); n > 0 {
+		dbCfg.MaxOpenConns = n
+	}
+	if n := v.GetInt("db.max_idle_conns"); n > 0 {
+		dbCfg.MaxIdleConns = n
+	}
+	if n := v.GetInt("db.conn_max_lifetime_seconds"); n > 0 {
+		dbCfg.ConnMaxLifetime = time.Duration(n) * time.Second
+	}
 
 	cfg := &Config{
 		ServerAddress:               v.GetString("server.address"),

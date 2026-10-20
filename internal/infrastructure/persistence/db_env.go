@@ -3,6 +3,7 @@ package persistence
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 func GetDBConfigFromEnv() *DBConfig {
@@ -17,6 +18,11 @@ func GetDBConfigFromEnv() *DBConfig {
 		cfg.Username = getEnv("DB_USER", "postgres")
 		cfg.Password = getEnv("DB_PASSWORD", "")
 		cfg.SSLMode = getEnv("DB_SSLMODE", "disable")
+		cfg.MaxOpenConns = getEnvInt("DB_MAX_OPEN_CONNS", 25)
+		cfg.MaxIdleConns = getEnvInt("DB_MAX_IDLE_CONNS", 5)
+		cfg.ConnMaxLifetime = time.Duration(
+			getEnvInt("DB_CONN_MAX_LIFETIME_SECONDS", 3600),
+		) * time.Second
 	default:
 		cfg.Driver = "sqlite"
 		cfg.Database = getEnv("DB_PATH", "anonvote.db")
