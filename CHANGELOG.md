@@ -58,6 +58,9 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
     http 地址下会直接不可用。
   - **门户还没用上**：`useVotePortal.ts` 仍在生成随机 nullifier，等客户端 prover
     一起接线。
+- **CLI 新增 `credential-claim` 命令**：匿名领取一张凭证（与门户的「领取凭证」同一个
+  公开端点，**不需要 admin token**）。此前只有门户能领，脚本化领取用不了 —— 这是
+  路线图 T9 / T22 里记下的缺口。请求体只有本地生成的公钥，没有任何身份信息。
 - `GET /healthz` 响应新增 `debug` 布尔字段（由 `server.mode` 推导）。
 - **服务现在能用 `CONFIG_FILE` 显式指定配置文件**：`CONFIG_FILE=./configs/config.production.yaml`
   启动即可加载生产配置 —— 那个文件此前**永远不会被自动加载**（viper 只找 `config.yaml`），
@@ -96,8 +99,8 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   **仅文档措辞，代码与已发布产物不受影响。**
 - 覆盖率门槛的分档包从 9 个扩到 **11 个**（新增 `internal/infrastructure/crypto/ballot`、
   `cmd/keygen`），见 `scripts/coverage-thresholds.txt`。
-- **CLI 命令从 14 个增到 15 个**（新增 `ballot-encrypt`），**HTTP 端点从 14 个增到 15 个**
-  （新增公开的 `GET /api/v1/proposals/:id/election-key`）。
+- **CLI 命令从 14 个增到 16 个**（新增 `ballot-encrypt` 与 `credential-claim`），
+  **HTTP 端点从 14 个增到 15 个**（新增公开的 `GET /api/v1/proposals/:id/election-key`）。
 
 ### 修复
 

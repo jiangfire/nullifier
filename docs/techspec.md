@@ -520,12 +520,16 @@ web/                        # Vue 3 前端门户
   是开发用占位值，不是真实证明。
 - `ballot-encrypt` 在**客户端本地加密**选票：取公开的计票公钥 → 本地加密选项下标 →
   落盘选票文件。选票文件里的 `nullifier_secret` 只留本地，prover 需要它。
+- `credential-claim` 匿名领取凭证：请求体只有自己生成的公钥，**不需要 admin token**
+  （领取端点是公开的），服务端随机给出一个池槽位的凭证。服务端因此无法把凭证与
+  投票人对应起来。
 - 当前命令：
   - `health`
   - `version`
   - `proposals-open`
   - `proposal-create`
   - `credential-issue`
+  - `credential-claim`
   - `credential-show`
   - `ballot-draft`
   - `ballot-encrypt`

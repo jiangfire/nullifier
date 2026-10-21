@@ -71,7 +71,7 @@ nullifier 把这两个动作拆开:
 | 形态 | 说明 |
 |---|---|
 | HTTP API | 15 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
-| CLI | 15 个命令,复用同一套 HTTP API,不绕过服务端校验 |
+| CLI | 16 个命令,复用同一套 HTTP API,不绕过服务端校验 |
 | Web 门户 | Vue 3 单页应用,覆盖投票端与运营端全流程 |
 
 ## 快速开始
@@ -100,9 +100,13 @@ go run ./cmd/cli -admin-token dev-admin-token proposal-create \
 go run ./cmd/cli -admin-token dev-admin-token decrypt-setup \
   -proposal <proposal_id> -threshold 2 -trustees 3 -out shares.json
 
-# 3. 签发匿名凭证
+# 3. 准备凭证(二选一)
+#    a) 管理员签发(需要 admin token,运营方知道票给了谁)
 go run ./cmd/cli -admin-token dev-admin-token credential-issue \
   -proposal <proposal_id> -user u-1001 -out cred.json
+#    b) 匿名领取(公开端点,不需要 admin token;服务端随机给一张池里的凭证)
+#       —— 运营方不知道谁领了哪张,匿名性更好
+go run ./cmd/cli credential-claim -proposal <proposal_id> -out cred.json
 
 # 4. 在本地加密选票并投票
 #    ballot-encrypt 在客户端本地加密:取公开的计票公钥 → 加密选项下标 → 落盘选票文件。

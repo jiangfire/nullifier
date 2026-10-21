@@ -231,8 +231,8 @@
 
 ### 1.8 CLI —— `cmd/cli/main.go`
 
-14 个命令，全部走 HTTP API：
-`health` `version` `proposals-open` `proposal-create` `credential-issue` `credential-show` `ballot-draft` `vote-submit` `vote-status` `credentials-list` `decrypt-setup` `result-publish` `result-get` `anchors-list`
+16 个命令，全部走 HTTP API：
+`health` `version` `proposals-open` `proposal-create` `credential-issue` `credential-claim` `credential-show` `ballot-draft` `ballot-encrypt` `vote-submit` `vote-status` `credentials-list` `decrypt-setup` `result-publish` `result-get` `anchors-list`
 
 **模式**：`-admin-token` flag 或 `NULLIFIER_ADMIN_TOKEN` 环境变量；`-base-url` 或 `NULLIFIER_BASE_URL`。
 

@@ -20,7 +20,7 @@
 - 静态检查：`go vet ./...` 与 `gofmt -l ./cmd ./internal ./tests`（应无输出）
 - 覆盖率门槛：`./scripts/check-coverage.ps1`（PowerShell）/ `bash ./scripts/check-coverage.sh`（Bash）。**按包分档**：每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`，逐包判定；脚本的第一个参数是「表里没有的包」的兜底阈值，默认 80%
 - 前端：`pnpm --dir web run dev`（rsbuild，默认 :3000）、`run build`、`run test`（vitest）、`exec tsc --noEmit`
-- CLI 工作流：`go run ./cmd/cli help` 查看全部 14 个命令
+- CLI 工作流：`go run ./cmd/cli help` 查看全部 16 个命令
 
 ## Project layout
 
