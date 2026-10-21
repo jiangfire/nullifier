@@ -36,9 +36,11 @@ nullifier 把这两个动作拆开:
 > - **服务端侧证明链已成立，浏览器端 prover 还没有。** 电路、`cmd/keygen` 密钥生成、
 >   服务端按请求字段自拼公开输入并真实验签都已落地；但**没有任何客户端在本地生成 proof** ——
 >   因此 **release 模式下门户仍然无法完成一次投票**。
-> - **密文仍由服务端生成（仅 debug 模式）。** `POST /api/v1/proposals/:id/ballot-draft` 接收
->   明文选项并加密，**非 debug 模式已返回 404**。客户端本地加密是下一版本的目标。
-> - **只适合内测与开发**，不要用于真实投票。补齐客户端 prover 与客户端加密的工作见
+> - **选票密文已经能在客户端生成，但门户还没接上。** 浏览器端（`web/src/lib/ballot-cipher.ts`）
+>   与 CLI（`ballot-encrypt` 命令）都能在本地加密选票，服务端只提供公开的计票公钥；
+>   **门户尚未接线**（缺客户端 prover，接了也投不出去），debug 模式的 `ballot-draft`
+>   仍是「服务端知道选项」的那条路径。
+> - **只适合内测与开发**，不要用于真实投票。补齐客户端 prover 与门户接线的工作见
 >   [`docs/roadmap.md`](./docs/roadmap.md) 的 v0.2.0 里程碑。
 
 ## 特性
@@ -49,6 +51,7 @@ nullifier 把这两个动作拆开:
 |---|---|
 | 凭证签名 | RSA-PSS 签名(基于 RFC9474 盲签名库);签发方看不到选票内容,因为凭证与选票无关 —— **但盲化在服务端内部完成,尚不是真盲签名** |
 | 零知识验票 | 真实 Groth16 电路(BN254),证明「这张票加密了某个合法选项」且不携带身份 —— **服务端已能真实验签;客户端 prover 还没有** |
+| 客户端加密 | 选票密文在**客户端本地**生成(浏览器端 TS + CLI `ballot-encrypt`),服务端只提供公开的计票公钥 —— **门户还没接上** |
 | 防重放 | 每票一个 `nullifier`,重复投票直接拒绝;nullifier 落库前归一成规范形式,变体写法绕不过唯一索引 |
 | 防冒充 | `proposal_id + user_id + user_pub_key + credential_signature` 四元组校验,并**验签凭证签名**(失败 401) |
 | 选择性披露 | 只能回答"你投过票吗",不能回答"你投了什么" |
@@ -67,8 +70,8 @@ nullifier 把这两个动作拆开:
 
 | 形态 | 说明 |
 |---|---|
-| HTTP API | 14 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
-| CLI | 14 个命令,复用同一套 HTTP API,不绕过服务端校验 |
+| HTTP API | 15 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
+| CLI | 15 个命令,复用同一套 HTTP API,不绕过服务端校验 |
 | Web 门户 | Vue 3 单页应用,覆盖投票端与运营端全流程 |
 
 ## 快速开始
@@ -101,11 +104,17 @@ go run ./cmd/cli -admin-token dev-admin-token decrypt-setup \
 go run ./cmd/cli -admin-token dev-admin-token credential-issue \
   -proposal <proposal_id> -user u-1001 -out cred.json
 
-# 4. 生成选票草稿并投票
-#    ballot-draft 只在 debug 模式可达(非 debug 模式返回 404);
-#    它返回的是服务端代加密的草稿,proof 是开发占位值
-go run ./cmd/cli ballot-draft -proposal <proposal_id> -option A -out ballot.json
+# 4. 在本地加密选票并投票
+#    ballot-encrypt 在客户端本地加密:取公开的计票公钥 → 加密选项下标 → 落盘选票文件。
+#    服务端全程拿不到明文选项。选票文件里的 nullifier_secret 只留本地(提交时不会发出)。
+#    -proof 省略时用开发占位值,只在开发模式(未配 crypto.vk_path)能过验签;
+#    release 模式必须传本地 prover 产出的真实 proof。
+go run ./cmd/cli ballot-encrypt -proposal <proposal_id> -option A -out ballot.json
 go run ./cmd/cli vote-submit -credential-file cred.json -ballot-file ballot.json
+
+#    备选:ballot-draft 让服务端代加密,只在 debug 模式可达(非 debug 模式返回 404),
+#    服务端因此知道选了哪个 —— 这正是客户端加密要消除的路径。
+go run ./cmd/cli ballot-draft -proposal <proposal_id> -option A -out ballot.json
 
 # 5. 提案关闭后,提交份额并计票
 go run ./cmd/cli -admin-token dev-admin-token result-publish \
@@ -217,6 +226,7 @@ nullifier-server             # 再起服务
 | `GET` | `/api/v1/proposals/open` | 时间窗口内的开放提案 |
 | `POST` | `/api/v1/votes` | 提交匿名投票(7 个字段全部必填;公开输入由服务端自拼,不收 `public_witness`) |
 | `POST` | `/api/v1/proposals/:id/vote-status` | 持凭证材料查询是否已投票 |
+| `GET` | `/api/v1/proposals/:id/election-key` | 计票公钥(公开值,客户端本地加密用;未压缩形式 base64) |
 | `POST` | `/api/v1/proposals/:id/ballot-draft` | 生成选票草稿(开发联调,**仅 debug 模式**,其余模式 404) |
 | `GET` | `/api/v1/proposals/:id/results` | 已发布的计票结果 |
 | `GET` | `/api/v1/proposals/:id/audit-anchors` | 导出审计锚点 |
@@ -265,7 +275,7 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 | 口径 | 数值 | 覆盖范围 |
 |---|---|---|
-| 门槛口径 | **79.7%** | `scripts/check-coverage.sh` 选中的 11 个包:usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server(2026-10-21 实测) |
+| 门槛口径 | **79.4%** | `scripts/check-coverage.sh` 选中的 11 个包:usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server(2026-10-21 实测) |
 | 全仓口径 | **74.1%** | `./...` 全部包(2026-10-20 实测) |
 
 门槛是**逐包分档**的,每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`,单个包回退会直接让 CI 变红 —— 不再是"一个总和撑着,低覆盖率的包悄悄退化"。当前最低的一档是 `internal/infrastructure/persistence`(60.1%),抬门槛时它会先卡住。**新增代码请一并补测**。
@@ -275,7 +285,7 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 这是个在推进中的实现,接手前请知道边界在哪:
 
 - **证明链:服务端侧已通,客户端侧还差一段。** 真实 Groth16 电路(`internal/infrastructure/crypto/ballot/`)、`cmd/keygen` 密钥生成流程、服务端按请求字段自拼公开输入并真实验签都已落地 —— 篡改任一公开输入都会验签失败。**但没有任何客户端在本地生成 proof**:门户与 CLI 都拿不到可提交的证明,因此 **release 模式下门户仍然无法完成一次投票**。`crypto.vk_path` 为空时验证器只要求 proof 非空(开发模式),本地「验证通过」不代表真的验过。
-- **`ballot-draft` 是开发联调接口,非 debug 模式已返回 404。** 它返回的是便于串通流程的草稿数据,**密文由服务端生成,服务端在生成时就知道选了哪个** —— 这是当前版本最大的匿名性缺口,彻底消除要等「加密移到客户端」。生产环境应由客户端生成 proof 与密文;后端只负责验证,不代替用户端生成证明。这条链路尚未完成。
+- **选票密文已经能在客户端生成,门户还没接上。** 浏览器端(`web/src/lib/ballot-cipher.ts`)与 CLI(`ballot-encrypt` 命令)都能在本地加密选票,服务端只提供公开的计票公钥(`GET /api/v1/proposals/:id/election-key`),落库记录里只有密文。两边的点编码**逐字节一致**,由一组跨语言已知答案向量锁死。**但门户还没接上**(缺客户端 prover,接了也投不出去),debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径 —— 能力 A 因此尚未完全闭合。
 - **凭证签名现在会被验证。** 投票落库前会调用签发方验签,伪造签名的请求返回 401。
 - **凭证签发不是真盲签名。** 用的是 RFC9474 盲签名库,但 `Prepare → Blind → BlindSign → Finalize` 全在服务端进程内完成,签发方看得见被签的凭证内容。真正的两段式盲签名(客户端提交盲化消息 → 服务端签 → 客户端解盲)是 v0.2.0 的任务。
 - **凭证不再由 admin 逐个分发。** 改为「凭证池 + 投票人匿名随机领取」：admin 往池里批量投放预签凭证，投票人自己随机领一张（`POST /api/v1/proposals/:id/credentials/claim`），运营方不再天然掌握「哪个凭证给了谁」。**代价：服务端无法强制一人一票** —— 随机领取意味着服务端看不出同一个人领了几次，资格证明是后续要补的。

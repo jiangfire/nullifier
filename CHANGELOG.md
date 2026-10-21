@@ -35,6 +35,17 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 - **密钥生成流程**（新命令 `cmd/keygen`）：生成 `verifying.key`（0644，服务端验签用）与
   `proving.key`（0600，**只在客户端侧**），打印两者的 sha256 指纹，默认不覆盖已有文件
   （要覆盖加 `-force`）。
+- **选票密文现在可以在客户端生成**（能力 A 的核心，新脚本 `web/src/lib/ballot-cipher.ts`）：
+  BN254 twisted Edwards 上的指数 ElGamal，加密的是**选项下标**。点编码与 Go 侧
+  **逐字节一致**，一致性由一组跨语言已知答案向量锁死
+  （`internal/infrastructure/crypto/ballot/kat_interop_test.go` 与
+  `web/src/lib/ballot-cipher.test.ts`）—— 浏览器端生成的密文必须能被 Go 侧解回同一个选项下标。
+- **CLI 新增 `ballot-encrypt` 命令**：取计票公钥 → 在本地加密 → 落盘选票文件。
+  选票文件里的 `nullifier_secret` 只留本地（prover 需要它才能满足电路的 nullifier 约束），
+  提交时不发给服务端。
+- **服务端公开计票公钥**（新公开端点 `GET /api/v1/proposals/:id/election-key`）：返回
+  **未压缩**形式的计票公钥（X 与 Y 各 32 字节大端，base64）—— 客户端因此不必实现点解压
+  （那需要在标量域里求平方根）。
 - `GET /healthz` 响应新增 `debug` 布尔字段（由 `server.mode` 推导）。
 
 ### 安全
@@ -65,6 +76,8 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   **仅文档措辞，代码与已发布产物不受影响。**
 - 覆盖率门槛的分档包从 9 个扩到 **11 个**（新增 `internal/infrastructure/crypto/ballot`、
   `cmd/keygen`），见 `scripts/coverage-thresholds.txt`。
+- **CLI 命令从 14 个增到 15 个**（新增 `ballot-encrypt`），**HTTP 端点从 14 个增到 15 个**
+  （新增公开的 `GET /api/v1/proposals/:id/election-key`）。
 
 ### 修复
 
@@ -72,9 +85,10 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   不依赖 checkout 把 tag 落成什么形态的引用。
 
 > **本轮还没有做到的事**（别把 v0.2.0 当成已完成的版本）：浏览器端 prover 未实现，
-> **release 模式下门户仍然无法完成一次投票**；明文选项对服务端不可知这条还没达成
-> （加密移到客户端是后续任务）；盲签名仍是服务端进程内完成。详见
-> [`docs/roadmap.md`](./docs/roadmap.md) §4.1 的能力状态表。
+> **release 模式下门户仍然无法完成一次投票**；明文选项对服务端不可知这条**只闭合了一半** ——
+> 客户端本地加密已可用（CLI `ballot-encrypt`、浏览器端 TS 实现），但**门户还没接上**，
+> debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径；盲签名仍是服务端进程内完成。
+> 详见 [`docs/roadmap.md`](./docs/roadmap.md) §4.1 的能力状态表。
 
 ---
 

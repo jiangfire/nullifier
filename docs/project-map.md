@@ -33,7 +33,7 @@
 |---|---|
 | `cmd/server/main.go` | 服务入口。加载配置 → 生成/校验 admin token → 建 logger → `di.InitializeServer` → `server.Run()`；`-migrate` 只跑迁移后退出（`serve(migrateOnly)`） |
 | `cmd/keygen/main.go` | 生成选票电路的 Groth16 密钥：`verifying.key`（0644，服务端用）/ `proving.key`（0600，**只在客户端侧**）；打印 verifying key 的 sha256 指纹；默认不覆盖已有文件（`-force` 才覆盖） |
-| `cmd/cli/main.go` | 14 个子命令的 CLI 客户端，**只走 HTTP API**，不绕过服务端校验 |
+| `cmd/cli/main.go` | 15 个子命令的 CLI 客户端，**只走 HTTP API**，不绕过服务端校验 |
 | `internal/di/providers.go` | 全部 Wire provider 的实现体（logger/db/各仓储/各 usecase/handler）；密码学的装配点在这里：`NewProofVerifier` `NewEncrypter` `NewThresholdCrypto` `NewNullifierGenerator` `NewCredentialIssuer` |
 | `internal/di/wire.go` + `wire_gen.go` | Wire 声明与生成产物。**当前是手工同步的**（见陷阱） |
 | `internal/config/config.go` | viper 加载 + 运行期校验；`server.mode` 推导 `Config.DebugMode`（`isDebugMode`），release/prod/production 走 `requiresVerifyingKey` |
@@ -206,7 +206,7 @@
 | `src/components/` | `AppSidebar` `AppTopbar` `GuideOverlay` `JourneyBar` `NoticeStack` |
 | `src/components/ui/` | `EmptyState` `NoticeBanner` `StatTile` |
 | `src/composables/useVotePortal.ts` | **全部状态与 API 编排**（单文件约 1800 行，是前端的事实核心） |
-| `src/lib/` | `api.ts` `ballot.ts` `datetime.ts` `error-messages.ts` `focus-trap.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` —— 除 `api.ts` 外都有单测 |
+| `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `datetime.ts` `error-messages.ts` `focus-trap.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` —— 除 `api.ts` 外都有单测 |
 | `src/styles/` | `tokens.css` `base.css` `components.css` `shell.css` |
 | `src/types/` | `portal.ts` `portal-api.ts` |
 
@@ -216,7 +216,8 @@
 - `useVotePortal.ts` 的 `readDebugFlag` 从 `GET /healthz` 的响应里读 `debug` 字段 → `debugMode` ref。
 - `VotePanel.vue` 的「按选项生成凭据」按钮整块包在 `v-if="portal.debugMode"` 里；非 debug 模式改为提示文案（说明这条入口会让服务端看到选项）。
 - 门户**不再发送** `selected_option`，也**不再发送** `public_witness`（服务端本来就不消费前者）。
-- `web/src/lib/nullifier.ts` 的 `generateNullifier` —— 生成 32 字节随机数后**按模 r 归约**，输出 64 位小写十六进制，保证是规范域元素编码。
+- `web/src/lib/nullifier.ts` 的 `generateNullifier` —— 生成 32 字节随机数后**按模 r 归约**，输出 64 位小写十六进制，保证是规范域元素编码。⚠️ 它**没有**做 MiMC 绑定，因此这样的 nullifier 按电路约束出不了证明（`ballot-cipher` / CLI 的 `ballot-encrypt` 才是与电路一致的那条路）。
+- `web/src/lib/ballot-cipher.ts` —— **浏览器端选票加密**：BN254 twisted Edwards 上的指数 ElGamal（加密选项下标），点编码与 Go 侧逐字节一致（见 §3 陷阱 19）。计票公钥以**未压缩**形式传入，因此浏览器端不需要在域内求平方根。
 
 **陷阱**：
 - `lib/api.ts` 是唯一的 HTTP 出口，返回 `{ok, status, data, error, code, rawText}`；错误文案统一走 `lib/error-messages.ts` 的 `describeApiError(message, code, fallback)`，优先级 **业务短语 > 错误码 > 调用方兜底**。
@@ -318,6 +319,8 @@ publish        → 提案必须已关闭（isProposalClosed）
 16. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go`）和 `isProposalClosed`（`tally.go`）。改时间规则要同时改两处。
 17. **release 模式不再启动即改表** —— 必须先跑 `nullifier-server -migrate`，忘了会直接启动失败（`persistence.SchemaReady` 检查）。开发模式仍然自动迁移。
 18. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
+19. **浏览器端与 Go 侧的选票密文必须逐字节一致。** 密文点编码一旦有一处偏差，服务端就解不开客户端投的票，而且**不会报错**（只是计票结果对不上）。唯一防线是那组跨语言已知答案向量：`internal/infrastructure/crypto/ballot/kat_interop_test.go`（Go 侧断言向量并解出选项下标）与 `web/src/lib/ballot-cipher.test.ts`（TS 侧断言产出同一串密文）。**改任何一边的曲线参数或编码，都要重新生成并同步这两处。**
+20. **计票公钥以未压缩形式给客户端**：`GET /api/v1/proposals/:id/election-key` 返回 X 与 Y 各 32 字节。原因是压缩点要在标量域里求平方根才能解压（`r ≡ 1 mod 4`，走 Tonelli-Shanks），浏览器端不必背这个包；代价是接口多一种编码方式，改接口时别改回压缩形式。
 
 ---
 
@@ -339,6 +342,10 @@ go test ./internal/infrastructure/crypto/ -run TestBallot -v
 # 真实证明的 HTTP 回归：真实证明 → 201；跨提案复用 / 篡改 nullifier / 篡改密文 → 400；伪造凭证签名 → 401
 go test ./internal/infrastructure/http/ -run TestServer_RealBallotProof -v
 
+# 跨语言一致性：Go 侧解出浏览器端生成的密文（改了曲线参数或点编码就会红）
+go test ./internal/infrastructure/crypto/ballot/ -run TestKAT -v
+go test ./tests/e2e/ -run TestAPI_ClientSideEncryption -v   # 客户端本地加密 → 计票还原
+
 # 密钥生成（默认不覆盖已有文件；-force 才覆盖）
 go run ./cmd/keygen -dir ./keys
 go run ./cmd/keygen -dir ./keys -force
@@ -347,6 +354,7 @@ go test ./cmd/keygen/ -v
 # 前端
 pnpm --dir web run test
 pnpm --dir web run test -- src/lib/nullifier.test.ts   # 只跑 nullifier 单测
+pnpm --dir web run test -- src/lib/ballot-cipher.test.ts   # 客户端加密（含跨语言向量）
 pnpm --dir web run lint
 pnpm --dir web exec tsc --noEmit
 pnpm --dir web run build

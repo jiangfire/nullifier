@@ -190,6 +190,7 @@ web/                        # Vue 3 前端门户
 - `POST /api/v1/votes`
 - `POST /api/v1/proposals/:proposal_id/vote-status`
 - `POST /api/v1/proposals/:proposal_id/ballot-draft`（仅 debug 模式）
+- `GET /api/v1/proposals/:proposal_id/election-key`（计票公钥，公开值）
 - `POST /api/v1/proposals/:proposal_id/credentials/claim`
 - `GET /api/v1/proposals/:proposal_id/results`
 - `GET /api/v1/proposals/:proposal_id/audit-anchors`
@@ -285,7 +286,6 @@ web/                        # Vue 3 前端门户
   仓库原先的 `internal/infrastructure/crypto/kyber_elgamal.go` 及其两个测试已删除。
 
 ### 6.2 计票密钥与门限份额
-
 - 计票私钥是 Fr 上的标量（32 字节），公钥是压缩点（32 字节）。
 - Shamir 拆份额与门限恢复都在 Fr 上做（`ballot.SplitSecret` / `ballot.RecoverSecret`），
   恢复用拉格朗日插值。门限解密与密文格式因此不需要任何域转换。
@@ -383,7 +383,26 @@ web/                        # Vue 3 前端门户
 - 性质要说清楚：debug 模式下服务端知道选了哪个，这条链路**不匿名**，只是换联调速度。
   release 模式下这个端点不存在。
 
-### 6.8 凭证验签
+### 6.8 客户端加密（选票密文在客户端生成）
+
+- **计票公钥是公开的**，客户端拿到它就能在本地把选项下标加密成密文，服务端全程
+  看不到明文选项。服务端新增公开接口 `GET /api/v1/proposals/:proposal_id/election-key`，
+  返回**未压缩**形式（X 与 Y 各 32 字节大端，base64）—— 客户端因此不必实现点解压
+  （那需要在标量域里求平方根）。
+- **浏览器端实现**：`web/src/lib/ballot-cipher.ts`，BN254 twisted Edwards 上的指数
+  ElGamal，与 Go 侧**逐字节一致**。一致性由一组跨语言已知答案向量保证：
+  `internal/infrastructure/crypto/ballot/kat_interop_test.go`（Go 侧解出同一个选项
+  下标）与 `web/src/lib/ballot-cipher.test.ts`（TS 侧产出同一串密文）。改任何一边
+  都要重新生成并同步这组向量。
+- **CLI 实现**：`cmd/cli` 的 `ballot-encrypt` 命令 —— 取公钥 → 本地加密 → 落盘选票
+  文件。选票文件里带 `nullifier_secret`（nullifier 秘密，只留本地），prover 需要它
+  才能满足电路里的 nullifier 约束。
+- **服务端不再需要知道明文选项**：`usecase.TallyUseCase.EncryptVoteOption`（服务端
+  代加密）只剩 debug 模式的 `ballot-draft` 在用。
+- **还没闭合的部分**：门户还没接上客户端加密（缺客户端 prover，接了也投不出去），
+  debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径。
+
+### 6.9 凭证验签
 
 - `domaincrypto.CredentialIssuer.VerifyCredential`：用签发方公钥校验凭证签名。
   投票落库前调用（`usecase.VotingUseCase.Submit`），验签失败 → `ErrInvalidCredential`
@@ -476,6 +495,8 @@ web/                        # Vue 3 前端门户
 - CLI 不发送 `public_witness`：公开输入由服务端按请求字段自拼，客户端无从选择。
 - `ballot-draft` 只在 debug 模式可用（服务端在非 debug 模式返回 404），返回的 `proof`
   是开发用占位值，不是真实证明。
+- `ballot-encrypt` 在**客户端本地加密**选票：取公开的计票公钥 → 本地加密选项下标 →
+  落盘选票文件。选票文件里的 `nullifier_secret` 只留本地，prover 需要它。
 - 当前命令：
   - `health`
   - `version`
@@ -484,6 +505,7 @@ web/                        # Vue 3 前端门户
   - `credential-issue`
   - `credential-show`
   - `ballot-draft`
+  - `ballot-encrypt`
   - `vote-submit`
   - `vote-status`
   - `credentials-list`
@@ -501,10 +523,14 @@ web/                        # Vue 3 前端门户
   - `http` / middleware 测试
   - `config` / `di` 测试
   - `internal/infrastructure/crypto/ballot` 单元测试（密文往返、证明往返、篡改任一公开输入
-    验证失败、选项越界无法出证、错 nullifier 秘密无法出证、份额拆分与恢复）
+    验证失败、选项越界无法出证、错 nullifier 秘密无法出证、份额拆分与恢复、未压缩点与
+    客户端加密入口）
+  - **跨语言一致性测试**：`internal/infrastructure/crypto/ballot/kat_interop_test.go` 与
+    `web/src/lib/ballot-cipher.test.ts` 共用一组已知答案向量 —— 浏览器端生成的密文
+    必须能被 Go 侧解回同一个选项下标
   - `cmd/keygen` 单元测试
   - `tests/integration` 集成测试
-  - `tests/e2e` 端到端流程测试
+  - `tests/e2e` 端到端流程测试（含「客户端本地加密 → 落库只有密文 → 计票还原」）
 - PostgreSQL 集成测试使用 `testcontainers`
 - 前端最小校验是：
   - `pnpm --dir web exec tsc --noEmit`
@@ -517,12 +543,16 @@ web/                        # Vue 3 前端门户
   `cmd/keygen` + 加载 `crypto.vk_path` 后的 Groth16 验证都落地了。但门户没有本地
   prover，**release 模式下门户依然无法完成投票**；dev 模式走的是服务端代加密的
   草稿链路（`ballot-draft`）。
-- **明文选项的彻底消除还没做。** 选票加密仍在服务端侧（`ballot-draft`），服务端
-  在生成时就知道选了哪个。release 模式下该端点 404 是兜底，不是替代 —— 要让服务端
-  完全拿不到选项，必须把加密移到客户端。
-- **凭证签发仍不是盲签名。** 盲化在服务端进程内完成，签发方看得见被签内容（见 §6.8）。
-- **nullifier 的 MiMC 绑定还没接进生成器。** 库里与测试里有 `DeriveNullifier`，
-  但服务端与浏览器当前生成的都只是随机域元素，按电路约束出不了证明（见 §6.4）。
+- **明文选项对服务端不可知：客户端加密已落地，但门户还没接上。** 浏览器端
+  （`web/src/lib/ballot-cipher.ts`）与 CLI（`cmd/cli` 的 `ballot-encrypt`）都能在本地
+  生成选票密文，服务端只提供公开的计票公钥（`GET .../election-key`），落库记录里
+  只有密文。**但门户还没接上**（缺客户端 prover），debug 模式的 `ballot-draft` 仍是
+  「服务端知道选项」的那条路径 —— 能力 A 因此尚未完全闭合。
+- **凭证签发仍不是盲签名。** 盲化在服务端进程内完成，签发方看得见被签内容（见 §6.9）。
+- **nullifier 的 MiMC 绑定只在 CLI 侧接上了。** `cmd/cli` 的 `ballot-encrypt` 按
+  `MiMC(secret, proposal_id)` 推导 nullifier 并把秘密留在选票文件里；但服务端
+  `BallotNullifierGenerator` 与浏览器 `web/src/lib/nullifier.ts` 生成的仍只是随机域
+  元素，按电路约束出不了证明（见 §6.4）。
 - `ballot-draft` 仍是开发联调接口，不应被写成生产能力。
 - **v3 密文与 v0.1.0 的 v2 密文不兼容**，旧的加密选票解不开（见 §6.1）。
 - 解密会话的初始化时机是当前系统最容易被文档写错的点：

@@ -48,7 +48,7 @@
 - 后端用 Go 原生测试 + `testify`；集成测试集中在 `tests/integration`，HTTP 与持久化测试贴近实现文件
 - 前端用 vitest，测试文件与源码同目录（如 `web/src/lib/datetime.test.ts`）
 - 改动涉及接口、密码学或持久化逻辑时**必须补回归测试**；合入前至少 `go test ./...` 且覆盖率脚本通过
-- 覆盖率有两个口径，别混用：**门槛口径 79.0%**（`check-coverage.sh` 选中的 9 个包：usecase / config / di / http / http-middleware / crypto / persistence / cmd-cli / cmd-server），**全仓口径 74.1%**（2026-10-20 实测）。门槛是**逐包分档**的（门槛值见 `scripts/coverage-thresholds.txt`），单个包回退会直接让 CI 变红；`internal/infrastructure/persistence`（60.1%）是当前最低的一档，抬门槛时它会先卡住
+- 覆盖率有两个口径，别混用：**门槛口径 79.4%**（`check-coverage.sh` 选中的 11 个包：usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server），**全仓口径 74.1%**（2026-10-20 实测）。门槛是**逐包分档**的（门槛值见 `scripts/coverage-thresholds.txt`），单个包回退会直接让 CI 变红；`internal/infrastructure/persistence`（60.1%）是当前最低的一档，抬门槛时它会先卡住
 - CI 实际执行：`go test ./...` + `bash ./scripts/check-coverage.sh 80 coverage.ci.out`，**另加** gofmt 检查、前端 lint / tsc / vitest（`.github/workflows/ci.yml`）
 
 ## PR & commit conventions
