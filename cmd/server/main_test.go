@@ -9,10 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"anonvote/internal/config"
 	httpapi "anonvote/internal/infrastructure/http"
 	"anonvote/internal/infrastructure/persistence"
 
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // testEnv 把服务端要读的环境变量全部指向临时目录。
@@ -132,4 +135,26 @@ func TestServe_ServesHealthzAndShutsDown(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("服务没有在关停信号后退出")
 	}
+}
+
+// release 模式下 CORS 为空要告警：门户与后端不同源时浏览器会拦掉所有跨域请求，
+// 而这种事故在启动日志里看不出来。
+func TestWarnIfCORSEmpty(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+
+	warnIfCORSEmpty(logger, &config.Config{GinMode: "release"})
+	require.Equal(t, 1, logs.Len())
+	require.Contains(t, logs.All()[0].Message, "cors_allowed_origins")
+
+	// 填了 CORS 就不告警。
+	warnIfCORSEmpty(logger, &config.Config{
+		GinMode:            "release",
+		CORSAllowedOrigins: []string{"https://vote.example.com"},
+	})
+	require.Equal(t, 1, logs.Len())
+
+	// 非 release 模式不告警：开发模式的默认 CORS 本来就够用。
+	warnIfCORSEmpty(logger, &config.Config{GinMode: "debug"})
+	require.Equal(t, 1, logs.Len())
 }

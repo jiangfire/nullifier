@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,12 @@ import (
 
 	"github.com/spf13/viper"
 )
+
+// ConfigFileEnvVar 是显式指定配置文件路径的环境变量。
+//
+// 生产配置叫 config.production.yaml，而 viper 按名字只找 config.yaml ——
+// 靠改名来切换生产配置太容易出错，所以给一条明确的路径。
+const ConfigFileEnvVar = "CONFIG_FILE"
 
 type Config struct {
 	ServerAddress string
@@ -28,6 +35,10 @@ type Config struct {
 	// release 模式默认关闭：多副本同时启动会争 DDL 锁，而且改表应该是
 	// 一个能单独执行、能单独回滚的步骤，而不是服务启动的副作用。
 	AutoMigrate bool
+	// SourceFile 是实际加载的配置文件路径（没有配置文件时为空）。
+	// 启动日志会打印它：最常见的上线事故是「以为加载了生产配置，
+	// 实际跑的是开发配置」。
+	SourceFile string
 }
 
 func Load() (*Config, error) {
@@ -42,10 +53,21 @@ func LoadForMigration() (*Config, error) {
 
 func load(forMigration bool) (*Config, error) {
 	v := viper.New()
-	v.SetConfigName("config")
-	v.SetConfigType("yaml")
-	v.AddConfigPath(".")
-	v.AddConfigPath("./configs")
+	// 配置文件路径：默认找名为 config.yaml 的文件；CONFIG_FILE 可以显式指定。
+	//
+	// 生产配置叫 config.production.yaml，viper 的名字匹配找不到它 —— 靠改名
+	// 来启用生产配置太容易出错（覆盖开发配置、或忘了改回来），所以给一条
+	// 明确的路径。
+	explicitFile := strings.TrimSpace(os.Getenv(ConfigFileEnvVar))
+	if explicitFile != "" {
+		// 显式路径：由文件扩展名决定格式（yaml / json / toml 都认）。
+		v.SetConfigFile(explicitFile)
+	} else {
+		v.SetConfigName("config")
+		v.SetConfigType("yaml")
+		v.AddConfigPath(".")
+		v.AddConfigPath("./configs")
+	}
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
@@ -65,6 +87,8 @@ func load(forMigration bool) (*Config, error) {
 	if err := v.ReadInConfig(); err != nil {
 		var notFound viper.ConfigFileNotFoundError
 		if !errors.As(err, &notFound) {
+			// 显式指定的文件不存在时这里是硬错误：静默回退到开发配置，
+			// 正是最危险的上线事故。
 			return nil, fmt.Errorf("read config file: %w", err)
 		}
 	}
@@ -117,7 +141,8 @@ func load(forMigration bool) (*Config, error) {
 		CredentialIssuerKeyPath:     v.GetString("crypto.issuer_key_path"),
 		CredentialIssuerRotateAfter: time.Duration(v.GetInt("crypto.issuer_rotate_days")) * 24 * time.Hour,
 		DB:                          dbCfg,
-		AutoMigrate:                 !requiresVerifyingKey(ginMode),
+		AutoMigrate:                 !IsReleaseMode(ginMode),
+		SourceFile:                  v.ConfigFileUsed(),
 	}
 	// 显式配置优先于按模式推导的默认值；环境变量优先于配置文件。
 	if raw := strings.TrimSpace(v.GetString("server.auto_migrate")); raw != "" {
@@ -127,7 +152,7 @@ func load(forMigration bool) (*Config, error) {
 		}
 		cfg.AutoMigrate = parsed
 	}
-	if !forMigration && requiresVerifyingKey(cfg.GinMode) {
+	if !forMigration && IsReleaseMode(cfg.GinMode) {
 		if strings.TrimSpace(cfg.VerifyingKeyPath) == "" {
 			return nil, fmt.Errorf("crypto.vk_path is required when server.mode=%q", cfg.GinMode)
 		}
@@ -144,7 +169,10 @@ func load(forMigration bool) (*Config, error) {
 	return cfg, nil
 }
 
-func requiresVerifyingKey(mode string) bool {
+// IsReleaseMode 判断运行模式是否属于生产模式。
+//
+// 生产模式要求显式配置密钥与管理员令牌，不自动改表，也不开调试端点。
+func IsReleaseMode(mode string) bool {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "release", "prod", "production":
 		return true

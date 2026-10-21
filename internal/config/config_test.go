@@ -426,3 +426,137 @@ func TestLoad_InvalidConfig(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "read config file")
 }
+
+// CONFIG_FILE 显式指定配置文件：生产配置不叫 config.yaml，靠这条路径加载。
+func TestLoad_ConfigFileEnvPointsToExplicitFile(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("CRYPTO_VK_PATH", "")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+
+	explicit := filepath.Join(tempDir, "config.production.yaml")
+	require.NoError(t, os.WriteFile(explicit, []byte(`
+server:
+  address: ":7002"
+  mode: "debug"
+`), 0o600))
+	t.Setenv(ConfigFileEnvVar, explicit)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, ":7002", cfg.ServerAddress)
+	require.Equal(t, explicit, cfg.SourceFile)
+}
+
+// 显式指定的文件不存在时必须直接失败 —— 静默回退到开发配置是最危险的上线事故。
+func TestLoad_ConfigFileEnvMissingFileFails(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv(ConfigFileEnvVar, filepath.Join(tempDir, "does-not-exist.yaml"))
+
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "read config file")
+}
+
+// 显式路径优先于自动发现：工作目录里有 config.yaml 也不能覆盖它。
+func TestLoad_ConfigFileEnvWinsOverDiscoveredFile(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("CRYPTO_VK_PATH", "")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(`
+server:
+  address: ":1111"
+`), 0o600))
+
+	explicit := filepath.Join(tempDir, "explicit.yaml")
+	require.NoError(t, os.WriteFile(explicit, []byte(`
+server:
+  address: ":2222"
+`), 0o600))
+	t.Setenv(ConfigFileEnvVar, explicit)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, ":2222", cfg.ServerAddress)
+	require.Equal(t, explicit, cfg.SourceFile)
+}
+
+// 自动发现到的配置文件也要记进 SourceFile，启动日志要能看出跑的是哪份配置。
+func TestLoad_RecordsDiscoveredSourceFile(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("CRYPTO_VK_PATH", "")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+	t.Setenv(ConfigFileEnvVar, "")
+
+	discovered := filepath.Join(tempDir, "config.yaml")
+	require.NoError(t, os.WriteFile(discovered, []byte("server:\n  address: \":3333\"\n"), 0o600))
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, discovered, cfg.SourceFile)
+}
+
+// 没有配置文件时 SourceFile 为空：启动日志据此说明「没读到配置文件」。
+func TestLoad_WithoutConfigFileHasEmptySource(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("CRYPTO_VK_PATH", "")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+	t.Setenv(ConfigFileEnvVar, "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.SourceFile)
+}
+
+func TestIsReleaseMode(t *testing.T) {
+	require.True(t, IsReleaseMode("release"))
+	require.True(t, IsReleaseMode(" PROD "))
+	require.True(t, IsReleaseMode("production"))
+	require.False(t, IsReleaseMode("debug"))
+	require.False(t, IsReleaseMode(""))
+}

@@ -2,11 +2,16 @@
 #
 # ⚠️ 这个文件**不会**被自动加载：viper 只找名为 `config.yaml` 的配置文件
 #    （见 internal/config/config.go 的 SetConfigName("config")）。
-#    两种用法二选一：
+#    推荐用法（不改文件名，也不会覆盖开发配置）：
+#      CONFIG_FILE=./configs/config.production.yaml nullifier-server
+#    显式指定的文件**不存在时服务会直接启动失败** —— 静默回退到开发配置
+#    是最危险的上线事故。
+#    其它两种用法：
 #      1) 把本文件复制成 configs/config.yaml（会覆盖开发配置，注意先备份）；
 #      2) 保持本文件名，完全用 configs/production.env.example 里的环境变量驱动。
 #
-# 启动日志会打印实际生效的 server.mode / db.driver / db.database / admin token 来源，
+# 启动日志会打印实际加载的配置文件路径（config_file）与 server.mode /
+# db.driver / db.database / admin token 来源，
 # 上线后请先核一眼这行日志，确认没有误跑在开发配置上。
 
 server:
@@ -15,7 +20,8 @@ server:
   # 必须显式设置。留空在 release 模式下会导致服务启动失败。
   admin_bearer_token: ""
   # 填门户的真实来源。多个用空格分隔，不要用逗号。
-  # 留空的话，门户与后端不同源时浏览器会拦掉所有请求。
+  # 留空的话，门户与后端不同源时浏览器会拦掉所有请求
+  # （同源部署留空是合法的；release 模式下留空会有一条启动告警）。
   cors_allowed_origins: []
   # release 模式下默认不在启动时改表：先跑 `nullifier-server -migrate`，再起服务。
   # 临时想恢复旧行为时改成 true。
