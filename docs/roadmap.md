@@ -107,7 +107,7 @@
 | E | 凭证不可伪造 | ❌ 投票路径**从不**验凭证签名 | 落库前 `VerifyCredential`；伪造签名的投票 → 401 | M2 · T18 |
 | F | 签发方看不到被签内容 | ❌ 盲化在服务端进程内完成，等同普通签名 | 两段式盲签名：服务端全程只见盲化消息；交叉攻击（A 的盲签名 finalize 出 B）→ 失败 | M2 · T17 |
 | G | 凭证分发不泄露身份 | ✅ **v0.1.0 已达成**（T9）：凭证池 + 投票人匿名随机领取，运营方不再掌握「谁领了哪张」 | 保持「池里只存未签发槽位、领取时用领取者自带的一次性公钥当场签发、领取端点不落可关联日志」；补**资格证明**把一人一票补回来 | M3 · T22 |
-| H | 生产可运维 | ❌ 生产配置模板不会被自动加载；部署靠人工核对 | 显式 `CONFIG_FILE` 支持 + 生产部署清单逐项可勾 | M3 · T19 |
+| H | 生产可运维 | 🟡 **`CONFIG_FILE` 显式路径已支持**（生产配置模板仍不会被自动加载，但有了确定的加载方式，缺文件直接启动失败，启动日志打印实际配置文件路径）；CORS 真实源与部署清单仍靠人工核对 | 显式 `CONFIG_FILE` 支持 + 生产部署清单逐项可勾 | M3 · T19 |
 | I | 端到端验收 | ❌ 三个盲区从未验证（见 §4.3） | PG 集成测试 / 浏览器真实渲染 / 并发投票与容量，各有**可复现脚本 + 输出** | M3 · T20 |
 
 > **能力 C 的完成定义在 2026-10-21 被修正过。** 原文写的是「公开输入含
@@ -503,7 +503,8 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 问题 | `configs/config.production.yaml` 的 `cors_allowed_origins: []` 仍为空；且该文件**永远不会被自动加载**（viper `SetConfigName("config")`，`internal/config/config.go:27`）。 |
 | 证据 | `configs/config.production.yaml`、`internal/config/config.go:42`（`v.SetConfigName("config")`） |
 | 改法 | ① 给 viper 加 `CONFIG_FILE` 显式路径支持（**推荐**：比改名更不容易出错）；② CORS 填门户真实源 |
-| 验收 | 用 `CONFIG_FILE=./configs/config.production.yaml` 启动，启动日志显示 `server.mode=release` 且 CORS 生效 |
+| 落地核对 | ① ✅ **`CONFIG_FILE` 显式路径**（`internal/config/config.go` 的 `ConfigFileEnvVar`）：`CONFIG_FILE=./configs/config.production.yaml` 启动即可加载生产配置，**显式文件不存在时直接启动失败**（静默回退到开发配置是最危险的上线事故）；② ✅ 启动日志的 `effective configuration` 新增 `config_file` 字段，打印**实际加载的配置文件路径**；③ ✅ release 模式下 `cors_allowed_origins` 为空时打**告警**（同源部署留空合法，故不阻止启动）；④ ✅ `configs/config.production.yaml` 的注释改为推荐 `CONFIG_FILE` 用法；⑤ ⚠️ **CORS 的真实源仍是部署项** —— 仓库里填不了，得按部署环境写进 `SERVER_CORS_ALLOWED_ORIGINS` 或配置文件 |
+| 验收 | 用 `CONFIG_FILE=./configs/config.production.yaml` 启动，启动日志显示 `server_mode=release`、CORS 生效 → ⚠️ **部分达成**：加载路径、失败保护、日志可核对都已落地；CORS 生效取决于部署时填入真实源 |
 | 预估 | 半天 |
 | 依赖 | 无 |
 

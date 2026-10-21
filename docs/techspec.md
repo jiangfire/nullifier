@@ -120,8 +120,13 @@ web/                        # Vue 3 前端门户
 ### 4.2 配置来源
 
 - `internal/config.Load` 同时读取：
-  - `configs/config.yaml`
+  - 配置文件（默认 `configs/config.yaml`；`CONFIG_FILE` 环境变量可显式指定路径）
   - 环境变量
+- **`CONFIG_FILE` 显式路径**：`configs/config.production.yaml` 永远不会自动加载
+  （viper 只找名为 `config.yaml` 的文件），所以生产环境用
+  `CONFIG_FILE=./configs/config.production.yaml` 启动。显式指定的文件**不存在时
+  直接启动失败** —— 静默回退到开发配置正是最危险的上线事故。
+- 环境变量优先级高于配置文件；`CONFIG_FILE` 只决定**读哪个文件**，不改变优先级。
 - 数据库优先来自 `internal/infrastructure/persistence/db_env.go`
 - 支持的关键配置：
   - `server.address`
@@ -146,6 +151,10 @@ web/                        # Vue 3 前端门户
   - `crypto.vk_path` 必填
 - `server.admin_bearer_token` 若为空，会在启动期自动生成并写回内存配置
 - 自动生成的 token 会通过启动日志打印到控制台，仅对当前进程实例有效
+- 启动日志会打印**实际加载的配置文件路径**（`config_file`）—— 「以为加载了生产
+  配置、实际跑的是开发配置」是最常见的上线事故，必须能一眼看出来。
+- release 模式下 `cors_allowed_origins` 为空时**告警**（不阻止启动）：门户与
+  后端同源部署时留空是合法的，但不同源时浏览器会拦掉所有跨域请求。
 
 ### 4.4 迁移
 
