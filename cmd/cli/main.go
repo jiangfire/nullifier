@@ -98,6 +98,8 @@ func run(args []string) int {
 		err = c.cmdCreateProposal(rest[1:])
 	case "credential-issue":
 		err = c.cmdIssueCredential(rest[1:])
+	case "credential-claim":
+		err = c.cmdClaimCredential(rest[1:])
 	case "credential-show":
 		err = c.cmdShowCredential(rest[1:])
 	case "ballot-draft":
@@ -223,6 +225,56 @@ func (c *cli) cmdIssueCredential(args []string) error {
 	}
 	var out credentialFile
 	if err := c.postJSON("/api/v1/credentials", body, true, &out); err != nil {
+		return err
+	}
+	out.Version = 1
+	out.ExportedAt = time.Now().UTC().Format(time.RFC3339)
+	if *outFile != "" {
+		if err := writeJSON(*outFile, out); err != nil {
+			return err
+		}
+		fmt.Printf("凭证已写入 %s\n", *outFile)
+		return nil
+	}
+	printJSON(out)
+	return nil
+}
+
+// cmdClaimCredential 匿名领取一张凭证。
+//
+// 领取请求里只有自己生成的公钥，没有任何身份信息：服务端随机给出一个凭证，
+// 因此服务端与运营方都无法把凭证和投票人对应起来。这条路径是公开的
+// （不需要 admin token），与门户的「领取凭证」按钮是同一个接口。
+func (c *cli) cmdClaimCredential(args []string) error {
+	fs := flag.NewFlagSet("credential-claim", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	proposalID := fs.String("proposal", "", "proposal id")
+	pubKey := fs.String("pubkey", "", "base64 public key; default random")
+	outFile := fs.String("out", "", "optional output json file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	proposal := strings.TrimSpace(*proposalID)
+	if proposal == "" {
+		return errors.New("必须提供 -proposal")
+	}
+	userPubKey := strings.TrimSpace(*pubKey)
+	if userPubKey == "" {
+		generated, err := randomBase64(32)
+		if err != nil {
+			return err
+		}
+		userPubKey = generated
+	}
+
+	body := map[string]any{"user_pub_key": userPubKey}
+	var out credentialFile
+	if err := c.postJSON(
+		fmt.Sprintf("/api/v1/proposals/%s/credentials/claim", url.PathEscape(proposal)),
+		body,
+		false,
+		&out,
+	); err != nil {
 		return err
 	}
 	out.Version = 1
@@ -832,6 +884,7 @@ func printRootUsage() {
   proposals-open
   proposal-create   -title -description -options -start -end
   credential-issue  -proposal -user [-pubkey] [-out]  (需要 admin token)
+  credential-claim  -proposal [-pubkey] [-out]         (匿名领取:凭证池随机给一张)
   credential-show   -file
   ballot-draft      -proposal -option [-out]
   ballot-encrypt    -proposal -option [-proof] [-out]   (本地加密:服务端看不到明文选项)
@@ -846,6 +899,7 @@ func printRootUsage() {
 示例:
   go run ./cmd/cli -admin-token dev-admin-token proposal-create -title "Board" -options "A,B" -start 2026-12-01T10:00:00Z -end 2026-12-01T12:00:00Z
   go run ./cmd/cli -admin-token dev-admin-token credential-issue -proposal p-1 -user u-1001 -out cred-u1001.json
+  go run ./cmd/cli credential-claim -proposal p-1 -out cred.json
   go run ./cmd/cli ballot-draft -proposal p-1 -option A -out ballot.json
   go run ./cmd/cli ballot-encrypt -proposal p-1 -option A -out ballot.json
   go run ./cmd/cli vote-submit -credential-file cred-u1001.json -ballot-file ballot.json
