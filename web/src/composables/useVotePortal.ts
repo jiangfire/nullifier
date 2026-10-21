@@ -6,6 +6,7 @@ import {
   isTargetUnknown,
 } from '../lib/ballot';
 import { localInputToRfc3339, toLocalDateTimeInput } from '../lib/datetime';
+import { generateNullifier } from '../lib/nullifier';
 import { describeApiError } from '../lib/error-messages';
 import {
   buildPortalSearch,
@@ -139,17 +140,30 @@ function regenerateBase64Key(): string {
   return randomBase64(32);
 }
 
+/**
+ * 生成一个 nullifier。
+ *
+ * 服务端要求 nullifier 是 32 字节的规范域元素编码（十六进制）：
+ * 同一个值不能有两种字节表示，否则双重投票的唯一索引就拦不住了。
+ */
 function newNullifier(): string {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  const suffix = Array.from(bytes, (item) =>
-    item.toString(16).padStart(2, '0'),
-  ).join('');
-  return `null-${Date.now()}-${suffix}`;
+  return generateNullifier();
 }
 
-function splitShares(raw: string): string[] {
-  return raw
+/**
+ * 从健康检查响应里读出服务端的 debug 标志。
+ *
+ * 服务端没给这个字段时按 false 处理：宁可把开发入口藏起来，
+ * 也不要因为一个没读到的字段把「服务端能看到明文选项」的按钮露出去。
+ */
+function readDebugFlag(payload: unknown): boolean {
+  if (typeof payload !== 'object' || payload === null) {
+    return false;
+  }
+  return (payload as { debug?: unknown }).debug === true;
+}
+
+function splitShares(raw: string): string[] {  return raw
     .split(/[\s,]+/)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
@@ -277,6 +291,9 @@ export function useVotePortal() {
     text: '未检测',
     checkedAt: '',
   });
+  // 服务端是否处于开发联调模式。非 debug 模式下「按选项生成凭据」
+  // 这类让服务端看到明文选项的能力不可用，门户要把它藏起来。
+  const debugMode = ref(false);
   const hallState = reactive({
     loading: false,
     proposals: [] as ProposalItem[],
@@ -307,7 +324,6 @@ export function useVotePortal() {
     encryptedVote: '',
     proof: '',
     nullifier: '',
-    publicWitness: '',
     // 这份凭据材料是针对哪个提案、哪个选项生成的。
     // 选项或提案变了就必须作废它，否则会投出旧选项。
     ballotProposalId: '',
@@ -714,7 +730,6 @@ export function useVotePortal() {
         encrypted_vote: voteForm.encryptedVote,
         proof: voteForm.proof,
         nullifier: voteForm.nullifier,
-        public_witness: voteForm.publicWitness,
       },
       null,
       2,
@@ -752,13 +767,10 @@ export function useVotePortal() {
         proof: textOf(base, 'proof') || voteForm.proof,
         nullifier:
           textOf(base, 'nullifier') || voteForm.nullifier || newNullifier(),
-        public_witness:
-          textOf(base, 'public_witness') || voteForm.publicWitness,
       };
       voteForm.encryptedVote = textOf(payload, 'encrypted_vote');
       voteForm.proof = textOf(payload, 'proof');
       voteForm.nullifier = textOf(payload, 'nullifier');
-      voteForm.publicWitness = textOf(payload, 'public_witness');
       voteForm.ballotJson = JSON.stringify(payload, null, 2);
       // 材料本来没有绑定目标时（外部导入且没带 selected_option），
       // 以用户这次显式写入的选项为准。
@@ -796,8 +808,6 @@ export function useVotePortal() {
         textOf(parsed, 'encrypted_vote') || textOf(parsed, 'encryptedVote');
       voteForm.proof = textOf(parsed, 'proof');
       voteForm.nullifier = textOf(parsed, 'nullifier');
-      voteForm.publicWitness =
-        textOf(parsed, 'public_witness') || textOf(parsed, 'publicWitness');
       const chosenOption =
         textOf(parsed, 'selected_option') || textOf(parsed, 'option');
       // 外部导入的凭据：读到 selected_option 就绑定上，读不到就保持「不可判定」，
@@ -883,6 +893,9 @@ export function useVotePortal() {
     if (result.ok) {
       healthState.ok = true;
       healthState.text = '服务在线';
+      // 服务端会告诉门户自己是不是开发联调模式：非 debug 模式下
+      // 「按选项生成凭据」不可用，门户据此隐藏入口。
+      debugMode.value = readDebugFlag(result.data);
       if (showNotice) {
         addNotice('success', '连接成功', '后端服务可访问');
       }
@@ -1145,9 +1158,6 @@ export function useVotePortal() {
     };
     // 注意：不要发送 selected_option。服务端不消费这个字段，而明文选项上服务端
     // 会抵消「选票是加密的」这个属性。选票是否对得上当前选项由本地绑定校验。
-    if (voteForm.publicWitness.trim() !== '') {
-      body.public_witness = voteForm.publicWitness.trim();
-    }
 
     voteLoading.value = true;
     const result = await apiCall({
@@ -1727,6 +1737,7 @@ export function useVotePortal() {
     apiBaseUrl,
     adminBearerToken,
     healthState,
+    debugMode,
     checkHealth,
 
     hallState,

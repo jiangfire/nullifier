@@ -174,18 +174,25 @@ async function checkStatus(): Promise<void> {
         <span class="flow-index" aria-hidden="true">3</span>
         <div id="guide-anchor-user-vote-prepare" class="flow-body">
           <h2 class="card-title">生成投票凭据</h2>
-          <p class="card-sub">
-            凭据由服务端按你选中的选项生成，不需要手写 proof 或密文。
-            改选项会让已生成的凭据失效，需要重新生成。
+          <template v-if="portal.debugMode">
+            <p class="card-sub">
+              凭据由服务端按你选中的选项生成，不需要手写 proof 或密文。
+              改选项会让已生成的凭据失效，需要重新生成。
+            </p>
+            <button
+              class="btn btn--primary"
+              type="button"
+              :disabled="portal.voteLoading || !portal.walletReady"
+              @click="prepare"
+            >
+              {{ portal.voteLoading ? '生成中…' : '按选项生成凭据' }}
+            </button>
+          </template>
+          <p v-else class="card-sub">
+            当前服务不是开发联调模式，没有「按选项生成凭据」这个入口 ——
+            它会让服务端看到你选了哪个选项，与匿名投票的前提冲突。
+            正式客户端会在浏览器本地生成密文与证明。
           </p>
-          <button
-            class="btn btn--primary"
-            type="button"
-            :disabled="portal.voteLoading || !portal.walletReady"
-            @click="prepare"
-          >
-            {{ portal.voteLoading ? '生成中…' : '按选项生成凭据' }}
-          </button>
 
           <details class="disclosure">
             <summary>低频工具与高级字段</summary>
@@ -255,14 +262,6 @@ async function checkStatus(): Promise<void> {
                 id="vote-nullifier"
                 v-model.trim="portal.voteForm.nullifier"
                 :aria-invalid="portal.voteErrors.nullifier ? 'true' : 'false'"
-              />
-            </label>
-            <label class="field" for="vote-public-witness">
-              <span class="field-label">public_witness（可选）</span>
-              <textarea
-                id="vote-public-witness"
-                v-model.trim="portal.voteForm.publicWitness"
-                rows="2"
               />
             </label>
           </details>
