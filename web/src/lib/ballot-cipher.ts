@@ -10,8 +10,9 @@
  */
 
 /** BN254 标量域的模数。曲线坐标与标量都在这个域里。 */
-export const bn254ScalarModulus =
-  21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+import { bn254ScalarModulus } from './field';
+
+export { bn254ScalarModulus };
 
 /** twisted Edwards 曲线参数 a（= -1）。 */
 const curveA = bn254ScalarModulus - 1n;
