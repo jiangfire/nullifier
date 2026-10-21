@@ -836,6 +836,14 @@ func (f *fakeThresholdCrypto) Decrypt(privateKey []byte, ciphertext []byte, numO
 	return index, nil
 }
 
+// UncompressPublicKey 把计票公钥转成未压缩形式。
+func (f *fakeThresholdCrypto) UncompressPublicKey(publicKey []byte) ([]byte, error) {
+	if len(publicKey) == 0 {
+		return nil, errors.New("empty public key")
+	}
+	return append([]byte("uncompressed:"), publicKey...), nil
+}
+
 type fakeNullifierGenerator struct{}
 
 func (f *fakeNullifierGenerator) GenerateNullifier() (string, error) {

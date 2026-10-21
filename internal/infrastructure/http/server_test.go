@@ -381,6 +381,54 @@ func TestHandler_BallotDraftHiddenOutsideDebugMode(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestHandler_GetElectionKey 覆盖客户端本地加密的前提：服务端公开计票公钥。
+//
+// 公钥是公开值，客户端拿到它就能在本地把选项加密成密文，服务端全程看不到
+// 明文选项。公钥以未压缩形式返回，浏览器端就不必实现点解压。
+func TestHandler_GetElectionKey(t *testing.T) {
+	engine, _, _ := buildFullStackEngine(t)
+	ts := httptest.NewServer(engine)
+	defer ts.Close()
+
+	resp := doPostAdminJSON(t, ts.URL+"/api/v1/proposals", "secret", map[string]any{
+		"title":     "Board Election",
+		"options":   []string{"candidate-A", "candidate-B"},
+		"starts_at": time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339),
+		"ends_at":   time.Now().UTC().Add(90 * time.Minute).Format(time.RFC3339),
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var proposalResp struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
+	_ = resp.Body.Close()
+
+	// 还没初始化解密会话：没有计票公钥可给。
+	resp, err := http.Get(ts.URL + "/api/v1/proposals/" + proposalResp.ID + "/election-key")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	_ = resp.Body.Close()
+
+	resp = doPostAdminJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/decryption/setup", "secret",
+		map[string]any{"threshold": 2, "trustees": 3})
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	_ = resp.Body.Close()
+
+	resp, err = http.Get(ts.URL + "/api/v1/proposals/" + proposalResp.ID + "/election-key")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var keyResp struct {
+		PublicKey string `json:"public_key"`
+		Encoding  string `json:"encoding"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&keyResp))
+	_ = resp.Body.Close()
+	require.Equal(t, "uncompressed", keyResp.Encoding)
+	raw, err := base64.StdEncoding.DecodeString(keyResp.PublicKey)
+	require.NoError(t, err)
+	require.Len(t, raw, 64)
+}
+
 func TestHandler_SuccessFlow(t *testing.T) {
 	engine, _, db := buildFullStackEngine(t)
 	ts := httptest.NewServer(engine)

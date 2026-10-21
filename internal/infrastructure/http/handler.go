@@ -80,6 +80,7 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/proposals/open", h.ListOpenProposals)
 	r.POST("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
 	r.POST("/proposals/:proposal_id/ballot-draft", h.PrepareBallotDraft)
+	r.GET("/proposals/:proposal_id/election-key", h.GetElectionKey)
 	// 匿名领取凭证：请求体不含任何身份信息，服务端因此无从记录
 	// 「谁领了哪个凭证」。
 	r.POST("/proposals/:proposal_id/credentials/claim", h.ClaimCredential)
@@ -453,6 +454,33 @@ func (h *Handler) PrepareBallotDraft(c *gin.Context) {
 		"encrypted_vote": base64.StdEncoding.EncodeToString(draft.EncryptedVote),
 		"proof":          developmentProofBase64,
 		"nullifier":      draft.Nullifier,
+	})
+}
+
+// GetElectionKey 返回提案的计票公钥，供客户端本地加密选票。
+//
+// 公钥是公开值：客户端拿到它就能在本地把选项下标加密成密文，服务端全程
+// 看不到明文选项。公钥以**未压缩**形式返回（X 与 Y 各 32 字节），浏览器端
+// 不必实现点解压。
+func (h *Handler) GetElectionKey(c *gin.Context) {
+	if h.tallyUC == nil {
+		c.Error(fmt.Errorf("tally usecase is not configured"))
+		return
+	}
+	proposalID := c.Param("proposal_id")
+	if proposalID == "" {
+		c.Error(fmt.Errorf("%w: proposal_id is required", usecase.ErrInvalidRequest))
+		return
+	}
+	key, err := h.tallyUC.ElectionPublicKey(c.Request.Context(), proposalID)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"proposal_id": proposalID,
+		"public_key":  base64.StdEncoding.EncodeToString(key),
+		"encoding":    "uncompressed",
 	})
 }
 

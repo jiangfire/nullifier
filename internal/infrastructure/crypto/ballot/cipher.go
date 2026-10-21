@@ -26,12 +26,32 @@ var ErrInvalidCiphertext = errors.New("invalid ballot ciphertext")
 // 密文是 (a, b) = (r·G, m·G + r·Y)：m 是选项下标，r 是随机数，Y 是计票
 // 公钥。服务端只有密文时无法还原 m —— 要解出 m 需要门限私钥 X。
 func EncryptBallot(publicKey []byte, optionIndex uint64) ([]byte, fr.Element, error) {
-	if optionIndex >= MaxOptions {
-		return nil, fr.Element{}, fmt.Errorf("%w: option index out of range: %d", ErrInvalidCiphertext, optionIndex)
-	}
 	key, err := parsePoint(publicKey)
 	if err != nil {
 		return nil, fr.Element{}, fmt.Errorf("%w: decode election public key: %v", ErrInvalidCiphertext, err)
+	}
+	return encryptWithKey(key, optionIndex)
+}
+
+// EncryptBallotWithUncompressedKey 用未压缩的计票公钥加密选项下标。
+//
+// 客户端（浏览器 / CLI）拿到的是未压缩公钥：X 与 Y 各 32 字节大端。走这个
+// 入口，客户端就不必实现点解压（那需要在标量域里求平方根）。
+func EncryptBallotWithUncompressedKey(
+	uncompressedKey []byte,
+	optionIndex uint64,
+) ([]byte, fr.Element, error) {
+	key, err := parseUncompressedPoint(uncompressedKey)
+	if err != nil {
+		return nil, fr.Element{}, fmt.Errorf("%w: decode election public key: %v", ErrInvalidCiphertext, err)
+	}
+	return encryptWithKey(key, optionIndex)
+}
+
+// encryptWithKey 是加密的核心：密文是 (a, b) = (r·G, m·G + r·Y)。
+func encryptWithKey(key Point, optionIndex uint64) ([]byte, fr.Element, error) {
+	if optionIndex >= MaxOptions {
+		return nil, fr.Element{}, fmt.Errorf("%w: option index out of range: %d", ErrInvalidCiphertext, optionIndex)
 	}
 	nonce, err := randomScalar()
 	if err != nil {

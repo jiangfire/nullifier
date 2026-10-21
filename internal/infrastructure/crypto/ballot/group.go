@@ -90,6 +90,47 @@ func parsePoint(raw []byte) (Point, error) {
 	return p, nil
 }
 
+// UncompressPoint 把压缩点转成未压缩形式：X 与 Y 各 32 字节大端，共 64 字节。
+//
+// 客户端用它做本地加密。浏览器端不必实现点解压（那需要在标量域里求平方根），
+// 服务端直接给出坐标更省事，也让客户端能自己做曲线检查。
+func UncompressPoint(publicKey []byte) ([]byte, error) {
+	point, err := parsePoint(publicKey)
+	if err != nil {
+		return nil, err
+	}
+	affine := point.affine()
+	x := affine.X.Bytes()
+	y := affine.Y.Bytes()
+	out := make([]byte, 0, 2*PointSize)
+	out = append(out, x[:]...)
+	out = append(out, y[:]...)
+	return out, nil
+}
+
+// parseUncompressedPoint 解析未压缩的曲线点（X 与 Y 各 32 字节大端）。
+//
+// 与压缩形式的区别：这里不需要在域内求平方根，客户端因此不必实现点解压。
+// 子群检查同样要做 —— 小阶点会让解密方泄漏私钥低位比特。
+func parseUncompressedPoint(raw []byte) (Point, error) {
+	if len(raw) != 2*PointSize {
+		return Point{}, fmt.Errorf(
+			"%w: expected %d bytes, got %d", ErrInvalidPoint, 2*PointSize, len(raw),
+		)
+	}
+	var x, y fr.Element
+	x.SetBytes(raw[:PointSize])
+	y.SetBytes(raw[PointSize:])
+	p := Point{X: x, Y: y}
+	if !p.isOnCurve() {
+		return Point{}, fmt.Errorf("%w: point is not on the curve", ErrInvalidPoint)
+	}
+	if !p.isInSubGroup() {
+		return Point{}, fmt.Errorf("%w: point is not in the prime order subgroup", ErrInvalidPoint)
+	}
+	return p, nil
+}
+
 // isOnCurve 检查点是否满足曲线方程。
 func (p Point) isOnCurve() bool {
 	affine := p.affine()

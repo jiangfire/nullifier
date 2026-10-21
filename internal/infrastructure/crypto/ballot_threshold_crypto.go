@@ -64,3 +64,10 @@ func (c *BallotThresholdCrypto) Decrypt(privateKey []byte, ciphertext []byte, nu
 func (c *BallotThresholdCrypto) ValidateCiphertext(cipher []byte) error {
 	return ballot.ValidateBallotCiphertext(cipher)
 }
+
+// UncompressPublicKey 把计票公钥转成未压缩形式（X 与 Y 各 32 字节大端）。
+//
+// 客户端用它本地加密选票：浏览器端不需要实现点解压。
+func (c *BallotThresholdCrypto) UncompressPublicKey(publicKey []byte) ([]byte, error) {
+	return ballot.UncompressPoint(publicKey)
+}

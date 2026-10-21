@@ -15,6 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"anonvote/internal/infrastructure/crypto/ballot"
+
+	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 )
 
 type cli struct {
@@ -45,6 +49,10 @@ type ballotFile struct {
 	EncryptedVote  string `json:"encrypted_vote"`
 	Proof          string `json:"proof"`
 	Nullifier      string `json:"nullifier"`
+	// NullifierSecret 是 nullifier 秘密：nullifier 由它单向推导出来。
+	// 它只留在本地（选票文件里），prover 需要它才能满足电路里的
+	// nullifier 约束。**不要把它提交给服务端。**
+	NullifierSecret string `json:"nullifier_secret,omitempty"`
 }
 
 // version 由构建时的 -ldflags "-X main.version=..." 注入。
@@ -94,6 +102,8 @@ func run(args []string) int {
 		err = c.cmdShowCredential(rest[1:])
 	case "ballot-draft":
 		err = c.cmdBallotDraft(rest[1:])
+	case "ballot-encrypt":
+		err = c.cmdBallotEncrypt(rest[1:])
 	case "vote-submit":
 		err = c.cmdVoteSubmit(rest[1:])
 	case "vote-status":
@@ -283,6 +293,126 @@ func (c *cli) cmdBallotDraft(args []string) error {
 	}
 	printJSON(ballot)
 	return nil
+}
+
+// devProofBase64 是开发模式的占位 proof。
+//
+// 服务端在 crypto.vk_path 为空时只要求 proof 非空。release 模式必须用
+// 本地 prover 产出的真实证明（用 -proof 传入）。
+const devProofBase64 = "ZGV2LXByb29m"
+
+// cmdBallotEncrypt 在本地加密选票。
+//
+// 计票公钥是公开的，客户端拿到它就能自己把选项加密成密文：**服务端全程看不到
+// 明文选项**。这是能力 A（选票内容对服务端不可知）的客户端一半。
+//
+// proof 由本地 prover 提供（-proof）；不提供时用开发占位值，只能在开发模式下
+// 通过验签。nullifier 在本地生成，并与提案 ID 绑定（电路约束要求两者一致），
+// 秘密只留在选票文件里。
+func (c *cli) cmdBallotEncrypt(args []string) error {
+	fs := flag.NewFlagSet("ballot-encrypt", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	proposalID := fs.String("proposal", "", "proposal id")
+	option := fs.String("option", "", "vote option")
+	proof := fs.String("proof", "", "base64 proof from a local prover (default: dev placeholder)")
+	outFile := fs.String("out", "", "optional output json file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	proposal := strings.TrimSpace(*proposalID)
+	candidate := strings.TrimSpace(*option)
+	if proposal == "" || candidate == "" {
+		return errors.New("必须提供 -proposal -option")
+	}
+
+	// 提案的选项顺序决定选项下标 —— 下标是密文与电路共用的口径。
+	options, err := c.proposalOptions(proposal)
+	if err != nil {
+		return err
+	}
+	index := -1
+	for i, item := range options {
+		if item == candidate {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return fmt.Errorf("提案 %s 没有这个选项: %s", proposal, candidate)
+	}
+
+	var key struct {
+		PublicKey string `json:"public_key"`
+	}
+	if err := c.getJSON(
+		fmt.Sprintf("/api/v1/proposals/%s/election-key", url.PathEscape(proposal)),
+		nil,
+		false,
+		&key,
+	); err != nil {
+		return err
+	}
+	publicKey, err := base64.StdEncoding.DecodeString(key.PublicKey)
+	if err != nil {
+		return fmt.Errorf("decode election public key: %w", err)
+	}
+
+	ciphertext, _, err := ballot.EncryptBallotWithUncompressedKey(publicKey, uint64(index))
+	if err != nil {
+		return fmt.Errorf("encrypt ballot: %w", err)
+	}
+
+	// nullifier 与提案绑定：电路约束是 nullifier = MiMC(secret, proposal_id)，
+	// 秘密留在本地，prover 需要它。
+	secret, err := ballot.GenerateNullifierSecret()
+	if err != nil {
+		return fmt.Errorf("generate nullifier secret: %w", err)
+	}
+	var secretElement fr.Element
+	secretElement.SetBytes(secret)
+	nullifier := ballot.DeriveNullifier(secretElement, ballot.DeriveProposalField(proposal))
+
+	proofValue := strings.TrimSpace(*proof)
+	if proofValue == "" {
+		proofValue = devProofBase64
+	}
+
+	out := ballotFile{
+		ProposalID:      proposal,
+		SelectedOption:  candidate,
+		EncryptedVote:   base64.StdEncoding.EncodeToString(ciphertext),
+		Proof:           proofValue,
+		Nullifier:       ballot.EncodeScalarHex(nullifier),
+		NullifierSecret: base64.StdEncoding.EncodeToString(secret),
+	}
+	if *outFile != "" {
+		if err := writeJSON(*outFile, out); err != nil {
+			return err
+		}
+		fmt.Printf("本地加密的选票已写入 %s\n", *outFile)
+		return nil
+	}
+	printJSON(out)
+	return nil
+}
+
+// proposalOptions 查出提案的选项列表，顺序即选项下标。
+func (c *cli) proposalOptions(proposalID string) ([]string, error) {
+	var list struct {
+		Items []struct {
+			ID      string   `json:"id"`
+			Options []string `json:"options"`
+		} `json:"items"`
+	}
+	if err := c.getJSON("/api/v1/proposals", nil, false, &list); err != nil {
+		return nil, err
+	}
+	for _, item := range list.Items {
+		if item.ID == proposalID {
+			return item.Options, nil
+		}
+	}
+	return nil, fmt.Errorf("找不到提案: %s", proposalID)
 }
 
 func (c *cli) cmdVoteSubmit(args []string) error {
@@ -704,6 +834,7 @@ func printRootUsage() {
   credential-issue  -proposal -user [-pubkey] [-out]  (需要 admin token)
   credential-show   -file
   ballot-draft      -proposal -option [-out]
+  ballot-encrypt    -proposal -option [-proof] [-out]   (本地加密:服务端看不到明文选项)
   vote-submit       -credential-file -ballot-file
   vote-status       -proposal -credential-file
   credentials-list  -proposal
@@ -716,6 +847,7 @@ func printRootUsage() {
   go run ./cmd/cli -admin-token dev-admin-token proposal-create -title "Board" -options "A,B" -start 2026-12-01T10:00:00Z -end 2026-12-01T12:00:00Z
   go run ./cmd/cli -admin-token dev-admin-token credential-issue -proposal p-1 -user u-1001 -out cred-u1001.json
   go run ./cmd/cli ballot-draft -proposal p-1 -option A -out ballot.json
+  go run ./cmd/cli ballot-encrypt -proposal p-1 -option A -out ballot.json
   go run ./cmd/cli vote-submit -credential-file cred-u1001.json -ballot-file ballot.json
   go run ./cmd/cli -admin-token dev-admin-token decrypt-setup -proposal p-1 -out shares.json
   go run ./cmd/cli -admin-token dev-admin-token credentials-list -proposal p-1`)

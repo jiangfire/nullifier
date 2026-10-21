@@ -29,6 +29,10 @@ type ThresholdCrypto interface {
 	// Decrypt 用计票私钥还原选项下标。numOptions 是提案的选项数，
 	// 解密方据此在选项集合里比对。
 	Decrypt(privateKey []byte, ciphertext []byte, numOptions int) (int, error)
+	// UncompressPublicKey 把计票公钥转成未压缩形式（X 与 Y 各 32 字节大端）。
+	// 客户端用它本地加密选票 —— 公钥是公开值，客户端拿到它就能在不告诉
+	// 服务端「选了哪个」的前提下完成加密。
+	UncompressPublicKey(publicKey []byte) ([]byte, error)
 }
 
 type MerkleRootBuilder interface {
@@ -365,6 +369,31 @@ func (uc *TallyUseCase) EncryptVoteOption(
 		return nil, fmt.Errorf("encrypt vote option: %w", err)
 	}
 	return cipher, nil
+}
+
+// ElectionPublicKey 返回提案的计票公钥（未压缩形式）。
+//
+// 公钥是公开值：客户端拿到它就能在本地把选项加密，服务端全程看不到明文
+// 选项 —— 这是能力 A（选票内容对服务端不可知）的前提。
+func (uc *TallyUseCase) ElectionPublicKey(ctx context.Context, proposalID string) ([]byte, error) {
+	if uc.sessionRepo == nil {
+		return nil, errors.New("decryption session repository is not configured")
+	}
+	if uc.crypto == nil {
+		return nil, errors.New("threshold crypto is not configured")
+	}
+	if strings.TrimSpace(proposalID) == "" {
+		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
+	}
+	session, err := uc.sessionRepo.GetByProposal(ctx, proposalID)
+	if err != nil {
+		return nil, fmt.Errorf("load decryption session: %w", err)
+	}
+	key, err := uc.crypto.UncompressPublicKey(session.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("uncompress election public key: %w", err)
+	}
+	return key, nil
 }
 
 // BallotDraft 是服务端为开发联调准备的选票草稿。
