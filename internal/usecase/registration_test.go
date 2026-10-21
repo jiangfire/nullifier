@@ -48,6 +48,11 @@ func (m *credentialIssuerMock) Issue(ctx context.Context, userID string, userPub
 	return credential, args.Error(1)
 }
 
+func (m *credentialIssuerMock) VerifyCredential(userID string, userPubKey []byte, signature []byte) error {
+	args := m.Called(userID, userPubKey, signature)
+	return args.Error(0)
+}
+
 var _ domaincrypto.CredentialIssuer = (*credentialIssuerMock)(nil)
 
 type credentialClaimRepositoryMock struct {

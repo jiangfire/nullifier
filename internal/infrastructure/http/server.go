@@ -38,7 +38,9 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 	engine.Use(middleware.ErrorHandler(logger))
 
 	engine.GET("/healthz", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
+		// debug 标志让门户知道「按选项生成凭据」这类开发联调能力是否可用。
+		// 它不是敏感信息：服务端是否处于调试模式本来就是公开事实。
+		c.JSON(200, gin.H{"status": "ok", "debug": cfg.DebugMode})
 	})
 
 	v1 := engine.Group("/api/v1")

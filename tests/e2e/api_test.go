@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,7 +62,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 
 	proofVerifier, err := crypto.NewGnarkProofVerifier("")
 	require.NoError(t, err)
-	encrypter := crypto.NewKyberElGamal()
+	encrypter := crypto.NewBallotThresholdCrypto()
 	issuer := crypto.NewKryptologyCredentialIssuerWithFile("", 0)
 	merkleBuilder := crypto.NewGnarkMerkleRootBuilder()
 
@@ -74,6 +75,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 		sessionRepo,
 		proofVerifier,
 		encrypter,
+		issuer,
 		logger,
 	)
 	registerUC := usecase.NewRegisterUseCase(credentialRepo, proposalRepo, issuer, logger)
@@ -86,11 +88,12 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 		resultRepo,
 		anchorRepo,
 		encrypter,
+		crypto.NewBallotNullifierGenerator(),
 		merkleBuilder,
 		logger,
 	)
 
-	handler := httpapi.NewHandlerWithTally(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
+	handler := httpapi.NewHandlerWithTallyAndMode(votingUC, registerUC, proposalUC, participationUC, tallyUC, true, logger)
 	server := httpapi.NewServer(&config.Config{
 		ServerAddress:    ":0",
 		GinMode:          "test",
@@ -157,7 +160,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	publicKey, err := base64.StdEncoding.DecodeString(setupResp.PublicKey)
 	require.NoError(t, err)
 
-	ciphertext, err := encrypter.Encrypt(publicKey, []byte("candidate-A"))
+	ciphertext, err := encrypter.Encrypt(publicKey, 0)
 	require.NoError(t, err)
 
 	require.NoError(t, db.Model(&entity.Proposal{}).
@@ -172,7 +175,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 		"proposal_id":          proposalResp.ID,
 		"encrypted_vote":       base64.StdEncoding.EncodeToString(ciphertext),
 		"proof":                base64.StdEncoding.EncodeToString(proofBytes),
-		"nullifier":            "null-e2e-1",
+		"nullifier":            strings.Repeat("a1", 32),
 		"user_id":              "u-1",
 		"user_pub_key":         credentialResp.UserPubKey,
 		"credential_signature": credentialResp.Signature,
@@ -197,7 +200,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	resp.Body.Close()
 
 	// 5) 同一用户再次投票（不同 nullifier）必须冲突
-	voteReq["nullifier"] = "null-e2e-2"
+	voteReq["nullifier"] = strings.Repeat("b2", 32)
 	resp = postJSON(t, ts.URL+"/api/v1/votes", voteReq)
 	require.Equal(t, http.StatusConflict, resp.StatusCode)
 	resp.Body.Close()
@@ -207,7 +210,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 		"proposal_id":          proposalResp.ID,
 		"encrypted_vote":       base64.StdEncoding.EncodeToString(ciphertext),
 		"proof":                base64.StdEncoding.EncodeToString(proofBytes),
-		"nullifier":            "null-e2e-3",
+		"nullifier":            strings.Repeat("c3", 32),
 		"user_id":              "u-2",
 		"user_pub_key":         credentialResp.UserPubKey,
 		"credential_signature": credentialResp.Signature,
@@ -308,7 +311,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 
 	proofVerifier, err := crypto.NewGnarkProofVerifier("")
 	require.NoError(t, err)
-	encrypter := crypto.NewKyberElGamal()
+	encrypter := crypto.NewBallotThresholdCrypto()
 	issuer := crypto.NewKryptologyCredentialIssuerWithFile("", 0)
 	merkleBuilder := crypto.NewGnarkMerkleRootBuilder()
 
@@ -321,6 +324,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 		sessionRepo,
 		proofVerifier,
 		encrypter,
+		issuer,
 		logger,
 	)
 	registerUC := usecase.NewRegisterUseCase(credentialRepo, proposalRepo, issuer, logger)
@@ -333,11 +337,12 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 		resultRepo,
 		anchorRepo,
 		encrypter,
+		crypto.NewBallotNullifierGenerator(),
 		merkleBuilder,
 		logger,
 	)
 
-	handler := httpapi.NewHandlerWithTally(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
+	handler := httpapi.NewHandlerWithTallyAndMode(votingUC, registerUC, proposalUC, participationUC, tallyUC, true, logger)
 	server := httpapi.NewServer(&config.Config{
 		ServerAddress:    ":0",
 		GinMode:          "test",
@@ -398,7 +403,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 			"starts_at": time.Now().UTC().Add(-5 * time.Minute),
 			"ends_at":   time.Now().UTC().Add(30 * time.Minute),
 		}).Error)
-	ciphertext, err := encrypter.Encrypt(publicKey, []byte("candidate-concurrent"))
+	ciphertext, err := encrypter.Encrypt(publicKey, 0)
 	require.NoError(t, err)
 	proofBytes := mustBuildProofBytes(t, 3, 35)
 
@@ -410,7 +415,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 
 	start := make(chan struct{})
 	results := make(chan submitResult, 2)
-	nullifiers := []string{"null-concurrent-1", "null-concurrent-2"}
+	nullifiers := []string{strings.Repeat("d4", 32), strings.Repeat("e5", 32)}
 	var wg sync.WaitGroup
 	for _, nullifier := range nullifiers {
 		wg.Add(1)

@@ -3,6 +3,7 @@ module anonvote
 go 1.25.4
 
 require (
+	github.com/cloudflare/circl v1.6.3
 	github.com/coinbase/kryptology v1.8.0
 	github.com/consensys/gnark v0.7.1
 	github.com/consensys/gnark-crypto v0.7.0
@@ -13,7 +14,6 @@ require (
 	github.com/google/wire v0.7.0
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
-	go.dedis.ch/kyber/v3 v3.1.0
 	go.uber.org/zap v1.27.1
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/driver/sqlite v1.6.0
@@ -31,7 +31,6 @@ require (
 	github.com/bytedance/sonic v1.15.0 // indirect
 	github.com/bytedance/sonic/loader v0.5.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.2.1 // indirect
-	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect

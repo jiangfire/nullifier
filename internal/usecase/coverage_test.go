@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,11 +15,11 @@ import (
 )
 
 func TestConstructors_DefaultLogger(t *testing.T) {
-	require.NotNil(t, NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil))
+	require.NotNil(t, NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, nil))
 	require.NotNil(t, NewRegisterUseCase(nil, nil, nil, nil))
 	require.NotNil(t, NewProposalUseCase(nil, nil))
 	require.NotNil(t, NewParticipationUseCase(nil, nil, nil))
-	require.NotNil(t, NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil))
+	require.NotNil(t, NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil, nil))
 }
 
 func TestSubmitVoteRequest_Validate(t *testing.T) {
@@ -30,7 +31,7 @@ func TestSubmitVoteRequest_Validate(t *testing.T) {
 
 	valid := SubmitVoteRequest{
 		ProposalID:          "p1",
-		Nullifier:           "n1",
+		Nullifier:           strings.Repeat("ab", 32),
 		EncryptedVote:       []byte("cipher"),
 		Proof:               &entity.Proof{Data: []byte("proof")},
 		UserID:              "u1",
@@ -104,11 +105,11 @@ func TestParticipationUseCase_HasVoted_RepoError(t *testing.T) {
 }
 
 func TestVotingUseCase_Submit_MissingDeps(t *testing.T) {
-	uc := NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil)
+	uc := NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	err := uc.Submit(context.Background(), &SubmitVoteRequest{})
 	require.Error(t, err)
 
-	uc = NewVotingUseCase(new(voteRepositoryMock), nil, nil, nil, nil, nil, nil, nil)
+	uc = NewVotingUseCase(new(voteRepositoryMock), nil, nil, nil, nil, nil, nil, nil, nil)
 	err = uc.Submit(context.Background(), &SubmitVoteRequest{})
 	require.Error(t, err)
 }

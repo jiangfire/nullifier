@@ -73,6 +73,7 @@ func TestProviders_WiringSmoke(t *testing.T) {
 		sessionRepo,
 		proofVerifier,
 		encrypter,
+		credentialIssuer,
 		logger,
 	)
 	registerUC := NewRegisterUseCase(
@@ -84,14 +85,14 @@ func TestProviders_WiringSmoke(t *testing.T) {
 	)
 	proposalUC := NewProposalUseCase(proposalRepo, logger)
 	participationUC := NewParticipationUseCase(participationRepo, credentialRepo, logger)
-	tallyUC := NewTallyUseCase(voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo, thresholdCrypto, merkleBuilder, logger)
+	tallyUC := NewTallyUseCase(voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo, thresholdCrypto, NewNullifierGenerator(), merkleBuilder, logger)
 	require.NotNil(t, votingUC)
 	require.NotNil(t, registerUC)
 	require.NotNil(t, proposalUC)
 	require.NotNil(t, participationUC)
 	require.NotNil(t, tallyUC)
 
-	handler := NewHTTPHandler(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
+	handler := NewHTTPHandler(cfg, votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
 	server := NewHTTPServer(cfg, handler, logger)
 	require.NotNil(t, server)
 	require.NotNil(t, server.Engine())
@@ -100,7 +101,7 @@ func TestProviders_WiringSmoke(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	server.Engine().ServeHTTP(resp, req)
 	require.Equal(t, http.StatusOK, resp.Code)
-	var body map[string]string
+	var body map[string]any
 	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &body))
 	require.Equal(t, "ok", body["status"])
 }

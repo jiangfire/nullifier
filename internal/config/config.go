@@ -13,8 +13,11 @@ import (
 )
 
 type Config struct {
-	ServerAddress               string
-	GinMode                     string
+	ServerAddress string
+	GinMode       string
+	// DebugMode 表示服务运行在开发联调模式。非 debug 模式下，
+	// ballot-draft 这类「服务端替用户选票」的调试能力一律不可达。
+	DebugMode                   bool
 	CORSAllowedOrigins          []string
 	AdminBearerToken            string
 	VerifyingKeyPath            string
@@ -107,6 +110,7 @@ func load(forMigration bool) (*Config, error) {
 	cfg := &Config{
 		ServerAddress:               v.GetString("server.address"),
 		GinMode:                     ginMode,
+		DebugMode:                   isDebugMode(ginMode),
 		CORSAllowedOrigins:          v.GetStringSlice("server.cors_allowed_origins"),
 		AdminBearerToken:            strings.TrimSpace(v.GetString("server.admin_bearer_token")),
 		VerifyingKeyPath:            v.GetString("crypto.vk_path"),
@@ -143,6 +147,19 @@ func load(forMigration bool) (*Config, error) {
 func requiresVerifyingKey(mode string) bool {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "release", "prod", "production":
+		return true
+	default:
+		return false
+	}
+}
+
+// isDebugMode 判断服务是否运行在开发联调模式。
+//
+// 只有显式的开发模式才开放调试能力：ballot-draft 这类端点会让服务端
+// 看到明文选项，生产环境不该可达。
+func isDebugMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "debug", "dev", "development":
 		return true
 	default:
 		return false

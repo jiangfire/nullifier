@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	domaincrypto "anonvote/internal/domain/crypto"
 	"anonvote/internal/domain/entity"
 	"anonvote/internal/domain/repository"
 
@@ -23,8 +24,11 @@ type ThresholdCrypto interface {
 	GenerateKeyPair() ([]byte, []byte, error)
 	SplitPrivateKey(privateKey []byte, threshold, trustees int) ([][]byte, error)
 	RecoverPrivateKey(shares [][]byte, threshold, trustees int) ([]byte, error)
-	Encrypt(publicKey []byte, plaintext []byte) ([]byte, error)
-	Decrypt(privateKey []byte, ciphertext []byte) ([]byte, error)
+	// Encrypt 用计票公钥加密选项下标。
+	Encrypt(publicKey []byte, optionIndex int) ([]byte, error)
+	// Decrypt 用计票私钥还原选项下标。numOptions 是提案的选项数，
+	// 解密方据此在选项集合里比对。
+	Decrypt(privateKey []byte, ciphertext []byte, numOptions int) (int, error)
 }
 
 type MerkleRootBuilder interface {
@@ -46,6 +50,7 @@ type TallyUseCase struct {
 	resultRepo    repository.TallyResultRepository
 	anchorRepo    repository.AuditAnchorRepository
 	crypto        ThresholdCrypto
+	nullifiers    domaincrypto.NullifierGenerator
 	merkleBuilder MerkleRootBuilder
 	logger        *zap.Logger
 }
@@ -57,6 +62,7 @@ func NewTallyUseCase(
 	resultRepo repository.TallyResultRepository,
 	anchorRepo repository.AuditAnchorRepository,
 	crypto ThresholdCrypto,
+	nullifiers domaincrypto.NullifierGenerator,
 	merkleBuilder MerkleRootBuilder,
 	logger *zap.Logger,
 ) *TallyUseCase {
@@ -70,6 +76,7 @@ func NewTallyUseCase(
 		resultRepo:    resultRepo,
 		anchorRepo:    anchorRepo,
 		crypto:        crypto,
+		nullifiers:    nullifiers,
 		merkleBuilder: merkleBuilder,
 		logger:        logger,
 	}
@@ -220,17 +227,14 @@ func (uc *TallyUseCase) PublishResult(
 	tally := make(map[string]int)
 	leaves := make([][]byte, 0, len(votes))
 	for _, vote := range votes {
-		plain, err := uc.crypto.Decrypt(privateKey, vote.Cipher)
+		index, err := uc.crypto.Decrypt(privateKey, vote.Cipher, len(proposal.Options))
 		if err != nil {
 			return nil, fmt.Errorf("decrypt vote %s: %w", vote.ID, err)
 		}
-		candidate := strings.TrimSpace(string(plain))
-		if candidate == "" {
-			return nil, fmt.Errorf("%w: empty candidate in vote %s", ErrInvalidRequest, vote.ID)
+		if index < 0 || index >= len(proposal.Options) {
+			return nil, fmt.Errorf("%w: option index %d in vote %s is not defined for proposal", ErrInvalidRequest, index, vote.ID)
 		}
-		if !proposalAllowsOption(proposal, candidate) {
-			return nil, fmt.Errorf("%w: option %q in vote %s is not defined for proposal", ErrInvalidRequest, candidate, vote.ID)
-		}
+		candidate := proposal.Options[index]
 		tally[candidate]++
 		leaves = append(leaves, buildVoteLeaf(vote))
 	}
@@ -350,16 +354,54 @@ func (uc *TallyUseCase) EncryptVoteOption(
 	if !proposalAllowsOption(proposal, candidate) {
 		return nil, fmt.Errorf("%w: option %q is not defined for proposal", ErrInvalidRequest, candidate)
 	}
+	index := proposalOptionIndex(proposal, candidate)
 
 	session, err := uc.sessionRepo.GetByProposal(ctx, proposalID)
 	if err != nil {
 		return nil, fmt.Errorf("load decryption session: %w", err)
 	}
-	cipher, err := uc.crypto.Encrypt(session.PublicKey, []byte(candidate))
+	cipher, err := uc.crypto.Encrypt(session.PublicKey, index)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt vote option: %w", err)
 	}
 	return cipher, nil
+}
+
+// BallotDraft 是服务端为开发联调准备的选票草稿。
+//
+// 这条路径只在 debug 模式下可达：服务端此时仍然知道选了哪个选项，
+// 因此它不是匿名的，客户端 prover 落地后会被删除。
+type BallotDraft struct {
+	// Option 是被选中的选项文本。
+	Option string
+	// EncryptedVote 是 v3 选票密文。
+	EncryptedVote []byte
+	// Nullifier 是规范编码的 nullifier。
+	Nullifier string
+}
+
+// PrepareBallotDraft 准备一份开发联调用的选票草稿。
+func (uc *TallyUseCase) PrepareBallotDraft(
+	ctx context.Context,
+	proposalID string,
+	option string,
+) (*BallotDraft, error) {
+	if uc.nullifiers == nil {
+		return nil, errors.New("nullifier generator is not configured")
+	}
+	cipher, err := uc.EncryptVoteOption(ctx, proposalID, option)
+	if err != nil {
+		return nil, err
+	}
+	nullifier, err := uc.nullifiers.GenerateNullifier()
+	if err != nil {
+		return nil, fmt.Errorf("generate nullifier: %w", err)
+	}
+	return &BallotDraft{
+		Option:        strings.TrimSpace(option),
+		EncryptedVote: cipher,
+		Nullifier:     nullifier,
+	}, nil
 }
 
 func (uc *TallyUseCase) validateDeps() error {
@@ -530,4 +572,21 @@ func proposalAllowsOption(proposal *entity.Proposal, candidate string) bool {
 		}
 	}
 	return false
+}
+
+// proposalOptionIndex 返回选项在提案选项列表里的下标。
+//
+// 选票密文加密的是下标而不是选项文本：下标是电路里可做范围检查的小整数，
+// 选项文本可能很长且不唯一。
+func proposalOptionIndex(proposal *entity.Proposal, candidate string) int {
+	if proposal == nil {
+		return -1
+	}
+	normalized := strings.TrimSpace(candidate)
+	for index, option := range proposal.Options {
+		if strings.TrimSpace(option) == normalized {
+			return index
+		}
+	}
+	return -1
 }

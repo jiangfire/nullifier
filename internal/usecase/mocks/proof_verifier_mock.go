@@ -35,15 +35,15 @@ func (m *MockProofVerifier) EXPECT() *MockProofVerifierMockRecorder {
 }
 
 // Verify mocks base method.
-func (m *MockProofVerifier) Verify(proof *entity.Proof, inputs entity.PublicInputs) error {
+func (m *MockProofVerifier) Verify(proof *entity.Proof, statement entity.BallotStatement) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Verify", proof, inputs)
+	ret := m.ctrl.Call(m, "Verify", proof, statement)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Verify indicates an expected call of Verify.
-func (mr *MockProofVerifierMockRecorder) Verify(proof, inputs interface{}) *gomock.Call {
+func (mr *MockProofVerifierMockRecorder) Verify(proof, statement interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Verify", reflect.TypeOf((*MockProofVerifier)(nil).Verify), proof, inputs)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Verify", reflect.TypeOf((*MockProofVerifier)(nil).Verify), proof, statement)
 }

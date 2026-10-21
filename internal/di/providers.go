@@ -101,11 +101,15 @@ func NewProofVerifier(cfg *config.Config) (domaincrypto.ProofVerifier, error) {
 }
 
 func NewEncrypter() domaincrypto.Encrypter {
-	return cryptoinfra.NewKyberElGamal()
+	return cryptoinfra.NewBallotThresholdCrypto()
 }
 
 func NewThresholdCrypto() usecase.ThresholdCrypto {
-	return cryptoinfra.NewKyberElGamal()
+	return cryptoinfra.NewBallotThresholdCrypto()
+}
+
+func NewNullifierGenerator() domaincrypto.NullifierGenerator {
+	return cryptoinfra.NewBallotNullifierGenerator()
 }
 
 func NewMerkleRootBuilder() usecase.MerkleRootBuilder {
@@ -127,6 +131,7 @@ func NewVotingUseCase(
 	sessionRepo repository.DecryptionSessionRepository,
 	verifier domaincrypto.ProofVerifier,
 	encrypter domaincrypto.Encrypter,
+	issuer domaincrypto.CredentialIssuer,
 	logger *zap.Logger,
 ) *usecase.VotingUseCase {
 	return usecase.NewVotingUseCase(
@@ -137,6 +142,7 @@ func NewVotingUseCase(
 		sessionRepo,
 		verifier,
 		encrypter,
+		issuer,
 		logger,
 	)
 }
@@ -173,6 +179,7 @@ func NewTallyUseCase(
 	resultRepo repository.TallyResultRepository,
 	anchorRepo repository.AuditAnchorRepository,
 	crypto usecase.ThresholdCrypto,
+	nullifiers domaincrypto.NullifierGenerator,
 	merkleBuilder usecase.MerkleRootBuilder,
 	logger *zap.Logger,
 ) *usecase.TallyUseCase {
@@ -183,12 +190,14 @@ func NewTallyUseCase(
 		resultRepo,
 		anchorRepo,
 		crypto,
+		nullifiers,
 		merkleBuilder,
 		logger,
 	)
 }
 
 func NewHTTPHandler(
+	cfg *config.Config,
 	votingUC *usecase.VotingUseCase,
 	registerUC *usecase.RegisterUseCase,
 	proposalUC *usecase.ProposalUseCase,
@@ -196,7 +205,19 @@ func NewHTTPHandler(
 	tallyUC *usecase.TallyUseCase,
 	logger *zap.Logger,
 ) *httpapi.Handler {
-	return httpapi.NewHandlerWithTally(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
+	debugMode := false
+	if cfg != nil {
+		debugMode = cfg.DebugMode
+	}
+	return httpapi.NewHandlerWithTallyAndMode(
+		votingUC,
+		registerUC,
+		proposalUC,
+		participationUC,
+		tallyUC,
+		debugMode,
+		logger,
+	)
 }
 
 func NewHTTPServer(cfg *config.Config, handler *httpapi.Handler, logger *zap.Logger) *httpapi.Server {

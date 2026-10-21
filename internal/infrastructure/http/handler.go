@@ -11,7 +11,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -22,6 +21,7 @@ type Handler struct {
 	participationUC *usecase.ParticipationUseCase
 	tallyUC         *usecase.TallyUseCase
 	validate        *validator.Validate
+	debugMode       bool
 	logger          *zap.Logger
 }
 
@@ -43,6 +43,22 @@ func NewHandlerWithTally(
 	tallyUC *usecase.TallyUseCase,
 	logger *zap.Logger,
 ) *Handler {
+	return NewHandlerWithTallyAndMode(votingUC, registerUC, proposalUC, participationUC, tallyUC, false, logger)
+}
+
+// NewHandlerWithTallyAndMode 装配 handler，并决定开发调试能力是否可达。
+//
+// debugMode 为 false 时，ballot-draft 端点按 404 处理 —— 用 404 而不是
+// 403，避免把端点存在性暴露出去。
+func NewHandlerWithTallyAndMode(
+	votingUC *usecase.VotingUseCase,
+	registerUC *usecase.RegisterUseCase,
+	proposalUC *usecase.ProposalUseCase,
+	participationUC *usecase.ParticipationUseCase,
+	tallyUC *usecase.TallyUseCase,
+	debugMode bool,
+	logger *zap.Logger,
+) *Handler {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -53,6 +69,7 @@ func NewHandlerWithTally(
 		participationUC: participationUC,
 		tallyUC:         tallyUC,
 		validate:        validator.New(),
+		debugMode:       debugMode,
 		logger:          logger,
 	}
 }
@@ -75,7 +92,6 @@ type submitVotePayload struct {
 	EncryptedVote       string `json:"encrypted_vote" validate:"required,base64"`
 	Proof               string `json:"proof" validate:"required,base64"`
 	Nullifier           string `json:"nullifier" validate:"required"`
-	PublicWitness       string `json:"public_witness" validate:"omitempty,base64"`
 	UserID              string `json:"user_id" validate:"required"`
 	UserPubKey          string `json:"user_pub_key" validate:"required,base64"`
 	CredentialSignature string `json:"credential_signature" validate:"required,base64"`
@@ -117,21 +133,11 @@ func (h *Handler) SubmitVote(c *gin.Context) {
 		c.Error(fmt.Errorf("%w: credential_signature must be base64", usecase.ErrInvalidRequest))
 		return
 	}
-	var publicWitness []byte
-	if payload.PublicWitness != "" {
-		publicWitness, err = base64.StdEncoding.DecodeString(payload.PublicWitness)
-		if err != nil {
-			c.Error(fmt.Errorf("%w: public_witness must be base64", usecase.ErrInvalidRequest))
-			return
-		}
-	}
-
 	req := &usecase.SubmitVoteRequest{
 		ProposalID:          payload.ProposalID,
 		EncryptedVote:       encryptedVote,
 		Proof:               &entity.Proof{Data: proofBytes},
 		Nullifier:           payload.Nullifier,
-		PublicWitness:       publicWitness,
 		UserID:              payload.UserID,
 		UserPubKey:          userPubKey,
 		CredentialSignature: credentialSignature,
@@ -408,6 +414,12 @@ type prepareBallotDraftPayload struct {
 const developmentProofBase64 = "ZGV2LXByb29m"
 
 func (h *Handler) PrepareBallotDraft(c *gin.Context) {
+	// 非 debug 模式按 404 处理：ballot-draft 让服务端拿明文选项去加密，
+	// 这条链路在生产环境不该存在，也不该暴露端点存在性。
+	if !h.debugMode {
+		c.Status(http.StatusNotFound)
+		return
+	}
 	if h.tallyUC == nil {
 		c.Error(fmt.Errorf("tally usecase is not configured"))
 		return
@@ -429,7 +441,7 @@ func (h *Handler) PrepareBallotDraft(c *gin.Context) {
 		return
 	}
 
-	cipher, err := h.tallyUC.EncryptVoteOption(c.Request.Context(), proposalID, payload.Option)
+	draft, err := h.tallyUC.PrepareBallotDraft(c.Request.Context(), proposalID, payload.Option)
 	if err != nil {
 		c.Error(err)
 		return
@@ -437,10 +449,10 @@ func (h *Handler) PrepareBallotDraft(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, gin.H{
 		"proposal_id":    proposalID,
-		"option":         payload.Option,
-		"encrypted_vote": base64.StdEncoding.EncodeToString(cipher),
+		"option":         draft.Option,
+		"encrypted_vote": base64.StdEncoding.EncodeToString(draft.EncryptedVote),
 		"proof":          developmentProofBase64,
-		"nullifier":      "null-" + uuid.NewString(),
+		"nullifier":      draft.Nullifier,
 	})
 }
 

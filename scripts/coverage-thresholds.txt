@@ -16,7 +16,9 @@ internal/di 89
 internal/infrastructure/http 78
 internal/infrastructure/http/middleware 89
 internal/infrastructure/crypto 76
+internal/infrastructure/crypto/ballot 80
 internal/infrastructure/persistence 58
 cmd/cli 81
+cmd/keygen 79
 cmd/server 75
 total 77

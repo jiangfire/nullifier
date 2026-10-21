@@ -25,6 +25,7 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		NewProofVerifier,
 		NewEncrypter,
 		NewThresholdCrypto,
+		NewNullifierGenerator,
 		NewMerkleRootBuilder,
 		NewCredentialIssuer,
 		NewVotingUseCase,

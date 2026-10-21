@@ -23,7 +23,6 @@ type SubmitVoteRequest struct {
 	EncryptedVote       []byte
 	Proof               *entity.Proof
 	Nullifier           string
-	PublicWitness       []byte
 	UserID              string
 	UserPubKey          []byte
 	CredentialSignature []byte
@@ -38,6 +37,9 @@ func (r *SubmitVoteRequest) Validate() error {
 	}
 	if r.Nullifier == "" {
 		return fmt.Errorf("%w: nullifier is required", ErrInvalidRequest)
+	}
+	if _, _, err := decodeNullifier(r.Nullifier); err != nil {
+		return fmt.Errorf("%w: invalid nullifier: %v", ErrInvalidRequest, err)
 	}
 	if len(r.EncryptedVote) == 0 {
 		return fmt.Errorf("%w: encrypted_vote is required", ErrInvalidRequest)
@@ -57,15 +59,55 @@ func (r *SubmitVoteRequest) Validate() error {
 	return nil
 }
 
-func (r *SubmitVoteRequest) PublicInputs() entity.PublicInputs {
-	inputs := entity.PublicInputs{
-		"proposal_id": []byte(r.ProposalID),
-		"nullifier":   []byte(r.Nullifier),
+// PublicInputs 拼装选票证明的公开输入。
+//
+// 公开输入全部来自服务端自己能拿到的材料：请求里的密文与 nullifier、
+// 提案的选项数、计票会话的公钥。客户端不提交公开输入，因此一份 proof
+// 只能用于它被生成的那份密文。
+func (r *SubmitVoteRequest) PublicInputs(
+	proposal *entity.Proposal,
+	session *entity.DecryptionSession,
+) (entity.BallotStatement, error) {
+	if proposal == nil {
+		return entity.BallotStatement{}, fmt.Errorf("%w: proposal is required", ErrInvalidRequest)
 	}
-	if len(r.PublicWitness) > 0 {
-		inputs["public_witness"] = append([]byte(nil), r.PublicWitness...)
+	if session == nil {
+		return entity.BallotStatement{}, fmt.Errorf("%w: decryption session is required", ErrInvalidRequest)
 	}
-	return inputs
+	nullifier, _, err := decodeNullifier(r.Nullifier)
+	if err != nil {
+		return entity.BallotStatement{}, fmt.Errorf("%w: invalid nullifier: %v", ErrInvalidRequest, err)
+	}
+	return entity.BallotStatement{
+		ProposalID:        r.ProposalID,
+		Nullifier:         nullifier,
+		ElectionPublicKey: append([]byte(nil), session.PublicKey...),
+		Ciphertext:        append([]byte(nil), r.EncryptedVote...),
+		NumOptions:        len(proposal.Options),
+	}, nil
+}
+
+// decodeNullifier 解析客户端提交的 nullifier：十六进制编码的域元素。
+//
+// 除了字节，还返回**规范形式**（64 位小写 hex）。客户端可以用大写或带
+// 空白的形式提交同一个 nullifier；如果原样落库，同一个 nullifier 就能
+// 占掉多行，绕过 `votes.nullifier` 的唯一索引 —— 防重投就失效了。
+//
+// 长度与规范性由验证器再查一遍，这里只做格式检查，避免把明显非法的输入
+// 送进密码学层。
+func decodeNullifier(value string) ([]byte, string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, "", errors.New("nullifier is empty")
+	}
+	raw, err := hex.DecodeString(trimmed)
+	if err != nil {
+		return nil, "", fmt.Errorf("decode nullifier: %w", err)
+	}
+	if len(raw) != entity.NullifierByteSize {
+		return nil, "", fmt.Errorf("nullifier must be %d bytes, got %d", entity.NullifierByteSize, len(raw))
+	}
+	return raw, hex.EncodeToString(raw), nil
 }
 
 type VotingUseCase struct {
@@ -76,6 +118,7 @@ type VotingUseCase struct {
 	sessionRepo       repository.DecryptionSessionRepository
 	verifier          domaincrypto.ProofVerifier
 	encrypter         domaincrypto.Encrypter
+	issuer            domaincrypto.CredentialIssuer
 	logger            *zap.Logger
 }
 
@@ -87,6 +130,7 @@ func NewVotingUseCase(
 	sessionRepo repository.DecryptionSessionRepository,
 	verifier domaincrypto.ProofVerifier,
 	encrypter domaincrypto.Encrypter,
+	issuer domaincrypto.CredentialIssuer,
 	logger *zap.Logger,
 ) *VotingUseCase {
 	if logger == nil {
@@ -100,6 +144,7 @@ func NewVotingUseCase(
 		sessionRepo:       sessionRepo,
 		verifier:          verifier,
 		encrypter:         encrypter,
+		issuer:            issuer,
 		logger:            logger,
 	}
 }
@@ -137,7 +182,7 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 	if !isProposalOpenForVoting(proposal, time.Now().UTC()) {
 		return fmt.Errorf("%w: proposal is not open for voting", ErrInvalidRequest)
 	}
-	_, err = uc.sessionRepo.GetByProposal(ctx, req.ProposalID)
+	session, err := uc.sessionRepo.GetByProposal(ctx, req.ProposalID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return fmt.Errorf("%w: decryption session is not ready", ErrInvalidRequest)
@@ -145,7 +190,11 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 		return fmt.Errorf("load decryption session: %w", err)
 	}
 
-	if err := uc.verifier.Verify(req.Proof, req.PublicInputs()); err != nil {
+	statement, err := req.PublicInputs(proposal, session)
+	if err != nil {
+		return err
+	}
+	if err := uc.verifier.Verify(req.Proof, statement); err != nil {
 		// 证明校验失败是客户端输入问题，必须映射到 400 而不是 500。
 		return fmt.Errorf("%w: invalid proof: %v", ErrInvalidRequest, err)
 	}
@@ -167,10 +216,26 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 	if !bytes.Equal(credential.Signature, req.CredentialSignature) {
 		return ErrInvalidCredential
 	}
+	// 凭证签名必须由签发方的公钥验签通过。只比对「库里存的签名」与
+	// 「请求里带的签名」是否逐字节相同是不够的：任何人拿一张合法凭证
+	// 换个 user_id 重放，都会通过那一比对。
+	if uc.issuer == nil {
+		return errors.New("credential issuer is not configured")
+	}
+	if err := uc.issuer.VerifyCredential(req.UserID, req.UserPubKey, req.CredentialSignature); err != nil {
+		return fmt.Errorf("%w: credential signature verification failed", ErrInvalidCredential)
+	}
 
 	userHash := hashUserID(req.UserID)
 
-	exists, err := uc.repo.ExistsByNullifier(ctx, req.Nullifier)
+	// 查重与落库都用**规范形式**。客户端可以用大写或带空白的形式提交同一个
+	// nullifier：如果原样落库，同一个 nullifier 就能占掉多行，
+	// `votes.nullifier` 的唯一索引拦不住 —— 防重投就形同虚设。
+	_, canonicalNullifier, err := decodeNullifier(req.Nullifier)
+	if err != nil {
+		return fmt.Errorf("%w: invalid nullifier: %v", ErrInvalidRequest, err)
+	}
+	exists, err := uc.repo.ExistsByNullifier(ctx, canonicalNullifier)
 	if err != nil {
 		return fmt.Errorf("check nullifier: %w", err)
 	}
@@ -188,7 +253,7 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 	vote := &entity.Vote{
 		ID:         uuid.NewString(),
 		ProposalID: req.ProposalID,
-		Nullifier:  req.Nullifier,
+		Nullifier:  canonicalNullifier,
 		Cipher:     req.EncryptedVote,
 		CreatedAt:  time.Now().UTC(),
 	}

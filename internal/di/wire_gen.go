@@ -31,6 +31,7 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		return nil, err
 	}
 	encrypter := NewEncrypter()
+	credentialIssuer := NewCredentialIssuer(cfg)
 	votingUseCase := NewVotingUseCase(
 		voteRepository,
 		participationRepository,
@@ -39,16 +40,17 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		decryptionSessionRepository,
 		proofVerifier,
 		encrypter,
+		credentialIssuer,
 		logger,
 	)
-	credentialIssuer := NewCredentialIssuer(cfg)
 	registerUseCase := NewRegisterUseCase(credentialRepository, proposalRepository, credentialIssuer, credentialClaimRepository, logger)
 	proposalUseCase := NewProposalUseCase(proposalRepository, logger)
 	participationUseCase := NewParticipationUseCase(participationRepository, credentialRepository, logger)
 	thresholdCrypto := NewThresholdCrypto()
+	nullifierGenerator := NewNullifierGenerator()
 	merkleRootBuilder := NewMerkleRootBuilder()
-	tallyUseCase := NewTallyUseCase(voteRepository, proposalRepository, decryptionSessionRepository, tallyResultRepository, auditAnchorRepository, thresholdCrypto, merkleRootBuilder, logger)
-	handler := NewHTTPHandler(votingUseCase, registerUseCase, proposalUseCase, participationUseCase, tallyUseCase, logger)
+	tallyUseCase := NewTallyUseCase(voteRepository, proposalRepository, decryptionSessionRepository, tallyResultRepository, auditAnchorRepository, thresholdCrypto, nullifierGenerator, merkleRootBuilder, logger)
+	handler := NewHTTPHandler(cfg, votingUseCase, registerUseCase, proposalUseCase, participationUseCase, tallyUseCase, logger)
 	server := NewHTTPServer(cfg, handler, logger)
 	return server, nil
 }

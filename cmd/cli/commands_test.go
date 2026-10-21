@@ -131,7 +131,7 @@ func TestRun_HTTPCommands(t *testing.T) {
 			args:    []string{"ballot-draft", "-proposal", "p1", "-option", "A"},
 			method:  http.MethodPost,
 			path:    "/api/v1/proposals/p1/ballot-draft",
-			resp:    `{"proposal_id":"p1","option":"A","encrypted_vote":"cipher","proof":"proof","nullifier":"n1","public_witness":"w"}`,
+			resp:    `{"proposal_id":"p1","option":"A","encrypted_vote":"cipher","proof":"proof","nullifier":"n1"}`,
 			wantOut: `"encrypted_vote": "cipher"`,
 		},
 		{

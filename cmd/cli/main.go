@@ -45,7 +45,6 @@ type ballotFile struct {
 	EncryptedVote  string `json:"encrypted_vote"`
 	Proof          string `json:"proof"`
 	Nullifier      string `json:"nullifier"`
-	PublicWitness  string `json:"public_witness,omitempty"`
 }
 
 // version 由构建时的 -ldflags "-X main.version=..." 注入。
@@ -274,7 +273,6 @@ func (c *cli) cmdBallotDraft(args []string) error {
 		EncryptedVote:  stringify(raw["encrypted_vote"]),
 		Proof:          stringify(raw["proof"]),
 		Nullifier:      stringify(raw["nullifier"]),
-		PublicWitness:  stringify(raw["public_witness"]),
 	}
 	if *outFile != "" {
 		if err := writeJSON(*outFile, ballot); err != nil {
@@ -318,9 +316,6 @@ func (c *cli) cmdVoteSubmit(args []string) error {
 		"user_id":              credential.UserID,
 		"user_pub_key":         credential.UserPubKey,
 		"credential_signature": credential.Signature,
-	}
-	if strings.TrimSpace(ballot.PublicWitness) != "" {
-		body["public_witness"] = ballot.PublicWitness
 	}
 	// 不发送 selected_option：服务端不消费这个字段，而明文选项上服务端
 	// 会抵消「选票是加密的」这个属性。

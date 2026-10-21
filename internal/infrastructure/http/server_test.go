@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,7 +61,7 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 		ServerAddress:    ":0",
 		GinMode:          gin.TestMode,
 		AdminBearerToken: "secret",
-	}, NewHandlerWithTally(nil, nil, nil, nil, nil, zap.NewNop()), zap.NewNop()).Engine()
+	}, NewHandlerWithTallyAndMode(nil, nil, nil, nil, nil, true, zap.NewNop()), zap.NewNop()).Engine()
 
 	cases := []struct {
 		method string
@@ -103,12 +104,13 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 }
 
 func TestHandler_InvalidPayload(t *testing.T) {
-	handler := NewHandlerWithTally(
-		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
+	handler := NewHandlerWithTallyAndMode(
+		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
 		usecase.NewProposalUseCase(nil, zap.NewNop()),
 		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
-		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
+		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
+		true,
 		zap.NewNop(),
 	)
 	engine := NewServer(&config.Config{
@@ -142,11 +144,10 @@ func TestHandler_InvalidPayload(t *testing.T) {
 				"proposal_id":          "p1",
 				"encrypted_vote":       base64.StdEncoding.EncodeToString([]byte("cipher")),
 				"proof":                base64.StdEncoding.EncodeToString([]byte("proof")),
-				"nullifier":            "n1",
-				"public_witness":       "%%%invalid-base64%%%",
+				"nullifier":            strings.Repeat("ab", 32),
 				"user_id":              "u1",
 				"user_pub_key":         base64.StdEncoding.EncodeToString([]byte("pub")),
-				"credential_signature": base64.StdEncoding.EncodeToString([]byte("sig")),
+				"credential_signature": "%%%invalid-base64%%%",
 			},
 		},
 		{
@@ -213,12 +214,13 @@ func TestHandler_InvalidPayload(t *testing.T) {
 }
 
 func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
-	handler := NewHandlerWithTally(
-		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
+	handler := NewHandlerWithTallyAndMode(
+		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
 		usecase.NewProposalUseCase(nil, zap.NewNop()),
 		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
-		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
+		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
+		true,
 		zap.NewNop(),
 	)
 	engine := NewServer(&config.Config{
@@ -351,6 +353,30 @@ func TestHandler_GetResult_NotFound(t *testing.T) {
 	engine, _, _ := buildFullStackEngine(t)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/proposals/not-exist/results", nil)
+	engine.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// TestHandler_BallotDraftHiddenOutsideDebugMode 覆盖 T1 的验收口径：
+// 非 debug 模式下 ballot-draft 按 404 处理，不用 403 是为了不暴露端点存在性。
+func TestHandler_BallotDraftHiddenOutsideDebugMode(t *testing.T) {
+	handler := NewHandlerWithTallyAndMode(
+		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
+		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
+		usecase.NewProposalUseCase(nil, zap.NewNop()),
+		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
+		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
+		false,
+		zap.NewNop(),
+	)
+	engine := NewServer(&config.Config{
+		ServerAddress:    ":0",
+		GinMode:          gin.TestMode,
+		AdminBearerToken: "secret",
+	}, handler, zap.NewNop()).Engine()
+
+	rec := httptest.NewRecorder()
+	req := jsonRequest(t, http.MethodPost, "/api/v1/proposals/p1/ballot-draft", map[string]any{"option": "A"})
 	engine.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
@@ -551,7 +577,7 @@ func doGetProposalCredentialStatuses(
 	return body.Items
 }
 
-func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.KyberElGamal, *gorm.DB) {
+func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.BallotThresholdCrypto, *gorm.DB) {
 	t.Helper()
 
 	proofVerifier, err := cryptoinfra.NewGnarkProofVerifier("")
@@ -564,7 +590,7 @@ func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.KyberElGamal,
 func buildFullStackEngineWithVerifier(
 	t *testing.T,
 	proofVerifier domaincrypto.ProofVerifier,
-) (*gin.Engine, *cryptoinfra.KyberElGamal, *gorm.DB) {
+) (*gin.Engine, *cryptoinfra.BallotThresholdCrypto, *gorm.DB) {
 	t.Helper()
 
 	db, err := persistence.NewDB(&persistence.DBConfig{
@@ -583,7 +609,7 @@ func buildFullStackEngineWithVerifier(
 	resultRepo := persistence.NewTallyResultRepository(db)
 	anchorRepo := persistence.NewAuditAnchorRepository(db)
 
-	encrypter := cryptoinfra.NewKyberElGamal()
+	encrypter := cryptoinfra.NewBallotThresholdCrypto()
 	issuer := cryptoinfra.NewKryptologyCredentialIssuerWithFile("", 0)
 	merkleBuilder := cryptoinfra.NewGnarkMerkleRootBuilder()
 
@@ -596,6 +622,7 @@ func buildFullStackEngineWithVerifier(
 		sessionRepo,
 		proofVerifier,
 		encrypter,
+		issuer,
 		logger,
 	)
 	registerUC := usecase.NewRegisterUseCaseWithPool(
@@ -607,9 +634,27 @@ func buildFullStackEngineWithVerifier(
 	)
 	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
-	tallyUC := usecase.NewTallyUseCase(voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo, encrypter, merkleBuilder, logger)
+	tallyUC := usecase.NewTallyUseCase(
+		voteRepo,
+		proposalRepo,
+		sessionRepo,
+		resultRepo,
+		anchorRepo,
+		encrypter,
+		cryptoinfra.NewBallotNullifierGenerator(),
+		merkleBuilder,
+		logger,
+	)
 
-	handler := NewHandlerWithTally(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
+	handler := NewHandlerWithTallyAndMode(
+		votingUC,
+		registerUC,
+		proposalUC,
+		participationUC,
+		tallyUC,
+		true,
+		logger,
+	)
 	server := NewServer(&config.Config{
 		ServerAddress:    ":0",
 		GinMode:          gin.TestMode,
