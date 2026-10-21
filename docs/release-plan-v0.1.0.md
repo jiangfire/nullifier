@@ -1,7 +1,7 @@
 # nullifier 发版计划 v0.1.0（内测版）
 
 > 配套文档：`docs/release-review-2026-10-20.md`（问题证据）、`docs/project-map.md`（上下文索引）
-> 分支：`release/v0.1.0-prep`（从 `main` @ `2398b00` 切出）
+> 分支：`release/v0.1.0-prep`（从 `main` @ `2398b00` 切出）—— **已 fast-forward 合并回 `main` @ `4c07cfb`，该分支已删除**；v0.1.0 的发版点由 tag `v0.1.0` 独立保留
 > 制定日期：2026-10-20
 
 ---
@@ -220,7 +220,7 @@ docs: restate the coverage badge and add the changelog
 
 ## 8. 落地状态（2026-10-20）
 
-M1–M8 的代码与文档**已全部落地**，分支 `release/v0.1.0-prep`（从 `main` @ `2398b00` 切出）。
+M1–M8 的代码与文档**已全部落地**，分支 `release/v0.1.0-prep`（从 `main` @ `2398b00` 切出，**已合并回 `main` @ `4c07cfb` 并删除**）。
 实际提交与计划略有出入（拆得更细），以提交为准：
 
 | 里程碑 | commit | 状态 |
