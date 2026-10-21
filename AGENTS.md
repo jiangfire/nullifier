@@ -32,7 +32,7 @@
 - `tests/` — `integration`（testcontainers + PG）、`e2e`、`testutil`；**单元测试不在这里**，而是与实现同包的 `_test.go`（如 `internal/usecase/tally_test.go`）
 - `web/` — Vue 3 + TypeScript + Rsbuild 单页门户（`src/App.vue` 只做外壳与引导编排，页面拆在 `src/components/panels/`，设计令牌在 `src/styles/`，后端错误文案映射在 `src/lib/error-messages.ts`）
 - `configs/` — `config.yaml`（开发）、`config.production.yaml`、`production.env.example`
-- `docs/` — `techspec.md`（当前实现口径，改接口/流程优先更新）、`project-map.md`（**分层项目地图 / 上下文索引**：子系统职责、关键文件、模式、陷阱、验证手册；改动前先读对应章节，不必通读全仓）、`release-plan-v0.1.0.md`（**v0.1.0 发版计划与落地状态**，当前发版）、`roadmap.md`（**产品路线图**：v0.2.0 的能力清单与完成定义、里程碑 M1–M3、决策门 G1–G9、工程细项附录；T3–T12 已落地）、`release-review-2026-10-20.md`（发版前整体 review：6 个 CRITICAL + 29 个 REQUIRED + 20 个 NIT 的完整证据与修复顺序）
+- `docs/` — `techspec.md`（当前实现口径，改接口/流程优先更新）、`project-map.md`（**分层项目地图 / 上下文索引**：子系统职责、关键文件、模式、陷阱、验证手册；改动前先读对应章节，不必通读全仓）、`release-plan-v0.1.0.md`（**v0.1.0 发版计划与落地状态**，当前发版）、`roadmap.md`（**产品路线图**：v0.2.0 的能力清单与完成定义、里程碑 M1–M3、决策门 G1–G9、工程细项附录；T3–T12 已落地）、`release-review-2026-10-20.md`（发版前整体 review：6 个 CRITICAL + 29 个 REQUIRED + 20 个 NIT 的完整证据与修复顺序）、`errata.md`（**勘误表**：已发布版本里的错误陈述；发现发布版本有问题时先查这里）
 - `scripts/` — 覆盖率门槛脚本；`.github/workflows/ci.yml` — CI 定义；`.github/workflows/release.yml` — tag 触发的发布流水线（原生构建 + 冒烟测试 + sha256 + GitHub Release）
 
 ## Code style

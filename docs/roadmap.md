@@ -500,5 +500,6 @@ feat(cli): add the credential-claim command
 |---|---|
 | [`docs/release-plan-v0.1.0.md`](./release-plan-v0.1.0.md) | v0.1.0 发版计划与落地状态（**当前发版**） |
 | [`docs/release-review-2026-10-20.md`](./release-review-2026-10-20.md) | 发版前整体 review：6 个 CRITICAL + 29 个 REQUIRED + 20 个 NIT 的完整证据 |
+| [`docs/errata.md`](./errata.md) | 勘误表：已发布版本里的错误陈述 |
 | [`docs/techspec.md`](./techspec.md) | 当前实现的接口与流程口径 |
 | [`docs/project-map.md`](./project-map.md) | 分层项目地图 / 上下文索引 |
