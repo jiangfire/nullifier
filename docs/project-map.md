@@ -18,7 +18,10 @@
 匿名投票系统：**发资格的人看不到选谁**（凭证与选票内容完全无关）→ **记选票的人看不到是谁**（votes 表无用户标识）→
 **验票真伪但不验身份**（零知识证明）。Go 后端（Gin + GORM + Wire）+ Vue 3 门户 + 复用同一套 HTTP API 的 CLI。
 
-技术栈：Go 1.25.4 · Gin 1.12 · GORM 1.31 · Wire · gnark 0.7 · circl blindrsa（kryptology 1.8）· kyber v3 · SQLite/PostgreSQL · Vue 3.5 + TypeScript 5.9 + Rsbuild
+技术栈：Go 1.25.4 · Gin 1.12 · GORM 1.31 · Wire · gnark 0.7.1（BN254：Groth16 + twisted Edwards）· circl blindrsa（kryptology 1.8）· SQLite/PostgreSQL · Vue 3.5 + TypeScript 5.9 + Rsbuild
+
+选票密码学栈（`internal/infrastructure/crypto/ballot/`）整体跑在 **BN254 twisted Edwards（jubjub）** 上：
+选票密文 v3、门限份额、零知识电路三者同曲线，服务端因此既能「拿不到明文选项」，又能「验证明真伪」。
 
 ---
 
@@ -28,19 +31,22 @@
 
 | 位置 | 职责 |
 |---|---|
-| `cmd/server/main.go` | 服务入口。加载配置 → 生成/校验 admin token → 建 logger → `di.InitializeServer` → `server.Run()` |
-| `cmd/cli/main.go` | 13 个子命令的 CLI 客户端，**只走 HTTP API**，不绕过服务端校验 |
-| `internal/di/providers.go` | 全部 Wire provider 的实现体（logger/db/各仓储/各 usecase/handler） |
-| `internal/di/wire.go` + `wire_gen.go` | Wire 声明与生成产物。**改依赖注入后需重跑 wire** |
-| `internal/config/config.go` | viper 加载 + 运行期校验 |
+| `cmd/server/main.go` | 服务入口。加载配置 → 生成/校验 admin token → 建 logger → `di.InitializeServer` → `server.Run()`；`-migrate` 只跑迁移后退出（`serve(migrateOnly)`） |
+| `cmd/keygen/main.go` | 生成选票电路的 Groth16 密钥：`verifying.key`（0644，服务端用）/ `proving.key`（0600，**只在客户端侧**）；打印 verifying key 的 sha256 指纹；默认不覆盖已有文件（`-force` 才覆盖） |
+| `cmd/cli/main.go` | 14 个子命令的 CLI 客户端，**只走 HTTP API**，不绕过服务端校验 |
+| `internal/di/providers.go` | 全部 Wire provider 的实现体（logger/db/各仓储/各 usecase/handler）；密码学的装配点在这里：`NewProofVerifier` `NewEncrypter` `NewThresholdCrypto` `NewNullifierGenerator` `NewCredentialIssuer` |
+| `internal/di/wire.go` + `wire_gen.go` | Wire 声明与生成产物。**当前是手工同步的**（见陷阱） |
+| `internal/config/config.go` | viper 加载 + 运行期校验；`server.mode` 推导 `Config.DebugMode`（`isDebugMode`），release/prod/production 走 `requiresVerifyingKey` |
 | `internal/config/admin_token.go` | admin bearer token 兜底生成（32 字节随机，base64url） |
 
 **模式**：usecase 构造函数是纯 DI 传参，无全局变量；logger 允许为 nil（自动降级 `zap.NewNop()`）。
 
 **陷阱**：
-- `cmd/server/main.go:44-48` —— **配置的 admin token 也会以 Info 级别写进日志**，不只是临时生成的 token。生产日志会长期持有这个密钥。
-- `internal/config/config.go:35` —— `server.mode` 默认值是 `release`，而 `release` 会**强制要求** `crypto.vk_path`（`config.go:90-92`）。配置文件缺失时服务直接启动失败，这是有意的兜底。
-- `internal/config/config.go:47-52` —— viper 只找名为 `config.*` 的文件（`SetConfigName("config")`）。**`configs/config.production.yaml` 永远不会被自动加载**，部署必须靠环境变量或把它复制成 `config.yaml`。
+- `cmd/server/main.go` 的 `serve()` —— **只有「临时生成」的 admin token 会进日志**（`generatedAdminToken` 分支的 Warn）；配置态的 token 不写日志。启动日志里有 `proof_verification_enabled` 字段，以及 `crypto.vk_path is empty` 的告警。
+- `internal/config/config.go` 的 `load()` —— `server.mode` 默认 `release`；release/prod/production **强制要求** `crypto.vk_path` **和** `server.admin_bearer_token`（`requiresVerifyingKey`）。配置文件缺失时服务直接启动失败，这是有意的兜底。
+- `internal/config/config.go` 的 `load()` —— viper 只找名为 `config.*` 的文件（`SetConfigName("config")`）。**`configs/config.production.yaml` 永远不会被自动加载**，部署必须靠环境变量或把它复制成 `config.yaml`。
+- **`internal/di/wire_gen.go` 目前是手工同步的**：本仓库离线跑不了 wire 生成器（`go.sum` 里 `github.com/google/subcommands` 只有 `/go.mod` 哈希，缺模块内容哈希，`go run github.com/google/wire/cmd/wire` 需要联网补依赖）。改了 `internal/di/wire.go` 必须**手工**改 `wire_gen.go`，provider 的声明顺序与实参顺序要一起对齐。
+- `go.mod` 里还留着 `go.dedis.ch/kyber/v3`，但仓库里已经**没有任何 Go 文件引用它**（`kyber_elgamal.go` 已删）；`go mod tidy` 会把它摘掉。
 
 ### 1.2 领域层 —— `internal/domain/`
 
@@ -48,9 +54,15 @@
 
 | 子包 | 内容 |
 |---|---|
-| `domain/entity/` | `Proposal` `Vote` `Credential` `VoteParticipation` `DecryptionSession` `TallyResult` `AuditAnchor` `Proof` |
-| `domain/repository/` | 7 个仓储接口 + `errors.go`（`ErrNotFound` `ErrDuplicateVote` `ErrDuplicateParticipation`） |
-| `domain/crypto/` | 3 个接口：`ProofVerifier` `Encrypter` `CredentialIssuer` |
+| `domain/entity/` | `Proposal` `Vote` `Credential` `CredentialClaim` `VoteParticipation` `DecryptionSession` `TallyResult` `AuditAnchor` `Proof` `BallotStatement` |
+| `domain/repository/` | 8 个仓储接口 + `errors.go`（`ErrNotFound` `ErrDuplicateVote` `ErrDuplicateParticipation`） |
+| `domain/crypto/` | 4 个接口：`ProofVerifier` `Encrypter` `CredentialIssuer` `NullifierGenerator` |
+
+**本轮的关键类型变更**：
+- `domain/entity/proof.go` 的 `BallotStatement` 取代了旧的 `PublicInputs`：它是**服务端拼装**的公开输入声明（`ProposalID` `Nullifier` `ElectionPublicKey` `Ciphertext` `NumOptions`）。客户端不提交公开输入。
+- `domain/crypto/proof_verifier.go`：`Verify(proof *entity.Proof, statement entity.BallotStatement) error` —— 不再接受客户端自由提交的公开输入。
+- `domain/crypto/credential_issuer.go`：`CredentialIssuer` 增加 `VerifyCredential(userID, userPubKey, signature)`；投票路径落库前必须调用它。
+- `domain/crypto/nullifier.go`：`NullifierGenerator.GenerateNullifier() (string, error)` —— 要求 nullifier 的**编码规范唯一**（见 §3 陷阱 2）。
 
 **模式**：GORM tag 直接写在实体上（`entity.Vote` 的 `Nullifier` 是 `uniqueIndex`，`entity.VoteParticipation` 的 `(proposal_id, user_hash)` 是复合 `uniqueIndex:idx_vote_participation`）。数据库唯一约束是防重投的**最终防线**，不是 usecase 里的先查后写。
 
@@ -63,20 +75,27 @@
 | 用例 | 文件 | 负责 |
 |---|---|---|
 | `ProposalUseCase` | `proposal.go` | 创建/列表；创建时去重、去空、校验 ≥2 选项、`ends_at > starts_at`；新提案 `Status` 固定为 `open` |
-| `RegisterUseCase` | `registration.go` | 签发凭证；先查 `(proposal_id, user_id)` 是否已发过 |
+| `RegisterUseCase` | `registration.go` | 签发凭证；凭证池 + 投票人匿名领取 |
 | `VotingUseCase` | `voting.go` | **核心**。见 §2.1 投票链路 |
 | `ParticipationUseCase` | `participation.go` | 「你投过票吗」；`HasVotedWithCredential` 必须带凭证材料 |
 | `TallyUseCase` | `tally.go` | 门限会话初始化、发布结果、审计锚点。见 §2.2 计票链路 |
 
+**投票路径的两个新环节**：
+- `SubmitVoteRequest.PublicInputs(proposal, session)` —— 用**请求字段 + 提案 + 计票会话**拼出 `entity.BallotStatement`。客户端不提交公开输入，因此一份 proof 只能用于它被生成的那份密文。
+- `decodeNullifier` —— 请求侧早期校验：十六进制可解码 + 恰好 32 字节（`entity.NullifierByteSize`）。**规范编码的检查在密码学层**（`ballot.ParseScalarHex` / `ballot.BuildPublicInputs`）。
+- `issuer.VerifyCredential(userID, userPubKey, signature)` —— 落库前验签；失败 → `ErrInvalidCredential` → HTTP 401。
+
+**计票链路的密码学口径变了**：`tally.go` 的 `ThresholdCrypto` 接口现在是 `Encrypt(publicKey []byte, optionIndex int)` / `Decrypt(privateKey, ciphertext []byte, numOptions int) (int, error)` —— 加密与解密的单位是**选项下标**，不是任意明文。
+
 **模式**：错误用 `fmt.Errorf("%w: ...", ErrXxx)` 包装 `internal/usecase/errors.go` 里的哨兵错误；HTTP 层靠 `errors.Is` 映射状态码。
 
-**陷阱**：`voting.go:205-219` 有**两条保存路径**——仓储实现了 `atomicVoteParticipationSaver` 就走事务（`SaveWithParticipation`），否则退化成先存票再存参与状态的非原子路径。目前 GORM 仓储实现了事务路径，mock 仓储没有。
+**陷阱**：`voting.go` 有**两条保存路径**——仓储实现了 `atomicVoteParticipationSaver` 就走事务（`SaveWithParticipation`），否则退化成先存票再存参与状态的非原子路径。目前 GORM 仓储实现了事务路径，mock 仓储没有。
 
 ### 1.4 HTTP 层 —— `internal/infrastructure/http/`
 
 | 文件 | 职责 |
 |---|---|
-| `server.go` | 建 engine、挂 4 个中间件、注册公共组与 admin 组 |
+| `server.go` | 建 engine、挂 4 个中间件、注册公共组与 admin 组；`GET /healthz` 返回 `{"status":"ok","debug":<bool>}` |
 | `handler.go` | 全部 handler；DTO 定义与绑定都在这里 |
 | `middleware/admin_auth.go` | Bearer Token 鉴权 |
 | `middleware/cors.go` | 白名单 Origin 精确匹配 |
@@ -84,7 +103,7 @@
 | `middleware/recovery.go` | panic 兜底 |
 | `middleware/request_logger.go` | 请求日志（只记 method/path/status/latency/ip，**不记 header 和 body**） |
 
-**路由表**（`server.go:39-52`）：
+**路由表**（`server.go` 的 `NewServer` + `handler.go` 的 `RegisterRoutes`）：
 
 | 方法 | 路径 | 鉴权 |
 |---|---|---|
@@ -93,57 +112,90 @@
 | GET | `/api/v1/proposals` | 无 |
 | GET | `/api/v1/proposals/open` | 无 |
 | POST | `/api/v1/proposals/:id/vote-status` | 无（需凭证材料） |
-| POST | `/api/v1/proposals/:id/ballot-draft` | 无（**开发联调专用**） |
+| POST | `/api/v1/proposals/:id/ballot-draft` | 无（**仅 debug 模式**，否则 404） |
+| POST | `/api/v1/proposals/:id/credentials/claim` | 无（匿名领取凭证） |
 | GET | `/api/v1/proposals/:id/results` | 无 |
 | GET | `/api/v1/proposals/:id/audit-anchors` | 无 |
 | POST | `/api/v1/credentials` | **admin** |
 | POST | `/api/v1/proposals` | **admin** |
 | GET | `/api/v1/proposals/:id/credentials` | **admin** |
+| POST | `/api/v1/proposals/:id/credentials/pool` | **admin**（备凭证池） |
 | POST | `/api/v1/proposals/:id/decryption/setup` | **admin** |
 | POST | `/api/v1/proposals/:id/results/publish` | **admin** |
 
 **模式**：handler 里 payload 结构体用 `validate:"..."` tag 校验，绑定失败统一 `c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))`，由 error_handler 统一出参。
 
+**本轮的接口变更**：
+- `submitVotePayload` **没有 `public_witness` 字段** —— 旧的「客户端自由提交公开输入」入口彻底消失，公开输入由服务端拼装。
+- `PrepareBallotDraft`：`h.debugMode` 为 false 时直接 `c.Status(http.StatusNotFound)` —— 用 **404 而不是 403**，避免把端点存在性暴露出去。响应体只有 `proposal_id` `option` `encrypted_vote` `proof`（开发占位常量 `developmentProofBase64`）`nullifier`。
+- `NewHandlerWithTallyAndMode(..., debugMode bool, ...)` 是 handler 的装配入口；`debugMode` 由 `config.Config.DebugMode` 传进来。
+
 **陷阱**：
-- `middleware/admin_auth.go:27` 用 `!=` 做字符串比较，**不是常数时间比较**。
-- `middleware/error_handler.go:68-69` —— `INVALID_REQUEST` 直接回 `err.Error()`，会把内部错误细节透出；其他 code 都做了归一化。改文案时注意前后端 `error-messages.ts` 的映射是按英文短语正则匹配的。
-- 错误码枚举是**前后端契约**：`INVALID_REQUEST` `NOT_FOUND` `UNAUTHORIZED` `DOUBLE_VOTING` `CREDENTIAL_EXISTS` `USER_ALREADY_VOTED` `INVALID_CREDENTIAL` `DECRYPTION_SESSION_EXISTS` `RESULT_ALREADY_PUBLISHED` `INTERNAL_ERROR`。
+- `middleware/admin_auth.go` 用 `!=` 做字符串比较，**不是常数时间比较**。
+- `middleware/error_handler.go` 的 `publicErrorMessage` —— `INVALID_REQUEST` 直接回 `err.Error()`，会把内部错误细节透出；其他 code 都做了归一化。改文案时注意前后端 `error-messages.ts` 的映射是按英文短语正则匹配的。
+- 错误码枚举是**前后端契约**：`INVALID_REQUEST` `NOT_FOUND` `UNAUTHORIZED` `DOUBLE_VOTING` `CREDENTIAL_EXISTS` `CREDENTIAL_POOL_EMPTY` `USER_ALREADY_VOTED` `INVALID_CREDENTIAL` `DECRYPTION_SESSION_EXISTS` `RESULT_ALREADY_PUBLISHED` `INTERNAL_ERROR`。
 
 ### 1.5 持久化层 —— `internal/infrastructure/persistence/`
 
 | 文件 | 职责 |
 |---|---|
-| `db.go` | SQLite / PostgreSQL 连接 |
-| `db_env.go` | 从环境变量读 DB 配置（`DB_DRIVER` 等） |
+| `db.go` | SQLite / PostgreSQL 连接（`NewDB` `newPostgresDB` `newSQLiteDB` `applyPoolConfig`） |
+| `db_env.go` | 从环境变量读 DB 配置（`DB_DRIVER` 等，`GetDBConfigFromEnv`） |
 | `base.go` | 泛型仓储基类（`BaseRepository[T]`） |
-| `migration.go` | `AutoMigrate` + 历史 schema 兼容迁移 |
-| `*_repository.go` | 7 个仓储实现 |
+| `migration.go` | `AutoMigrate` + `SchemaReady` + 历史 schema 兼容迁移（`migrateLegacyCredentialSchema`） |
+| `*_repository.go` | 8 个仓储实现（vote / proposal / credential / credential_claim / participation / decryption_session / tally_result / audit_anchor） |
 
 **模式**：仓储接口方法签名都带 `ctx`；`SaveWithParticipation` 用 `clause.OnConflict{DoNothing}` + `RowsAffected == 0` 检测重复参与，冲突时返回 `ErrDuplicateParticipation`。
 
 **陷阱**：
-- `db.go:40-53` —— PostgreSQL 的**连接池参数**由 `db.max_open_conns` / `db.max_idle_conns` / `db.conn_max_lifetime_seconds` 配置（默认 25 / 5 / 3600 秒），为 0 表示不改动 `database/sql` 默认值。
-- `db.go:56-63` —— SQLite 文件库**没开 WAL**，也没设 busy timeout。
-- `migration.go:26-28` —— 每次迁移都会回填 `options_json`（`WHERE options_json IS NULL OR = ''` → `'[]'`）。**release 模式启动不再自动迁移**，改表要走独立的 `nullifier-server -migrate` 步骤（`config.AutoMigrate`）。
-- `db_env.go:23-25` —— `GO_ENV=test` 时 SQLite 强制切 `:memory:`。
+- `db.go` 的 `applyPoolConfig` —— PostgreSQL 的**连接池参数**由 `db.max_open_conns` / `db.max_idle_conns` / `db.conn_max_lifetime_seconds` 配置（默认 25 / 5 / 3600 秒），为 0 表示不改动 `database/sql` 默认值。
+- `db.go` 的 `newSQLiteDB` —— SQLite 文件库**没开 WAL**，也没设 busy timeout。
+- `migration.go` 的 `AutoMigrate` —— 每次迁移都会回填 `options_json`（`WHERE options_json IS NULL OR = ''` → `'[]'`）。**release 模式启动不再自动迁移**，改表要走独立的 `nullifier-server -migrate` 步骤（`config.AutoMigrate` / `di.Migrate`）。
+- `db_env.go` 的 `GetDBConfigFromEnv` —— `GO_ENV=test` 时 SQLite 强制切 `:memory:`。
 
 ### 1.6 密码学层 —— `internal/infrastructure/crypto/`
 
-| 文件 | 实现 | 依赖 |
-|---|---|---|
-| `gnark_proof_verifier.go` | Groth16 验证 | gnark / gnark-crypto |
-| `kyber_elgamal.go` | 自实现 ElGamal 封装（edwards25519 + HMAC-SHA256 + SHA256-CTR keystream）+ Shamir 门限 | kyber v3 的曲线与 `share` 包 |
-| `kryptology_credential_issuer.go` | RFC9474 RSABSSA 签发、密钥版本轮换、落盘 | circl `blindsign/blindrsa` |
-| `merkle_root.go` | Merkle root | gnark-crypto `merkletree` |
+**`crypto/ballot/` —— 选票密码学栈（本轮新增，是选票能力的事实核心）**
 
-**模式**：密钥材料统一 `append([]byte(nil), ...)` 拷贝后返回，不外泄内部 slice；issuer 落盘权限 `0o600`（`kryptology_credential_issuer.go:358`）。
+| 文件 | 内容 |
+|---|---|
+| `ballot/group.go` | 曲线点与标量工具：`Point`（仿射坐标）、`parsePoint`（**在曲线上 + 在素数阶子群里**）、`scalarMul`、随机标量采样 |
+| `ballot/keys.go` | 计票密钥对（`GenerateKeyPair`）、**Fr 上的 Shamir 拆份额 / 恢复**（`SplitSecret` `RecoverSecret`）；份额编码 = **4 字节下标（大端 uint32）+ 32 字节取值** |
+| `ballot/cipher.go` | **v3 选票密文**：`EncryptBallot` / `DecryptBallotOption` / `ValidateBallotCiphertext` / `parseCiphertext` |
+| `ballot/nullifier.go` | `DeriveProposalField`（SHA-256 → Fr）、`DeriveNullifier`（**MiMC**）、`mimcHash`（与 gnark `std/hash/mimc` 逐位一致的镜像实现） |
+| `ballot/encoding.go` | `EncodeScalarHex` / `ParseScalarHex`（**拒绝式**规范编码检查）/ `GenerateNullifierSecret` |
+| `ballot/circuit.go` | 真实 Groth16 选票电路 `ballotCircuit` + `assertLessThan`（8 位分解的范围检查） |
+| `ballot/statement.go` | `PublicInputs`（电路公开输入的域元素形式）与 `BuildPublicInputs(statement entity.BallotStatement)` |
+| `ballot/prover.go` | `Prover`（`NewProver` / `Prove`）、`Verifier`（`NewVerifier` / `Verify`）、`GenerateKeys`、`compileCircuit` |
+
+**密文格式 v3**：1 字节版本 `0x03` + 两个压缩点（各 32 字节）= **65 字节**。
+密文是指数 ElGamal `(a, b) = (r·G, m·G + r·Y)`，其中 `m` 是**选项下标**、`r` 是一次性随机数、`Y` 是提案的计票公钥。
+解密是 `b - X·a = m·G`，再在提案的选项集合里逐个比对出 `m`。
+
+**电路形状**（`ballot/circuit.go`）：公开输入 **9 个**（提案 ID 域元素、nullifier、计票公钥 XY、密文 a 的 XY、密文 b 的 XY、选项数），私有见证 **3 个**（选项下标 `m`、随机数 `r`、nullifier 秘密）。约束三条：`a = r·G`、`b = m·G + r·Y`、`m < NumOptions`（8 位分解 + 最高位检查）、`nullifier = MiMC(secret, proposal_id)`。实测 **7917 条约束**，证明与验证都是毫秒量级（本机实测证明约 20ms、验证约 1–2ms）。
+
+**对外适配层**
+
+| 文件 | 内容 |
+|---|---|
+| `crypto/gnark_proof_verifier.go` | `GnarkProofVerifier`：实现 `domaincrypto.ProofVerifier`；`vk_path` 为空时走 `skipVerify` 分支 |
+| `crypto/ballot_threshold_crypto.go` | `BallotThresholdCrypto`：同时实现 `domaincrypto.Encrypter` 与 `usecase.ThresholdCrypto` |
+| `crypto/ballot_nullifier.go` | `BallotNullifierGenerator`：实现 `domaincrypto.NullifierGenerator` |
+| `crypto/kryptology_credential_issuer.go` | RFC9474 RSABSSA 签发、**`VerifyCredential` 验签**、密钥版本轮换、落盘 |
+| `crypto/merkle_root.go` | Merkle root（`GnarkMerkleRootBuilder`） |
+| `cmd/keygen/main.go` | 选票电路密钥生成（见 §1.1） |
+
+**模式**：密钥材料统一 `append([]byte(nil), ...)` 拷贝后返回，不外泄内部 slice；issuer 落盘权限 `0o600`。
 
 **陷阱**：
-- `gnark_proof_verifier.go:25-31` —— **`vk_path` 为空时 `Verify` 直接 `return nil`**，任何非空 proof 都通过。`requireVerifyMode` 只由 vk_path 是否为空决定。
-- `gnark_proof_verifier.go:64-67` —— 加载 vk 后，`public_witness` 是**必填**，缺失即验证失败。
-- `kyber_elgamal.go` —— 密钥派生用 **HKDF-SHA256**（`crypto/hkdf`），salt 每次加密随机生成并随密文传输，info 绑定协议版本、用途与双方公钥。密文格式 **v2**（v0.1.0 起即 v2），v1 密文会被直接拒绝。
-- `kryptology_credential_issuer.go:163-179` —— 盲签名全流程在**服务端内部**完成（服务端自己 Blind 再 Finalize），客户端不参与。
-- `kryptology_credential_issuer.go:194` `VerifyCredential` —— **生产路径从不调用**，只有单测调用。投票时是拿提交的签名和库里存的签名做 `bytes.Equal` 比对（`voting.go:166`）。
+- `gnark_proof_verifier.go` 的 `NewGnarkProofVerifier` —— **`vk_path` 为空时 `Verify` 直接 `return nil`**，任何非空 proof 都通过。release 模式强制要求 `crypto.vk_path`，这条分支只在开发模式生效。
+- `ballot/group.go` 的 `parsePoint` —— **子群检查不能省**：BN254 twisted Edwards 的余因子是 8，小阶点会让解密方泄漏私钥低位比特。所有外部点（密文里的两个点、计票公钥）都要过 `isInSubGroup`。
+- `ballot/circuit.go` —— **公开输入里绝不能有选项下标**（见 §3 陷阱 1）。
+- `ballot/nullifier.go` 的 `mimcHash` —— 必须与 gnark `std/hash/mimc` 逐位一致（见 §3 陷阱 4）。
+- `ballot/encoding.go` 的 `ParseScalarHex` —— 与 `fr.Element.SetBytes` 的区别就在这里：后者按模归约，前者拒绝非规范编码（见 §3 陷阱 2）。
+- **密文格式 v2 → v3 与 v0.1.0 不兼容**：v2 是 ed25519 上的 DH 混合封装（HKDF-SHA256 派生），v3 是 BN254 twisted Edwards 上的指数 ElGamal。旧密文解不开，也不该再用于真实投票。`kyber_elgamal.go` 已删除。
+- `kryptology_credential_issuer.go` 的 `Issue` —— 盲签名全流程在**服务端内部**完成（服务端自己 Blind 再 Finalize），客户端不参与。
+- `kryptology_credential_issuer.go` 的 `VerifyCredential` —— 校验凭证签名，**按 key version 从新到旧逐个试**；投票路径落库前调用它（这是能力 E 的落点）。
 
 ### 1.7 前端门户 —— `web/`
 
@@ -153,20 +205,25 @@
 | `src/components/panels/` | 7 个页面：`OverviewPanel` `SetupPanel` `ReferencePanel` `HallPanel` `IdentityPanel` `VotePanel` `OpsPanel` |
 | `src/components/` | `AppSidebar` `AppTopbar` `GuideOverlay` `JourneyBar` `NoticeStack` |
 | `src/components/ui/` | `EmptyState` `NoticeBanner` `StatTile` |
-| `src/composables/useVotePortal.ts` | **全部状态与 API 编排**（单文件约 1600 行，是前端的事实核心） |
-| `src/lib/` | `api.ts` `error-messages.ts` `portal-view.ts` `navigation.ts` `options.ts` `datetime.ts` —— **只有这 6 个模块有单测** |
+| `src/composables/useVotePortal.ts` | **全部状态与 API 编排**（单文件约 1800 行，是前端的事实核心） |
+| `src/lib/` | `api.ts` `ballot.ts` `datetime.ts` `error-messages.ts` `focus-trap.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` —— 除 `api.ts` 外都有单测 |
 | `src/styles/` | `tokens.css` `base.css` `components.css` `shell.css` |
 | `src/types/` | `portal.ts` `portal-api.ts` |
 
 **模式**：设计令牌在 `styles/tokens.css`，组件只引用变量不写裸色值；视图推导（工作区归属/标题/引导步进）集中在 `lib/portal-view.ts`。
 
+**本轮的 debug 门控**：
+- `useVotePortal.ts` 的 `readDebugFlag` 从 `GET /healthz` 的响应里读 `debug` 字段 → `debugMode` ref。
+- `VotePanel.vue` 的「按选项生成凭据」按钮整块包在 `v-if="portal.debugMode"` 里；非 debug 模式改为提示文案（说明这条入口会让服务端看到选项）。
+- 门户**不再发送** `selected_option`，也**不再发送** `public_witness`（服务端本来就不消费前者）。
+- `web/src/lib/nullifier.ts` 的 `generateNullifier` —— 生成 32 字节随机数后**按模 r 归约**，输出 64 位小写十六进制，保证是规范域元素编码。
+
 **陷阱**：
 - `lib/api.ts` 是唯一的 HTTP 出口，返回 `{ok, status, data, error, code, rawText}`；错误文案统一走 `lib/error-messages.ts` 的 `describeApiError(message, code, fallback)`，优先级 **业务短语 > 错误码 > 调用方兜底**。
-- `useVotePortal.ts:757-807` 的 `prepareBallotByOption` 调的是后端 `ballot-draft`，拿到的是**开发用假 proof**。生产模式下这条路径拿不到可验证的 proof。
-- **凭据与当前选项不绑定**：切换选项没有任何 watcher 去清空 `encryptedVote`/`proof`（`grep "watch(selectedVoteOption"` 无命中），而提交时后端**不读** `selected_option`（`submitVotePayload` 无此字段）。→ 改了选项直接提交，计的是旧选项。
-- **admin token 明文存 `localStorage`**（`:32` 键名、`:259-261` 读、`:1491-1493` 每次按键写）。
-- **`hasVoted` 跨提案不重置**：`watch(selectedProposalId)`（`:1495-1501`）没清它 → 换个提案面板还显示「你已投过」。
-- **门户的匿名性文案与服务端行为相反**：`VotePanel.vue:250-252` 说「计票前不会知道你选了谁」，但 `ballot-draft` 是服务端拿明文选项去加密的（`handler.go:338` → `tally.go:358`）—— 服务端在生成凭据时就看到了选项。
+- **凭据与选项的绑定已经补上**：`lib/ballot.ts` 的 `hasBallotTargetDrifted` / `isBallotTargetCurrent` + `useVotePortal.ts` 里选项/提案变化的 watcher（清空 `encryptedVote` / `proof`）+ 提交前的 `ballotTargetCurrent` 校验。改了选项必须重新生成凭据。
+- **admin token 存 `sessionStorage`**（不落 `localStorage`），但仍是明文；同源脚本能读到。
+- **`ballot-draft` 在非 debug 模式返回 404**：门户此时拿不到任何可提交的密文/证明 —— **浏览器端 prover 还没做**（见 §5）。
+- **门户的匿名性文案仍与服务端能力有落差**：非 debug 模式下的提示文案说「正式客户端会在浏览器本地生成密文与证明」，但客户端 prover 尚未落地。
 - `.vue` 面板**零测试**。改面板只能靠 `tsc` + lint + 手工验证。
 - `pnpm run format`（prettier）会重写 `.pnpm-store`，必须先确认 `.prettierignore` 覆盖（当前已覆盖 `.pnpm-store/`）。
 
@@ -179,47 +236,56 @@
 
 **陷阱**：
 - CLI 输出是纯文本命令结果，**不做中文本地化**（与前端相反，是有意为之）。
-- **URL 路径二次转义**：`main.go:563` 把已 `url.PathEscape` 过的 path 塞进 `base.Path`，`url.URL.String()` 会再转义一次（`%` → `%25`）。含空格 / `/` / `%` 的 proposal id 必然 404。实测：`result-get -proposal "a b/c"` → `/api/v1/proposals/a%2520b%252Fc/results`。
-- **`vote-submit` 会多发一个 `selected_option` 字段**（`main.go:319-321`），后端 `submitVotePayload` 没有这个字段 → 静默忽略，但**明文选项已经上了网**。
-- **`decrypt-setup` 不带 `-out` 时会把门限份额打印到 stdout**（`main.go:398-414`）。
-- CLI **没有** `-public-witness` 入口，而 `ballot-draft` 也不返回该字段 → 生产模式下无法提交投票。
+- **URL 路径二次转义**：`main.go` 的 `cmdResultGet` 把已 `url.PathEscape` 过的 path 塞进 `base.Path`，`url.URL.String()` 会再转义一次（`%` → `%25`）。含空格 / `/` / `%` 的 proposal id 必然 404。实测：`result-get -proposal "a b/c"` → `/api/v1/proposals/a%2520b%252Fc/results`。
+- **CLI 不再发送 `selected_option`**（旧版本会多发这个字段，明文选项上过网）。`cmdVoteSubmit` 的 body 只有 `proposal_id` `encrypted_vote` `proof` `nullifier` `user_id` `user_pub_key` `credential_signature`。
+- **CLI 没有 `-public-witness` 入口**，服务端也不再收这个字段。CLI 只「带 proof 提交」，不本地生成 proof（路线图 G9 决策）。
+- **`decrypt-setup` 不带 `-out` 时会把门限份额打印到 stdout**。
+- **`ballot-draft` 只在 debug 模式可用**：release 模式下服务端返回 404，CLI 拿不到草稿。
 
 ---
 
 ## 2. 关键流程
 
-### 2.1 投票链路（`voting.go:111-227`）
+### 2.1 投票链路（`internal/usecase/voting.go` 的 `Submit`）
 
 ```
-HTTP 绑定 + validate
-  → proposal 必须处于 open 且在时间窗口内
+HTTP 绑定 + validate（请求体已无 public_witness）
+  → nullifier 早期校验：hex 可解码 + 恰好 32 字节，并归一成规范形式（decodeNullifier）
+  → proposal 必须处于 open 且在时间窗口内（isProposalOpenForVoting）
   → 必须已存在 decryption session（否则「decryption session is not ready」）
-  → verifier.Verify(proof, publicInputs)      ← vk_path 为空时此步是空操作
-  → encrypter.ValidateCiphertext(encrypted_vote)
+  → req.PublicInputs(proposal, session)  ← 服务端自己拼 entity.BallotStatement
+  → verifier.Verify(proof, statement)   ← vk_path 为空时此步只查 proof 非空
+  → encrypter.ValidateCiphertext(encrypted_vote)  ← v3 密文结构 + 曲线点子群检查
   → 查 (proposal_id, user_id) 的凭证，比对 user_pub_key 与 signature
+  → issuer.VerifyCredential(user_id, user_pub_key, signature)  ← 验签失败 → 401
   → hash(user_id) = sha256
-  → 查 nullifier 是否已存在（全局唯一）
+  → 查 nullifier 是否已存在（规范形式，全局唯一）
   → 查该 user_hash 是否已参与
   → 事务内：先插 vote_participations（OnConflict DoNothing），再插 votes
 ```
 
-**防重投依赖两件事**：usecase 里的先查后写 + 数据库唯一索引兜底。真正的并发安全靠后者。
+**公开输入由服务端拼装**是本轮的关键变化：客户端不提交公开输入，一份 proof 因此只能用于它被生成的那份密文，跨提案 / 换密文 / 改 nullifier 都会验证失败。
 
-### 2.2 计票链路（`tally.go`）
+**防重投依赖两件事**：usecase 里的先查后写 + 数据库唯一索引兜底。真正的并发安全靠后者 —— 但唯一索引兜底的前提是 nullifier 的**字符串表示唯一**，所以落库前必须归一成规范形式（见 §3 陷阱 2）。
+
+### 2.2 计票链路（`internal/usecase/tally.go`）
 
 ```
-decrypt-setup  → 生成密钥对 → Shamir 拆成 threshold/trustees 份额
+decrypt-setup  → 生成 BN254 计票密钥对（私钥 = 标量，公钥 = 压缩点）
+                → Shamir 拆成 threshold/trustees 份（Fr 上插值）
+                → 份额编码 = 4 字节下标 + 32 字节取值
                 → 库里只存份额的 sha256 哈希（SharesJSON）
                 → 响应体里把明文份额一次性返回给 admin
-publish        → 提案必须已关闭
+publish        → 提案必须已关闭（isProposalClosed）
                 → 重复发布返回 409
                 → 份额必须属于本 session，且不能重复计数
-                → RecoverSecret → 逐票解密 → 统计 → 校验选项在提案白名单内
+                → RecoverSecret → 逐票解密（b - X·a = m·G，再在选项集合里比对出下标）
+                → 统计 → 校验下标在提案白名单内
                 → Merkle root → anchor_hash = sha256(proposal_id|root|tally)
                 → 写 tally_results + audit_anchors
 ```
 
-**陷阱**：`decrypt-setup` 在**投票开放中会被拒绝**（`tally.go:101-111`）。运营上必须在 `starts_at` 之前完成初始化。同理 `publish` 只能在提案关闭后执行。
+**陷阱**：`decrypt-setup` 在**投票开放中会被拒绝**（`tally.go` 的 `SetupThresholdSession`）。运营上必须在 `starts_at` 之前完成初始化。同理 `publish` 只能在提案关闭后执行。
 
 ### 2.3 门限解密会话的生命周期
 
@@ -234,18 +300,24 @@ publish        → 提案必须已关闭
 > 本清单随代码更新。**已修掉的问题不再列在这里**，但历史结论保留在
 > `docs/release-review-2026-10-20.md`。
 
-1. **`vk_path` 为空 = 关闭证明验证。** `gnark_proof_verifier.go:55`。开发配置 `configs/config.yaml` 就是 `vk_path: ""`。
-2. **`configs/config.production.yaml` 不会被自动加载。** viper 只认 `config.*`。
-3. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项。
-4. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（9 个受控包：usecase / config / di / http / http-middleware / crypto / persistence / cmd-cli / cmd-server）。单个包回退会直接让 CI 变红，但门槛本身还比各包当前水位低 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。门槛口径 79.0%，**全仓口径 74.1%**（2026-10-20 实测）；最低的一档是 `internal/infrastructure/persistence`（60.1%）。
-5. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go:234`）和 `isProposalClosed`（`tally.go:386`）。改时间规则要同时改两处。
-6. **`ballot-draft` 是公共路由且无模式开关** —— 生产环境也会暴露（此时返回的假 proof 会在验证阶段被拒，但接口本身不该在生产可达）。修复任务见路线图 T1。
-7. **proof 没有绑定到请求字段**：`PublicInputs()`（`voting.go:60-69`）造了 `proposal_id` / `nullifier`，但 `Verify`（`gnark_proof_verifier.go:48-80`）**只读 `public_witness`**。`encrypted_vote` 也不在任何公开输入里。修复任务见路线图 T15。
-8. **release 模式不再启动即改表** —— 必须先跑 `nullifier-server -migrate`，忘了会直接启动失败（`persistence.SchemaReady` 检查）。开发模式仍然自动迁移。
-9. **盲签名全流程在服务端内部完成**（`kryptology_credential_issuer.go:163-179`）—— 服务端自己 Blind 再 Finalize，客户端不参与，**不是真盲签名**。路线图 T17 改成两段式。
-10. **凭证改为匿名随机领取后，服务端无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。路线图 T22 用资格证明补回（见 [`docs/roadmap.md`](./roadmap.md) §2.3）。
-11. **密文格式 v2（v0.1.0 起即 v2）** —— v1 密文会被直接拒绝（`unsupported ciphertext version`），旧的加密选票解不开。密钥派生用 HKDF-SHA256（`crypto/hkdf`）。
-12. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go:60`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
+1. **公开输入里绝不能有选项下标。** `ballot/circuit.go` 的 `ballotCircuit` 把 `OptionIndex` 放在**私有见证**里，用 `assertLessThan`（8 位分解 + 最高位检查）做范围检查。公开输入一旦带上选项下标，服务端就等于拿到明文选项 —— 这与「选票内容对服务端不可知」直接冲突。
+2. **`fr.Element.SetBytes` 是按模归约，不是拒绝。** 超范围输入会被折回域内，于是同一个域元素有多种字节表示。`ballot/encoding.go` 的 `ParseScalarHex` / `isCanonicalScalar` 才是拒绝式检查，`ballot/statement.go` 的 `BuildPublicInputs` 会再查一次规范编码。**漏查的后果**：票表 `votes.nullifier` 上的唯一索引存的是**字符串**，同一个 nullifier 的两种写法会绕开唯一索引 → 重投拦不住。**本轮已修**：`usecase/voting.go` 的 `decodeNullifier` 除了 hex 与长度，还返回**规范形式**（64 位小写 hex），`Submit` 用规范形式查重与落库 —— 客户端提交大写或带空白的变体也会归一到同一串，唯一索引因此拦得住。仍需注意：规范**字节**检查（值 < 模数）只在 `vk_path` 加载时由验证器执行（见陷阱 3）。
+3. **`vk_path` 为空 = 关闭证明验证。** `NewGnarkProofVerifier("")` → `skipVerify=true`，只要求 proof 非空。本地「验证通过」不代表真的验过。开发配置 `configs/config.yaml` 就是 `vk_path: ""`；release 模式强制要求 `crypto.vk_path`（`config.requiresVerifyingKey`）。
+4. **Go 侧的 MiMC 必须与 gnark `std/hash/mimc` 逐位一致。** `ballot/nullifier.go` 的 `mimcHash` 是电路 `hash.Write(c.NullifierSecret, c.ProposalID)` 的镜像（轮函数 `x = (x + h + c)^5`，外层 Miyaguchi–Preneel）。常量或轮次差一点，电路里的 nullifier 约束就永远不成立。
+5. **密文格式 v2 → v3 与 v0.1.0 不兼容。** v3 是 BN254 twisted Edwards 上的指数 ElGamal（`0x03` + 两个压缩点 = 65 字节），v2 是 ed25519 上的 DH 混合封装（HKDF-SHA256 派生）。旧密文既解不开，也不该再用于真实投票。
+6. **加密的是选项下标，不是选项文本。** 下标是电路里可做范围检查的小整数（上限 `ballot.MaxOptions` = 256），选项文本可能很长且不唯一。解密方 `DecryptBallotOption` 拿 `numOptions` 在选项集合里逐个比对。
+7. **曲线点的子群检查不能省。** BN254 twisted Edwards 的余因子是 8，小阶点会让解密方泄漏私钥低位比特。`ballot/group.go` 的 `parsePoint` 对每个外部点都做 `isInSubGroup`（用子群阶乘点看是否回到单位元）。
+8. **`internal/di/wire_gen.go` 是手工同步的。** wire 生成器在本仓库离线不可用（`go.sum` 里 `github.com/google/subcommands` 只有 `/go.mod` 哈希，缺模块内容哈希）。改 `internal/di/wire.go` 必须手工同步 `wire_gen.go`。
+9. **`ballot-draft` 是明确的妥协，且只在 debug 模式可达。** 它由**服务端拿明文选项去加密**（`usecase/tally.go` 的 `EncryptVoteOption` → `proposalOptionIndex`），所以这条链路上服务端知道每一票的明文选项。非 debug 模式按 404 处理（`handler.go` 的 `PrepareBallotDraft`），用 404 而不是 403，避免暴露端点存在性。它**不是生产能力**，客户端 prover 落地后要被删掉。
+10. **只比对签名是不够的。** 拿一张合法凭证换个 `user_id` 重放，逐字节比对签名会通过。`usecase/voting.go` 因此在落库前调 `issuer.VerifyCredential`，失败 → 401。
+11. **盲签名仍是服务端进程内完成的。** `kryptology_credential_issuer.go` 的 `Issue` 里服务端自己 Blind 再 Finalize，客户端不参与 —— **不是真盲签名**。路线图 T17 改成两段式。
+12. **凭证改为匿名随机领取后，服务端无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。路线图 T22 用资格证明补回（见 [`docs/roadmap.md`](./roadmap.md) §2.3）。
+13. **`configs/config.production.yaml` 不会被自动加载。** viper 只认 `config.*`。
+14. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项。
+15. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（**11 个受控包**：usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server），合计门槛见表内 `total` 行（77）。单个包回退会直接让 CI 变红。门槛本身还比各包当前水位低约 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。最低的一档是 `internal/infrastructure/persistence`（门槛 58）。
+16. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go`）和 `isProposalClosed`（`tally.go`）。改时间规则要同时改两处。
+17. **release 模式不再启动即改表** —— 必须先跑 `nullifier-server -migrate`，忘了会直接启动失败（`persistence.SchemaReady` 检查）。开发模式仍然自动迁移。
+18. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
 
 ---
 
@@ -258,12 +330,25 @@ go vet ./...
 gofmt -l ./cmd ./internal ./tests      # 应无输出
 go test ./...                          # Windows 需 CGO_ENABLED=1
 bash ./scripts/check-coverage.sh 80 coverage.ci.out   # 用 Git Bash，不是 WSL
-#   覆盖率门槛按包分档，逐包判定；门槛值见 scripts/coverage-thresholds.txt
+#   覆盖率门槛按包分档，逐包判定；门槛值见 scripts/coverage-thresholds.txt（11 个包）
+
+# 只跑选票密码学栈（真实 Groth16：加解密往返、证明往返、篡改公开输入、越界选项、错 nullifier 秘密）
+go test ./internal/infrastructure/crypto/ballot/ -v
+go test ./internal/infrastructure/crypto/ -run TestBallot -v
+
+# 真实证明的 HTTP 回归：真实证明 → 201；跨提案复用 / 篡改 nullifier / 篡改密文 → 400；伪造凭证签名 → 401
+go test ./internal/infrastructure/http/ -run TestServer_RealBallotProof -v
+
+# 密钥生成（默认不覆盖已有文件；-force 才覆盖）
+go run ./cmd/keygen -dir ./keys
+go run ./cmd/keygen -dir ./keys -force
+go test ./cmd/keygen/ -v
 
 # 前端
+pnpm --dir web run test
+pnpm --dir web run test -- src/lib/nullifier.test.ts   # 只跑 nullifier 单测
 pnpm --dir web run lint
 pnpm --dir web exec tsc --noEmit
-pnpm --dir web run test
 pnpm --dir web run build
 
 # 一次性门禁
@@ -273,15 +358,17 @@ make ci         # go test ./... + 覆盖率门槛
 
 Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 里用 `mingw32-make` 跑；`bash` 命令在 Windows 上默认可能指向未安装的 WSL。
 
+手工验证 debug 门控：`GET /healthz` 看 `debug` 字段；`server.mode` 是 `debug` / `dev` / `development` 时 `POST /api/v1/proposals/:id/ballot-draft` 可达，其余模式返回 404。
+
 ---
 
 ## 5. 尚未完成的部分（不要写成生产能力）
 
-- **没有真实的选票零知识电路。** 仓库里唯一的 gnark 电路是测试文件里的玩具电路（`Y = X³ + X + 5`，见 `tests/e2e/api_test.go:30-39`）。生产配置的 `crypto.vk_path: "./keys/verifying.key"` 指向一个**本仓库无法生成**的密钥。
-- **没有客户端侧证明生成。** 服务端只验不生成。门户与 CLI 都拿不到可用的 `public_witness`。
-- **没有任何测试跑通过真实 gnark 验证。** 所有 HTTP 层测试都用 `NewGnarkProofVerifier("")`（空操作验证器），`tests/e2e/api_test.go:62`、`internal/infrastructure/http/server_test.go:571`。
-- **盲签名的盲化在服务端内部完成**，客户端不参与（见 §1.6 陷阱）—— 不具备真正的盲化性质。
-- **`ballot-draft` 是开发联调接口。** 门户的「按选项生成投票凭据」依赖它；而且它由**服务端拿明文选项去加密**，所以当前实现下服务端知道每一票的明文选项。
-- **门户与 CLI 的匿名性文案与实现不符**（见 §1.7 陷阱）。
+- **浏览器端 prover 没做。** 真实 Groth16 电路与真实验签在**服务端侧**已成立（`ballot/prover.go` + `cmd/keygen` + `GnarkProofVerifier`），但**没有任何客户端**在本地生成 proof：门户与 CLI 都拿不到可提交的证明。因此 **release 模式下门户仍无法完成投票**（非 debug 模式 `ballot-draft` 404，本地又没有 prover）。路线图 T14。
+- **明文选项的彻底消除要等「加密移到客户端」（T16）。** 当前 debug 链路上服务端仍然拿到明文选项（`ballot-draft` → `EncryptVoteOption`）。这条路径是明确的妥协，不是生产能力。
+- **盲签名仍是服务端进程内完成**（T17）：服务端自己 Blind 再 Finalize，客户端不参与，等同普通签名 —— 不具备真正的盲化性质。
+- **一人一票没有强制手段**（T22）：凭证匿名随机领取，同一个人可以领两张票投两次。
+- **`ballot-draft` 返回的 proof 是开发占位常量**（`developmentProofBase64`），不是真证明；release 模式下即使端点可达也会被验签拒。
+- **门户与 CLI 的匿名性文案与实现仍有落差**（见 §1.7 陷阱）。
 
-> 完整的问题清单、证据与修复顺序见 `docs/release-review-2026-10-20.md`。
+> 完整的问题清单、证据与修复顺序见 `docs/release-review-2026-10-20.md`；v0.2.0 的能力矩阵与任务状态见 [`docs/roadmap.md`](./roadmap.md) §4.1。

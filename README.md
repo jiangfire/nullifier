@@ -27,13 +27,19 @@ nullifier 把这两个动作拆开:
 
 结果是:管理员能看到计票结果和审计锚点,但拿到数据库也回答不了"某个人投了什么"。
 
-> ### ⚠️ 当前版本边界(v0.1.0 内测版)
+> ### ⚠️ 当前版本边界（v0.1.0 内测版 + v0.2.0 证明链）
 >
-> 这个版本把「选票内容与投票人身份分离」的**存储与接口骨架**跑通了,但**证明链还没有实现**。请在下面的「项目状态与限制」里读完整说明,不要把当前实现当成生产能力:
+> 这个版本把「选票内容与投票人身份分离」的**存储与接口骨架**跑通了，并已接上**真实的
+> Groth16 选票电路**（服务端能真实验签）。但**客户端侧还差最后一段**：请在下面的
+> 「项目状态与限制」里读完整说明，不要把当前实现当成生产能力：
 >
-> - **没有真实的选票零知识电路。** `crypto.vk_path` 为空时,服务端的 proof 验证器接受任何非空 proof;仓库里唯一的 gnark 电路是测试用的玩具电路。生产配置指向的 `verifying.key` 无法由本仓库生成。
-> - **密文由服务端生成。** `POST /api/v1/proposals/:id/ballot-draft` 接收明文选项并加密,因此**服务端在生成凭据时就知道你选了哪个**。本文档与门户界面都不再声称"服务端看不到选项"。
-> - **只适合内测与开发**,不要用于真实投票。补齐证明链的工作见 [`docs/roadmap.md`](./docs/roadmap.md) 的 v0.2.0 里程碑。
+> - **服务端侧证明链已成立，浏览器端 prover 还没有。** 电路、`cmd/keygen` 密钥生成、
+>   服务端按请求字段自拼公开输入并真实验签都已落地；但**没有任何客户端在本地生成 proof** ——
+>   因此 **release 模式下门户仍然无法完成一次投票**。
+> - **密文仍由服务端生成（仅 debug 模式）。** `POST /api/v1/proposals/:id/ballot-draft` 接收
+>   明文选项并加密，**非 debug 模式已返回 404**。客户端本地加密是下一版本的目标。
+> - **只适合内测与开发**，不要用于真实投票。补齐客户端 prover 与客户端加密的工作见
+>   [`docs/roadmap.md`](./docs/roadmap.md) 的 v0.2.0 里程碑。
 
 ## 特性
 
@@ -42,16 +48,16 @@ nullifier 把这两个动作拆开:
 | 能力 | 说明 |
 |---|---|
 | 凭证签名 | RSA-PSS 签名(基于 RFC9474 盲签名库);签发方看不到选票内容,因为凭证与选票无关 —— **但盲化在服务端内部完成,尚不是真盲签名** |
-| 零知识验票 | gnark 验证选票合法性,证明不携带身份 —— **尚无真实选票电路,开发模式下不验 proof** |
-| 防重放 | 每票一个 `nullifier`,重复投票直接拒绝 |
-| 防冒充 | `proposal_id + user_id + user_pub_key + credential_signature` 四元组校验 |
+| 零知识验票 | 真实 Groth16 电路(BN254),证明「这张票加密了某个合法选项」且不携带身份 —— **服务端已能真实验签;客户端 prover 还没有** |
+| 防重放 | 每票一个 `nullifier`,重复投票直接拒绝;nullifier 落库前归一成规范形式,变体写法绕不过唯一索引 |
+| 防冒充 | `proposal_id + user_id + user_pub_key + credential_signature` 四元组校验,并**验签凭证签名**(失败 401) |
 | 选择性披露 | 只能回答"你投过票吗",不能回答"你投了什么" |
 
 **计票与审计**
 
 | 能力 | 说明 |
 |---|---|
-| 门限解密 | kyber ElGamal 封装,2-of-3 份额即可恢复,单份份额无法解密 |
+| 门限解密 | BN254 twisted Edwards 指数 ElGamal + Fr 上 Shamir 份额,2-of-3 份额即可恢复,单份份额无法解密 |
 | 会话不可覆盖 | 重复 setup 返回 `409`,已投选票的解密能力不会被覆盖 |
 | 幂等发布 | 重复 publish 返回 `409`,不重复写审计锚点 |
 | 审计锚点 | 结果发布时生成 Merkle Root,可导出供外部核验 |
@@ -61,7 +67,7 @@ nullifier 把这两个动作拆开:
 
 | 形态 | 说明 |
 |---|---|
-| HTTP API | 12 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
+| HTTP API | 14 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
 | CLI | 14 个命令,复用同一套 HTTP API,不绕过服务端校验 |
 | Web 门户 | Vue 3 单页应用,覆盖投票端与运营端全流程 |
 
@@ -96,6 +102,8 @@ go run ./cmd/cli -admin-token dev-admin-token credential-issue \
   -proposal <proposal_id> -user u-1001 -out cred.json
 
 # 4. 生成选票草稿并投票
+#    ballot-draft 只在 debug 模式可达(非 debug 模式返回 404);
+#    它返回的是服务端代加密的草稿,proof 是开发占位值
 go run ./cmd/cli ballot-draft -proposal <proposal_id> -option A -out ballot.json
 go run ./cmd/cli vote-submit -credential-file cred.json -ballot-file ballot.json
 
@@ -133,7 +141,7 @@ cmd/server          服务入口          cmd/cli       CLI 客户端
      ↓                                    ↓
 internal/usecase    业务编排(5 个用例) ──→ internal/domain   实体 + 仓储/密码学接口
      ↓
-internal/infrastructure   http(Gin) · persistence(GORM) · crypto(gnark/kyber/kryptology)
+internal/infrastructure   http(Gin) · persistence(GORM) · crypto(gnark/kryptology)
      ↑
 internal/di         Wire 装配          internal/config   viper 配置 + 运行期校验
 ```
@@ -145,7 +153,7 @@ internal/di         Wire 装配          internal/config   viper 配置 + 运行
 | `infrastructure` | Gin 路由与错误映射、GORM 仓储与自动迁移、密码学实现 | 实现 `domain` 定义的接口 |
 | `di` | Wire provider 组装 | 启动期一次性装配 |
 
-**Stack:** Go 1.25 · Gin · GORM · Wire · gnark · kyber · kryptology · SQLite / PostgreSQL · Vue 3 · TypeScript · Rsbuild
+**Stack:** Go 1.25 · Gin · GORM · Wire · gnark · kryptology · SQLite / PostgreSQL · Vue 3 · TypeScript · Rsbuild
 
 ## 配置
 
@@ -173,6 +181,15 @@ internal/di         Wire 装配          internal/config   viper 配置 + 运行
 
 生产部署参考 `configs/config.production.yaml` 与 `configs/production.env.example`。
 
+`crypto.vk_path` 指向的选票电路验签密钥现在**可以由本仓库生成**:
+
+```bash
+go run ./cmd/keygen -dir ./keys      # 生成 verifying.key(0644) + proving.key(0600),打印 sha256 指纹
+```
+
+`verifying.key` 放服务端(`CRYPTO_VK_PATH` 指向它);**`proving.key` 只留在客户端侧,不要入库**。
+默认不覆盖已有文件,要覆盖加 `-force`。
+
 ### 生产部署顺序:先迁移,再启动
 
 `release` 模式下服务**不会**在启动时改表 —— 多副本同时启动会争 DDL 锁,而且改表应该是一个
@@ -195,12 +212,12 @@ nullifier-server             # 再起服务
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/healthz` | 健康检查 |
+| `GET` | `/healthz` | 健康检查(响应含 `debug` 布尔字段) |
 | `GET` | `/api/v1/proposals` | 列出全部提案(按创建时间倒序,含已关闭/未开始) |
 | `GET` | `/api/v1/proposals/open` | 时间窗口内的开放提案 |
-| `POST` | `/api/v1/votes` | 提交匿名投票(7 个字段全部必填) |
+| `POST` | `/api/v1/votes` | 提交匿名投票(7 个字段全部必填;公开输入由服务端自拼,不收 `public_witness`) |
 | `POST` | `/api/v1/proposals/:id/vote-status` | 持凭证材料查询是否已投票 |
-| `POST` | `/api/v1/proposals/:id/ballot-draft` | 生成选票草稿(开发联调) |
+| `POST` | `/api/v1/proposals/:id/ballot-draft` | 生成选票草稿(开发联调,**仅 debug 模式**,其余模式 404) |
 | `GET` | `/api/v1/proposals/:id/results` | 已发布的计票结果 |
 | `GET` | `/api/v1/proposals/:id/audit-anchors` | 导出审计锚点 |
 | `POST` | `/api/v1/proposals/:id/credentials/claim` | 从凭证池随机领取一张凭证 |
@@ -248,7 +265,7 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 | 口径 | 数值 | 覆盖范围 |
 |---|---|---|
-| 门槛口径 | **79.0%** | `scripts/check-coverage.sh` 选中的 9 个包:usecase / config / di / http / http-middleware / crypto / persistence / cmd-cli / cmd-server |
+| 门槛口径 | **79.7%** | `scripts/check-coverage.sh` 选中的 11 个包:usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server(2026-10-21 实测) |
 | 全仓口径 | **74.1%** | `./...` 全部包(2026-10-20 实测) |
 
 门槛是**逐包分档**的,每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`,单个包回退会直接让 CI 变红 —— 不再是"一个总和撑着,低覆盖率的包悄悄退化"。当前最低的一档是 `internal/infrastructure/persistence`(60.1%),抬门槛时它会先卡住。**新增代码请一并补测**。
@@ -257,8 +274,9 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 这是个在推进中的实现,接手前请知道边界在哪:
 
-- **证明链尚未实现。** 服务端只有 proof 验证器的骨架:没有真实选票电路、没有密钥生成流程、没有客户端 prover。`crypto.vk_path` 为空时任何非空 proof 都会通过(开发模式);加载 vk 后 `public_witness` 变成必填,而现有客户端都拿不到它。
-- **`ballot-draft` 是开发联调接口**,返回的是便于串通流程的草稿数据。**密文由服务端生成,服务端在生成时就知道选了哪个** —— 这是当前版本最大的匿名性缺口。生产环境应由真实钱包/客户端生成 proof 与密文;后端只负责验证,不代替用户端生成证明。这条链路尚未完成。
+- **证明链:服务端侧已通,客户端侧还差一段。** 真实 Groth16 电路(`internal/infrastructure/crypto/ballot/`)、`cmd/keygen` 密钥生成流程、服务端按请求字段自拼公开输入并真实验签都已落地 —— 篡改任一公开输入都会验签失败。**但没有任何客户端在本地生成 proof**:门户与 CLI 都拿不到可提交的证明,因此 **release 模式下门户仍然无法完成一次投票**。`crypto.vk_path` 为空时验证器只要求 proof 非空(开发模式),本地「验证通过」不代表真的验过。
+- **`ballot-draft` 是开发联调接口,非 debug 模式已返回 404。** 它返回的是便于串通流程的草稿数据,**密文由服务端生成,服务端在生成时就知道选了哪个** —— 这是当前版本最大的匿名性缺口,彻底消除要等「加密移到客户端」。生产环境应由客户端生成 proof 与密文;后端只负责验证,不代替用户端生成证明。这条链路尚未完成。
+- **凭证签名现在会被验证。** 投票落库前会调用签发方验签,伪造签名的请求返回 401。
 - **凭证签发不是真盲签名。** 用的是 RFC9474 盲签名库,但 `Prepare → Blind → BlindSign → Finalize` 全在服务端进程内完成,签发方看得见被签的凭证内容。真正的两段式盲签名(客户端提交盲化消息 → 服务端签 → 客户端解盲)是 v0.2.0 的任务。
 - **凭证不再由 admin 逐个分发。** 改为「凭证池 + 投票人匿名随机领取」：admin 往池里批量投放预签凭证，投票人自己随机领一张（`POST /api/v1/proposals/:id/credentials/claim`），运营方不再天然掌握「哪个凭证给了谁」。**代价：服务端无法强制一人一票** —— 随机领取意味着服务端看不出同一个人领了几次，资格证明是后续要补的。
 - **`decryption/setup` 拒绝"投票开放中"的提案**,运营上必须在 `starts_at` 之前完成初始化。
