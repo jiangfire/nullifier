@@ -270,6 +270,9 @@ HTTP 绑定 + validate（请求体已无 public_witness）
 
 **防重投依赖两件事**：usecase 里的先查后写 + 数据库唯一索引兜底。真正的并发安全靠后者 —— 但唯一索引兜底的前提是 nullifier 的**字符串表示唯一**，所以落库前必须归一成规范形式（见 §3 陷阱 2）。
 
+**并发下的兜底已被验证**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求、**同一个 nullifier**、各自不同的凭证提交，断言恰好 1 张票入库、其余 7 个是 409 `DOUBLE_VOTING`。
+- ⚠️ 那个用例的 SQLite 必须用**文件库 + WAL**（`?_busy_timeout=10000&_journal_mode=WAL&_txlock=immediate`）：共享缓存的内存库用表级锁，并发写会直接抛 "table is locked"，而 busy_timeout 对它无效 —— 那不是防重投的锅，是 SQLite 的锁语义。
+
 ### 2.2 计票链路（`internal/usecase/tally.go`）
 
 ```

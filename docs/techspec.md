@@ -560,7 +560,8 @@ web/                        # Vue 3 前端门户
     （提案域元素、nullifier、MiMC 轮常量）；Go 侧另有测试用这组值真的出证明并验过
   - `cmd/keygen` 单元测试
   - `tests/integration` 集成测试
-  - `tests/e2e` 端到端流程测试（含「客户端本地加密 → 落库只有密文 → 计票还原」）
+  - `tests/e2e` 端到端流程测试（含「客户端本地加密 → 落库只有密文 → 计票还原」，
+    以及「同一 nullifier 并发提交 → 恰好一张票入库」）
 - PostgreSQL 集成测试使用 `testcontainers`
 - 前端最小校验是：
   - `pnpm --dir web exec tsc --noEmit`

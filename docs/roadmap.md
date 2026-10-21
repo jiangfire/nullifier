@@ -294,6 +294,10 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 1. **PostgreSQL testcontainers 集成测试** —— 本机走的是跳过分支
 2. **门户 7 个 `.vue` 面板的浏览器实际渲染** —— 仓库里 `.vue` 零测试
 3. **并发投票下的防重投与性能容量** —— 唯一索引兜底，但没测过
+   - 🟡 **防重投这一半已补**（本轮落地）：`tests/e2e/concurrent_nullifier_test.go` ——
+     8 个请求**同时**用同一个 nullifier、各自带不同凭证提交，断言恰好 1 张票入库、
+     其余 7 个被唯一索引拦成 409 `DOUBLE_VOTING`。
+   - ⚠️ **容量这一半仍未测**：还需要压测脚本与容量数据（`hey` / `k6` 不可得时可用 Go 写）。
 
 ---
 
@@ -312,7 +316,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
 | 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 79.7% |
 | 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 73 个用例全过 |
-| 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未开工 |
+| 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未开工（盲区 3 的「防重投」一半已补，PG 集成测试与浏览器渲染、容量压测仍未做） |
 | 9 | README / techspec / 门户三处的匿名性声明不一致 | 🟡 **本轮已同步，待复核** —— 三处与 §4.1 的能力表对齐 |
 
 **Go**
@@ -515,6 +519,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 问题 | review §5 列的三项**从未被验证**：① PostgreSQL testcontainers 集成测试；② 门户 7 个 `.vue` 面板的浏览器实际渲染；③ 并发投票下的防重投与性能容量。 |
 | 证据 | `docs/release-review-2026-10-20.md` §5 |
 | 改法 | ① Docker 环境跑通 `tests/integration`（CI 会实跑，本地补一份 compose）；② 引入 Playwright 覆盖关键路径（领凭证 → 投票 → 查询状态 → 计票）；③ 用 `hey`/`k6` 写并发投票脚本，验证防重投（唯一索引兜底）与容量 |
+| 落地核对 | ① ⏳ CI 已实跑 PG 集成测试，本机无 Docker 走跳过分支（**compose 还没补**）；② ⏳ 离线环境装不了 Playwright，门户 `.vue` 仍零测试；③ 🟡 **防重投这一半已落地**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求 + 同一 nullifier + 不同凭证，断言恰好 1 张票入库、其余 409 `DOUBLE_VOTING`（本机可复现，`go test ./tests/e2e/ -run TestAPI_ConcurrentSameNullifier_E2E`）；**容量这一半仍未做** |
 | 验收 | 三项都有**可复现的脚本 + 输出**，并把结果贴进 PR |
 | 预估 | 2–3 天 |
 | 依赖 | T14（浏览器端投票链路才完整） |
