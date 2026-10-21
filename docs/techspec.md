@@ -338,11 +338,25 @@ web/                        # Vue 3 前端门户
   票表上的唯一索引就拦不住重投。
 - 派生分两步：`DeriveProposalField`（SHA-256 → Fr）与 `DeriveNullifier`（MiMC，
   与 gnark `std/hash/mimc` 逐位一致的 Go 实现）。
+- **两侧都有实现**：Go 侧是 `ballot/nullifier.go`；浏览器侧是纯 TypeScript 实现 ——
+  `web/src/lib/sha256.ts`（SHA-256）、`web/src/lib/keccak.ts`（legacy Keccak-256，
+  MiMC 轮常量由它派生）、`web/src/lib/mimc.ts`（Fr 上的 MiMC）、
+  `web/src/lib/nullifier.ts`（`deriveProposalField` / `deriveNullifier` /
+  `generateNullifierSecret`）。SHA-256 没有用 WebCrypto：`crypto.subtle` 要求安全
+  上下文，门户被部署在内网 http 地址下会直接不可用。
+- **跨语言一致性由 KAT 锁死**：`internal/infrastructure/crypto/ballot/nullifier_interop_test.go`
+  与 `web/src/lib/mimc.test.ts` / `web/src/lib/nullifier.test.ts` 断言同一组值
+  （提案域元素、nullifier、MiMC 首尾轮常量）。Go 侧还有一个测试真的用这组值
+  出了一份证明并验过 —— 即「浏览器算出的 nullifier，电路认」。改任一侧的哈希或
+  域运算，必须重新生成向量并同步两处。
 - 请求侧先查长度与 hex（`usecase.decodeNullifier`），规范性再查一遍
   （`ballot.BuildPublicInputs`，只在加载 vk 的验签路径上执行）。
-- **当前实现边界**：`DeriveNullifier` 目前只在库里与测试里被调用。服务端
-  `BallotNullifierGenerator` 与浏览器 `web/src/lib/nullifier.ts` 生成的都只是一个
-  随机域元素，没有做 MiMC 绑定 —— 按当前电路约束，这样的 nullifier 出不了证明。
+- **当前实现边界**：`DeriveNullifier` 服务端侧还没人调用 ——
+  `BallotNullifierGenerator` 生成的只是一个随机域元素，没有做 MiMC 绑定；浏览器侧
+  的 `generateNullifier` 同理，门户（`useVotePortal.ts`）还在用它。**按当前电路
+  约束，这样的 nullifier 出不了证明**。与电路一致的是两条路：CLI 的
+  `ballot-encrypt`（秘密留在选票文件里）与浏览器侧的 `deriveNullifier`（秘密留在
+  本地，门户接线到 prover 时改用）。
 
 ### 6.5 密钥生成与分发
 
@@ -528,6 +542,9 @@ web/                        # Vue 3 前端门户
   - **跨语言一致性测试**：`internal/infrastructure/crypto/ballot/kat_interop_test.go` 与
     `web/src/lib/ballot-cipher.test.ts` 共用一组已知答案向量 —— 浏览器端生成的密文
     必须能被 Go 侧解回同一个选项下标
+  - **nullifier 派生的跨语言测试**：`internal/infrastructure/crypto/ballot/nullifier_interop_test.go`
+    与 `web/src/lib/mimc.test.ts` / `web/src/lib/nullifier.test.ts` 共用一组向量
+    （提案域元素、nullifier、MiMC 轮常量）；Go 侧另有测试用这组值真的出证明并验过
   - `cmd/keygen` 单元测试
   - `tests/integration` 集成测试
   - `tests/e2e` 端到端流程测试（含「客户端本地加密 → 落库只有密文 → 计票还原」）
@@ -549,10 +566,12 @@ web/                        # Vue 3 前端门户
   只有密文。**但门户还没接上**（缺客户端 prover），debug 模式的 `ballot-draft` 仍是
   「服务端知道选项」的那条路径 —— 能力 A 因此尚未完全闭合。
 - **凭证签发仍不是盲签名。** 盲化在服务端进程内完成，签发方看得见被签内容（见 §6.9）。
-- **nullifier 的 MiMC 绑定只在 CLI 侧接上了。** `cmd/cli` 的 `ballot-encrypt` 按
-  `MiMC(secret, proposal_id)` 推导 nullifier 并把秘密留在选票文件里；但服务端
-  `BallotNullifierGenerator` 与浏览器 `web/src/lib/nullifier.ts` 生成的仍只是随机域
-  元素，按电路约束出不了证明（见 §6.4）。
+- **nullifier 的 MiMC 绑定：浏览器端已实现，门户还没用上。** 浏览器端
+  （`web/src/lib/nullifier.ts` 的 `deriveNullifier`）已能与 Go 侧逐位一致地算出
+  电路认可的 nullifier，KAT 也把它钉死了（见 §6.4）。但门户
+  （`useVotePortal.ts`）仍在用 `generateNullifier` 生成随机域元素 —— 缺客户端
+  prover 时门户也投不出去，接线时一起改。服务端的 `BallotNullifierGenerator`
+  同样仍是随机域元素。
 - `ballot-draft` 仍是开发联调接口，不应被写成生产能力。
 - **v3 密文与 v0.1.0 的 v2 密文不兼容**，旧的加密选票解不开（见 §6.1）。
 - 解密会话的初始化时机是当前系统最容易被文档写错的点：

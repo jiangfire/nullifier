@@ -206,7 +206,7 @@
 | `src/components/` | `AppSidebar` `AppTopbar` `GuideOverlay` `JourneyBar` `NoticeStack` |
 | `src/components/ui/` | `EmptyState` `NoticeBanner` `StatTile` |
 | `src/composables/useVotePortal.ts` | **全部状态与 API 编排**（单文件约 1800 行，是前端的事实核心） |
-| `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `datetime.ts` `error-messages.ts` `focus-trap.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` —— 除 `api.ts` 外都有单测 |
+| `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `datetime.ts` `error-messages.ts` `field.ts` `focus-trap.ts` `keccak.ts` `mimc.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` `sha256.ts` —— 除 `api.ts` 外都有单测 |
 | `src/styles/` | `tokens.css` `base.css` `components.css` `shell.css` |
 | `src/types/` | `portal.ts` `portal-api.ts` |
 
@@ -216,8 +216,9 @@
 - `useVotePortal.ts` 的 `readDebugFlag` 从 `GET /healthz` 的响应里读 `debug` 字段 → `debugMode` ref。
 - `VotePanel.vue` 的「按选项生成凭据」按钮整块包在 `v-if="portal.debugMode"` 里；非 debug 模式改为提示文案（说明这条入口会让服务端看到选项）。
 - 门户**不再发送** `selected_option`，也**不再发送** `public_witness`（服务端本来就不消费前者）。
-- `web/src/lib/nullifier.ts` 的 `generateNullifier` —— 生成 32 字节随机数后**按模 r 归约**，输出 64 位小写十六进制，保证是规范域元素编码。⚠️ 它**没有**做 MiMC 绑定，因此这样的 nullifier 按电路约束出不了证明（`ballot-cipher` / CLI 的 `ballot-encrypt` 才是与电路一致的那条路）。
+- `web/src/lib/nullifier.ts` —— 两类 nullifier：**`generateNullifier`（随机域元素，门户现在还在用）**与 **`deriveNullifier`（MiMC 绑定，与电路一致）**。前者生成 32 字节随机数后**按模 r 归约**，输出 64 位小写十六进制，保证是规范域元素编码；⚠️ 它**没有**做 MiMC 绑定，因此这样的 nullifier 按电路约束出不了证明。后者按 `MiMC(秘密, 提案域元素)` 派生，与 Go 侧 `ballot/nullifier.go` 逐位一致（见 §3 陷阱 21）。
 - `web/src/lib/ballot-cipher.ts` —— **浏览器端选票加密**：BN254 twisted Edwards 上的指数 ElGamal（加密选项下标），点编码与 Go 侧逐字节一致（见 §3 陷阱 19）。计票公钥以**未压缩**形式传入，因此浏览器端不需要在域内求平方根。
+- `web/src/lib/{field,sha256,keccak,mimc}.ts` —— **浏览器端 nullifier 派生的底座**：域运算与标量规范编码、SHA-256、legacy Keccak-256（MiMC 轮常量由它派生）、Fr 上的 MiMC。全部是纯 TS 实现，不依赖任何外部密码学包（离线环境下装不了），也不依赖 WebCrypto（`crypto.subtle` 要求安全上下文，内网 http 部署会失效）。
 
 **陷阱**：
 - `lib/api.ts` 是唯一的 HTTP 出口，返回 `{ok, status, data, error, code, rawText}`；错误文案统一走 `lib/error-messages.ts` 的 `describeApiError(message, code, fallback)`，优先级 **业务短语 > 错误码 > 调用方兜底**。
@@ -321,6 +322,7 @@ publish        → 提案必须已关闭（isProposalClosed）
 18. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
 19. **浏览器端与 Go 侧的选票密文必须逐字节一致。** 密文点编码一旦有一处偏差，服务端就解不开客户端投的票，而且**不会报错**（只是计票结果对不上）。唯一防线是那组跨语言已知答案向量：`internal/infrastructure/crypto/ballot/kat_interop_test.go`（Go 侧断言向量并解出选项下标）与 `web/src/lib/ballot-cipher.test.ts`（TS 侧断言产出同一串密文）。**改任何一边的曲线参数或编码，都要重新生成并同步这两处。**
 20. **计票公钥以未压缩形式给客户端**：`GET /api/v1/proposals/:id/election-key` 返回 X 与 Y 各 32 字节。原因是压缩点要在标量域里求平方根才能解压（`r ≡ 1 mod 4`，走 Tonelli-Shanks），浏览器端不必背这个包；代价是接口多一种编码方式，改接口时别改回压缩形式。
+21. **浏览器端的 nullifier 派生必须与 Go 侧逐位一致。** 电路约束是 `nullifier = MiMC(秘密, 提案域元素)`：SHA-256 映射提案 ID、Keccak-256 链派生 91 个 MiMC 轮常量、轮函数 `(x+h+c)^5`、外层 Miyaguchi–Preneel。差一位，浏览器就出不了证明（而且**不会报错**，只是验签失败）。防线是同一组跨语言向量：`internal/infrastructure/crypto/ballot/nullifier_interop_test.go`（Go 侧断言向量，并真的用这组值出一份证明验过）与 `web/src/lib/mimc.test.ts` / `web/src/lib/nullifier.test.ts`（TS 侧断言同一组值）。**改任一侧的哈希、轮常量或域运算，都要重新生成并同步这几处。**
 
 ---
 
@@ -346,6 +348,9 @@ go test ./internal/infrastructure/http/ -run TestServer_RealBallotProof -v
 go test ./internal/infrastructure/crypto/ballot/ -run TestKAT -v
 go test ./tests/e2e/ -run TestAPI_ClientSideEncryption -v   # 客户端本地加密 → 计票还原
 
+# nullifier 派生的跨语言一致性（改了 SHA-256 / Keccak / MiMC 轮常量就会红）
+go test ./internal/infrastructure/crypto/ballot/ -run 'TestKAT_Nullifier|TestKAT_Mimc|TestKAT_BrowserNullifier' -v
+
 # 密钥生成（默认不覆盖已有文件；-force 才覆盖）
 go run ./cmd/keygen -dir ./keys
 go run ./cmd/keygen -dir ./keys -force
@@ -355,6 +360,7 @@ go test ./cmd/keygen/ -v
 pnpm --dir web run test
 pnpm --dir web run test -- src/lib/nullifier.test.ts   # 只跑 nullifier 单测
 pnpm --dir web run test -- src/lib/ballot-cipher.test.ts   # 客户端加密（含跨语言向量）
+pnpm --dir web run test -- src/lib/mimc.test.ts   # MiMC（含跨语言向量）
 pnpm --dir web run lint
 pnpm --dir web exec tsc --noEmit
 pnpm --dir web run build
@@ -373,7 +379,13 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
 ## 5. 尚未完成的部分（不要写成生产能力）
 
 - **浏览器端 prover 没做。** 真实 Groth16 电路与真实验签在**服务端侧**已成立（`ballot/prover.go` + `cmd/keygen` + `GnarkProofVerifier`），但**没有任何客户端**在本地生成 proof：门户与 CLI 都拿不到可提交的证明。因此 **release 模式下门户仍无法完成投票**（非 debug 模式 `ballot-draft` 404，本地又没有 prover）。路线图 T14。
-- **明文选项的彻底消除要等「加密移到客户端」（T16）。** 当前 debug 链路上服务端仍然拿到明文选项（`ballot-draft` → `EncryptVoteOption`）。这条路径是明确的妥协，不是生产能力。
+- **明文选项的彻底消除还差门户接线（T16 完成一半）。** 客户端本地加密已落地（浏览器端
+  `lib/ballot-cipher.ts` + CLI `ballot-encrypt`），服务端只提供公开的计票公钥；但**门户
+  还没接上**（缺客户端 prover），debug 链路上的 `ballot-draft` → `EncryptVoteOption`
+  仍是服务端代加密 —— 这条路径是明确的妥协，不是生产能力。
+- **门户的 nullifier 还是随机域元素。** 浏览器端已能算出与电路一致的 nullifier
+  （`lib/nullifier.ts` 的 `deriveNullifier`），但门户仍在用 `generateNullifier`；
+  接线 prover 时要一起改，并把 nullifier 秘密留在本地。
 - **盲签名仍是服务端进程内完成**（T17）：服务端自己 Blind 再 Finalize，客户端不参与，等同普通签名 —— 不具备真正的盲化性质。
 - **一人一票没有强制手段**（T22）：凭证匿名随机领取，同一个人可以领两张票投两次。
 - **`ballot-draft` 返回的 proof 是开发占位常量**（`developmentProofBase64`），不是真证明；release 模式下即使端点可达也会被验签拒。

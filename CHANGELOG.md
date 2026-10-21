@@ -46,6 +46,18 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 - **服务端公开计票公钥**（新公开端点 `GET /api/v1/proposals/:id/election-key`）：返回
   **未压缩**形式的计票公钥（X 与 Y 各 32 字节大端，base64）—— 客户端因此不必实现点解压
   （那需要在标量域里求平方根）。
+- **浏览器端现在能算出与电路一致的 nullifier。** 新增纯 TypeScript 实现
+  （`web/src/lib/field.ts` `sha256.ts` `keccak.ts` `mimc.ts`，扩展 `nullifier.ts`）：
+  SHA-256 把提案 ID 映射成域元素、legacy Keccak-256 链派生 91 个 MiMC 轮常量、
+  Fr 上的 MiMC（轮函数 `(x+h+c)^5` + Miyaguchi–Preneel），与 Go 侧
+  `ballot/nullifier.go` **逐位一致**。跨语言向量由
+  `internal/infrastructure/crypto/ballot/nullifier_interop_test.go` 与
+  `web/src/lib/mimc.test.ts` / `web/src/lib/nullifier.test.ts` 共同锁定，Go 侧还真的
+  用这组值出了一份证明并验过 —— **浏览器算出的 nullifier，电路认**。
+  - SHA-256 没用 WebCrypto 的 `crypto.subtle`：那要求安全上下文，门户被部署在内网
+    http 地址下会直接不可用。
+  - **门户还没用上**：`useVotePortal.ts` 仍在生成随机 nullifier，等客户端 prover
+    一起接线。
 - `GET /healthz` 响应新增 `debug` 布尔字段（由 `server.mode` 推导）。
 
 ### 安全
@@ -87,8 +99,9 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 > **本轮还没有做到的事**（别把 v0.2.0 当成已完成的版本）：浏览器端 prover 未实现，
 > **release 模式下门户仍然无法完成一次投票**；明文选项对服务端不可知这条**只闭合了一半** ——
 > 客户端本地加密已可用（CLI `ballot-encrypt`、浏览器端 TS 实现），但**门户还没接上**，
-> debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径；盲签名仍是服务端进程内完成。
-> 详见 [`docs/roadmap.md`](./docs/roadmap.md) §4.1 的能力状态表。
+> debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径；门户的 nullifier 也还是
+> 随机域元素（浏览器端已能算出与电路一致的值，等 prover 一起接线）；盲签名仍是服务端
+> 进程内完成。详见 [`docs/roadmap.md`](./docs/roadmap.md) §4.1 的能力状态表。
 
 ---
 

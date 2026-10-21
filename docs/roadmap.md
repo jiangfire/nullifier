@@ -241,7 +241,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | T1 | `ballot-draft` 在非 debug 模式 404 | ✅ 已落地 |
 | T2 | 门户「按选项生成凭据」按钮非 debug 隐藏 | ✅ 已落地 |
 | T16 | 加密移到客户端 | 🟡 **客户端加密已落地**（浏览器端 TS 实现 + CLI 命令 + 跨语言互操作测试）；门户接线与客户端 prover 待 T14 |
-| T14 | 客户端 prover（浏览器 WASM） | ⬜ 未开工（**离线不可行**：模块缓存里没有 `gnark-wasm`，也没有 JS 密码学库） |
+| T14 | 客户端 prover（浏览器 WASM） | ⬜ 未开工（**离线不可行**：模块缓存里没有 `gnark-wasm`，也没有 JS 密码学库）。**前置件已就位**：浏览器端 nullifier 派生（MiMC + Keccak + SHA-256，纯 TS）与 Go 侧逐位一致并有跨语言 KAT 锁定 |
 | T17 | 盲签名改真两段式 | ⬜ 未开工（已拍板走真两段式） |
 
 **能力 A–F 的当前状态**：
@@ -440,6 +440,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 改法 | ① 用 gnark 官方 wasm 模板产出 prover WASM，放进 `web/public/` 或独立静态目录；② 门户在浏览器内生成 proof；③ `ballot-draft` 降级为「仅返回选票选项与加密公钥」，**不再返回假 proof**；④ CLI 侧同步：CLI 只做「带 proof 提交」，本地 prover 归浏览器（G9 建议） |
 | **状态修正** | ⚠️ 任务卡原文的「生成 proof **与 `public_witness`**」已失效 —— `public_witness` 自由文本入口在 T15 里删掉了，公开输入由服务端自拼。浏览器端 prover 现在只需产出 **proof**（外加密文与 nullifier），公开输入不用客户端给。**这也让 T14 比原设想简单**：不用再纠结「怎么把公开输入塞进客户端再传回来」 |
 | **新增要求** | ⚠️ **nullifier 必须改成「秘密 + nullifier」成对生成**：电路约束是 `nullifier = MiMC(NullifierSecret, ProposalID)`，而当前服务端 `BallotNullifierGenerator` 与浏览器 `web/src/lib/nullifier.ts` 产出的都只是**随机域元素** —— 这样的 nullifier **出不了证明**（库里 `DeriveNullifier` 只在测试里被调用）。T14 必须：① 浏览器侧实现与 `ballot/nullifier.go` 逐位一致的 MiMC；② 生成随机秘密 s，公开 nullifier = MiMC(s, proposal_id)，**秘密 s 留在本地**作为电路的 `NullifierSecret` 见证；③ 门户不再用「随机 nullifier」填表 |
+| **落地核对（部分）** | ✅ **①②已完成**（本轮补齐，路线图 T14 的前置件）：浏览器端新增 `web/src/lib/{field,sha256,keccak,mimc}.ts` 与扩展后的 `web/src/lib/nullifier.ts` —— SHA-256 映射提案 ID、legacy Keccak-256 链派生 91 个 MiMC 轮常量、Fr 上的 MiMC（轮函数 `(x+h+c)^5` + Miyaguchi–Preneel），与 Go 侧 `ballot/nullifier.go` **逐位一致**；跨语言向量由 `internal/infrastructure/crypto/ballot/nullifier_interop_test.go` 与 `web/src/lib/{mimc,nullifier}.test.ts` 共同锁定，Go 侧还真的用这组值出了一份证明并验过（**浏览器算出的 nullifier，电路认**）。⏳ **③未完成**：门户（`useVotePortal.ts`）仍在用 `generateNullifier` 生成随机域元素 —— 与门户 prover 一起改（T14）。SHA-256 没用 WebCrypto：`crypto.subtle` 要求安全上下文，门户部署在内网 http 地址下会失效 |
 | 验收 | ① 浏览器端生成的 proof 能通过服务端 `Verify`（e2e 用例）；② proof 绑定的公开输入与服务端自拼的一致 |
 | 预估 | 5–7 天 |
 | 依赖 | T13 |
