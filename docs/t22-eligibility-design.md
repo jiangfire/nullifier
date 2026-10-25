@@ -399,7 +399,9 @@ No-Go #2 仍然判未过。
   自动化证据只到 node 驱动的 WASM 模块（`tests/e2e/wasm_eligibility_test.go`）。
   > 那次真浏览器验收还挖出一个**只有真浏览器能发现的 bug**：资格包在门户里是 Vue 的响应式
   > Proxy，`postMessage` 克隆不了它 —— 「匿名领取」必然失败。已修并补了回归用例。
-- **PostgreSQL 集成测试本机无 Docker**：与 T22 无关，但整体验收仍缺这一项。
+- **PostgreSQL 集成测试本机无 Docker**：与 T22 无关，但整体验收仍缺这一项
+  —— ✅ 2026-10-25 已用本机便携版 PostgreSQL 17.7 起临时集群、按外部库路径实跑通过
+  （含本设计稿相关的「一人一票」复合唯一索引用例）；**testcontainers 路径仍待 CI 实跑**。
 - **`cmd/loadtest` 不支持资格证明**：它只在**未开启资格校验**的服务上可用
   （开了之后 claim 会返回 `ELIGIBILITY_REQUIRED`）。
 - **资格包丢失无法找回**：成员包是秘密材料（拿到它就能领这一票），发放必须走安全渠道。

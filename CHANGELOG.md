@@ -200,7 +200,8 @@ v0.1.0 发布之后的变更。本版的完成定义与验收证据见
   报告）。**防重投没守住时以非 0 退出** —— 结论能直接当门禁用。工具自身有单元测试
   （`cmd/loadtest/main_test.go`，用 `httptest` 模拟服务端），并补上了路线图 §4.3
   「并发投票下的防重投与性能容量」盲区里一直空着的**容量**那一半。
-  ⚠️ 只能在 debug 模式跑（客户端还没有 prover），且数字来自 SQLite —— **不是容量规划**。
+  ⚠️ 只能在 debug 模式跑（**压测工具自己没有 prover** —— 门户与 CLI 都有），且数字来自
+  SQLite —— **不是容量规划**。
 - **浏览器端的盲签名 client 侧已就绪**（新模块 `web/src/lib/blind-rsa.ts` + `sha384.ts`）：
   RFC 9474 RSABSSA-PSS-Deterministic 的 `Prepare` / `Blind` / `Finalize`，以及
   EMSA-PSS 编码、MGF1、SHA-384 —— 纯 TypeScript 实现，不依赖任何外部密码学包。

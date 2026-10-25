@@ -406,6 +406,10 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 
 以下三项在本机（无 Docker）从未实跑过，CI 会实跑其中第一项：
 
+> **2026-10-25 更新**：第 1 项已在本机用便携版 PostgreSQL 17.7 实跑通过（外部库路径）；
+> 第 2 项已在真浏览器里验过（SQLite 与 PG 各一遍）；第 3 项的防重投与容量两半都已落地，
+> 但压测工具在 2026-10-25 发现**协议漂移导致它一度完全跑不通**，已修复并重测。
+
 1. **PostgreSQL testcontainers 集成测试** —— 本机走的是跳过分支
    - ✅ **已在本机真 PostgreSQL 上实跑**（2026-10-25）：本机有一份便携版 PostgreSQL
      （`C:\Users\yimo\Tools\pgsql`，PG 17.7），用它的二进制 `initdb` 起了一个**临时独立集群**
@@ -435,7 +439,8 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
      「同一个人能领两次票」且**没有任何报错**。测试用行为证明索引存在：同键第二次写必须
      失败（409 的落地点）、换提案必须仍能写（约束是复合的）、同一提案下另一份资格也必须
      能写（约束不是单列 `proposal_id`），并发同时记同一份资格必须**恰好一个**成功。
-     ⚠️ 本机无 Docker，这两条要等 CI 实跑才算证据。
+     ✅ 2026-10-25 已在本机真 PostgreSQL 17.7 上实跑通过（外部库路径，见上面）；**testcontainers
+     那条路径仍要 CI 实跑**。
 2. **门户 7 个 `.vue` 面板的浏览器实际渲染** —— 仓库里 `.vue` 曾零测试
    - 🟡 **已用服务端渲染补上一半**（本轮落地）：`web/src/components/panels/panels.test.ts`
      （16 个用例）把面板渲染成 HTML 字符串，模板 / setup / computed 都真跑一遍。

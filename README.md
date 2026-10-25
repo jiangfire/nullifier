@@ -47,7 +47,8 @@ nullifier 把这两个动作拆开:
 >   否则服务**启动失败** —— 详见下面的「配置」。
 > - **仍不建议直接用于真实投票** —— 还没闭合的是**生产化验收**与**运营材料**：
 >   门户的浏览器路径**没有 UI 自动化回归**（每次上线仍要人工点一遍，脚本见
->   `scripts/browser-acceptance.sh`）；PostgreSQL 集成测试本机无 Docker、**要等 CI 实跑**；
+>   `scripts/browser-acceptance.sh`）；PostgreSQL 集成测试的 **testcontainers 路径待 CI 实跑**
+>   （外部库路径已在本机真 PostgreSQL 17.7 上实跑通过，浏览器验收也在 PG 上跑通一遍）；
 >   权威名单的真实内容与成员标识形式仍需运营方提供；容量只有压测数据、**没有容量规划**。
 >   发版口径见 [`docs/release-plan-v0.2.0.md`](./docs/release-plan-v0.2.0.md)。
 
