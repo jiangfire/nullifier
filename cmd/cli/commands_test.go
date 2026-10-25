@@ -366,6 +366,32 @@ func TestRun_CommandsThatWriteFiles(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(req.Body), &body))
 		require.Equal(t, []any{"s1", "s2", "s3"}, body["shares"])
 	})
+
+	// `decrypt-setup -out` 写出来的是会话对象，发布结果时必须能直接吃这个文件。
+	t.Run("result-publish 用 decrypt-setup 落盘的会话文件", func(t *testing.T) {
+		t.Parallel()
+
+		srv, requests := newRecordingServer(t, http.StatusOK, `{"status":"published"}`)
+		sharesPath := filepath.Join(dir, "session.json")
+		require.NoError(t, os.WriteFile(sharesPath, []byte(
+			`{"proposal_id":"p1","public_key":"pk","shares":["s1","s2","s3"],"threshold":2,"trustees":3}`,
+		), 0o600))
+
+		code := 0
+		_, errOut := captureOutput(t, func() {
+			code = run([]string{
+				"-base-url", srv.URL, "-admin-token", "secret",
+				"result-publish", "-proposal", "p1", "-shares-file", sharesPath,
+			})
+		})
+
+		require.Equal(t, 0, code, "命令失败: %s", errOut)
+
+		req := <-requests
+		var body map[string]any
+		require.NoError(t, json.Unmarshal([]byte(req.Body), &body))
+		require.Equal(t, []any{"s1", "s2", "s3"}, body["shares"])
+	})
 }
 
 // TestRun_UsageErrors 覆盖参数用法错误。

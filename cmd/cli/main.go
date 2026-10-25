@@ -1199,6 +1199,14 @@ func loadShares(raw string, file string) ([]string, error) {
 	if err := json.Unmarshal(data, &list); err == nil && len(list) > 0 {
 		return list, nil
 	}
+	// `decrypt-setup -out` 写出来的是整个会话对象（`{"shares":[...]}`）——
+	// 这是运营方最自然的用法，发布结果时必须能直接吃这个文件。
+	var session struct {
+		Shares []string `json:"shares"`
+	}
+	if err := json.Unmarshal(data, &session); err == nil && len(session.Shares) > 0 {
+		return session.Shares, nil
+	}
 	values := strings.FieldsFunc(string(data), func(r rune) bool {
 		return r == '\n' || r == '\r' || r == ',' || r == ' ' || r == '\t'
 	})
