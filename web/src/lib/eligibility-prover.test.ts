@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { isReactive, ref } from 'vue';
 import { buildEligibilityProveRequest } from './eligibility-prover';
 
 /**
@@ -66,5 +67,38 @@ describe('资格证明的线路字段名', () => {
     ]);
     expect(request.member_package.index).toBe(3);
     expect(request.member_package.path).toEqual(['a', 'b']);
+  });
+});
+
+/**
+ * 门户里资格包存在 Vue 的 `ref` 里，读出来是**响应式 Proxy**。
+ *
+ * `postMessage` 用结构化克隆传参，而结构化克隆克隆不了 Proxy —— 浏览器直接抛
+ * `DataCloneError: #<Object> could not be cloned.`，「匿名领取」在真浏览器里必然
+ * 失败。这条用例把那个坑钉住：拼出来的请求体必须是**普通对象**，且能被克隆。
+ */
+describe('资格证明请求体的可克隆性', () => {
+  it('响应式 ref 里的成员包也能被结构化克隆', () => {
+    const pack = ref({
+      member_id: 'member-1',
+      secret: 'secret',
+      leaf: 'leaf',
+      index: 3,
+      path: ['a', 'b'],
+      root: 'root-hex',
+      depth: 10,
+    });
+
+    const request = buildEligibilityProveRequest({
+      proposalId: 'p1',
+      challenge: 'challenge-hex',
+      root: 'root-hex',
+      memberPackage: pack.value,
+    });
+
+    expect(isReactive(request.member_package)).toBe(false);
+    expect(isReactive(request.member_package.path)).toBe(false);
+    expect(() => structuredClone(request)).not.toThrow();
+    expect(structuredClone(request).member_package.path).toEqual(['a', 'b']);
   });
 });

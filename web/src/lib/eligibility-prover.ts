@@ -54,15 +54,29 @@ export interface EligibilityProofResult {
  * 字段名与 Go 侧 `cmd/ballot-wasm` 的 `eligibilityProveRequest` 一一对应 ——
  * 跨语言锁死：`tests/architecture/eligibility_wire_test.go` 会拿两边的字段名
  * 对照，改了一边不改另一边就会红。
+ *
+ * 成员包要**逐字段拷成普通对象**：门户里它存在 Vue 的 `ref` 里，读出来是响应式
+ * Proxy，而 `postMessage` 的结构化克隆克隆不了 Proxy —— 浏览器会直接抛
+ * `DataCloneError: #<Object> could not be cloned.`，资格证明根本发不出去。
+ * （这个坑只有真浏览器能挖到：node 驱动的 WASM 用例不走 Worker。）
  */
 export function buildEligibilityProveRequest(
   request: EligibilityProofRequest,
 ): EligibilityProveRequest {
+  const pack = request.memberPackage;
   return {
     proposal_id: request.proposalId,
     challenge: request.challenge,
     root: request.root,
-    member_package: request.memberPackage,
+    member_package: {
+      member_id: pack.member_id,
+      secret: pack.secret,
+      leaf: pack.leaf,
+      index: pack.index,
+      path: [...pack.path],
+      root: pack.root,
+      depth: pack.depth,
+    },
   };
 }
 
