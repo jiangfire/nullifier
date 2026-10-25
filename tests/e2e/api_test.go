@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -280,15 +281,23 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 	const adminToken = "secret"
 	db, err := persistence.NewDB(&persistence.DBConfig{
-		Driver:   "sqlite",
-		Database: "file:e2e-concurrent?mode=memory&cache=shared&_busy_timeout=5000",
+		Driver: "sqlite",
+		// 文件库 + WAL：共享缓存的内存库在并发写时会直接抛 "table is locked"
+		//（共享缓存用表级锁，busy_timeout 不管用）。两个并发投票会因此双双
+		// 失败，断言「恰好一张票入库」变成 flaky。WAL 允许一个写者 + 并发读者，
+		// 写写冲突由 busy_timeout 等待，_txlock=immediate 让事务一开始就拿写锁，
+		// 避免「先读后写」的升级死锁。
+		Database: "file:" + filepath.ToSlash(filepath.Join(t.TempDir(), "concurrent-user.db")) +
+			"?_busy_timeout=10000&_journal_mode=WAL&_txlock=immediate",
 	})
 	require.NoError(t, err)
 	require.NoError(t, persistence.AutoMigrate(db))
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetMaxOpenConns(2)
+	sqlDB.SetMaxIdleConns(2)
+	// 句柄不关的话，Windows 上临时目录清理会因文件被占用而失败。
+	t.Cleanup(func() { _ = sqlDB.Close() })
 
 	voteRepo := persistence.NewVoteRepository(db)
 	credentialRepo := persistence.NewCredentialRepository(db)
