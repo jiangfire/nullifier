@@ -475,7 +475,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.4% |
 | 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 149 个用例全过 |
 | 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未完全闭合（盲区 3 的「防重投」与「容量」两半已补；盲区 1 的 PG 集成测试已有 compose + `make pg-test` 可复现脚本，⚠️ 本机无 Docker 未实跑；盲区 2 已闭合「WASM 路径在真实浏览器里可用」这一半 —— **选票与资格两条浏览器路径都已在真浏览器里人工验过**（2026-10-25），**且整套手工流程已固化成 `scripts/browser-acceptance.sh`**（`setup` / `verify` / `stop`），⚠️ 但门户面板仍没有 UI 自动化回归） |
-| 9 | README / techspec / 门户三处的匿名性声明不一致 | 🟡 **本轮已同步，待复核** —— 三处与 §4.1 的能力表对齐 |
+| 9 | README / techspec / 门户三处的匿名性声明不一致 | ✅ **已过**（2026-10-25 复核）—— 三处与 §4.1 的能力表对齐。复核时**在门户里挖出一处对用户说错的陈述**：门户「术语参考」面板仍写着「**当前版本密文由服务端生成，生成时服务端能看到你选的选项**」「还没有真实的选票电路」—— 那是 v0.1.0 的口径，v0.2.0 的密文与证明都在浏览器本地生成。已改（`fix(web): tell the truth about where the ballot is encrypted`），并加了一条守卫用例钉住它（`web/src/components/panels/panels.test.ts`）：文案里再出现「服务端能看到你选的选项」这类说法就红。**服务端那条底线由 `tests/architecture/` 守，门户文案这一半现在也守了** |
 
 **Go**
 

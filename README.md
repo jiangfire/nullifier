@@ -27,11 +27,11 @@ nullifier 把这两个动作拆开:
 
 结果是:管理员能看到计票结果和审计锚点,但拿到数据库也回答不了"某个人投了什么"。
 
-> ### ⚠️ 当前版本边界（v0.1.0 内测版 + v0.2.0 证明链）
+> ### ⚠️ 当前版本边界（v0.2.0 的实现，**尚未发版**）
 >
-> 这个版本把「选票内容与投票人身份分离」的**存储与接口骨架**跑通了，并已接上**真实的
-> Groth16 选票电路**（服务端能真实验签）。但**客户端侧还差最后一段**：请在下面的
-> 「项目状态与限制」里读完整说明，不要把当前实现当成生产能力：
+> 这个版本把「选票内容与投票人身份分离」整条链跑通了：选票的加密与证明都在客户端完成，
+> 服务端只见密文；「一人一票」由零知识资格证明兑现。但**生产化验收还没全部闭合** ——
+> 请在下面的「项目状态与限制」里读完整说明，不要把当前实现当成已经过生产验收的能力：
 >
 > - **服务端侧证明链已成立，CLI 与浏览器都能在本地出证明。** 电路、`cmd/keygen`
 >   密钥生成、服务端按请求字段自拼公开输入并真实验签都已落地；**CLI 用本地 proving key
@@ -45,8 +45,11 @@ nullifier 把这两个动作拆开:
 >   对应到任何成员**。同一份资格在同一个提案里只能领一次（跨提案互不关联）。
 >   ⚠️ **这是 release 模式的硬要求**：生产部署必须配好名单根与资格验证密钥，
 >   否则服务**启动失败** —— 详见下面的「配置」。
-> - **只适合内测与开发**，不要用于真实投票。仍未闭合的是**生产化验收**与门户的
->   **浏览器自动化回归**，见 [`docs/roadmap.md`](./docs/roadmap.md) 的 v0.2.0 里程碑。
+> - **仍不建议直接用于真实投票** —— 还没闭合的是**生产化验收**与**运营材料**：
+>   门户的浏览器路径**没有 UI 自动化回归**（每次上线仍要人工点一遍，脚本见
+>   `scripts/browser-acceptance.sh`）；PostgreSQL 集成测试本机无 Docker、**要等 CI 实跑**；
+>   权威名单的真实内容与成员标识形式仍需运营方提供；容量只有压测数据、**没有容量规划**。
+>   发版口径见 [`docs/release-plan-v0.2.0.md`](./docs/release-plan-v0.2.0.md)。
 
 ## 特性
 
@@ -360,14 +363,14 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 - **证明链:服务端、CLI、浏览器三侧都通了。** 真实 Groth16 电路(`internal/infrastructure/crypto/ballot/`)、`cmd/keygen` 密钥生成流程、服务端按请求字段自拼公开输入并真实验签都已落地 —— 篡改任一公开输入都会验签失败。**CLI 能本地生成 proof**(`ballot-prove`,用本地 proving key,证明不经过服务端);**浏览器也能**(`cmd/ballot-wasm` 编译成 WASM,门户在 Web Worker 里加载它出票)。`crypto.vk_path` 为空时验证器只要求 proof 非空(开发模式),本地「验证通过」不代表真的验过。
 - **选票密文在客户端生成,CLI 与门户两侧都已闭合。** 服务端只提供公开的计票公钥(`GET /api/v1/proposals/:id/election-key`),落库记录里只有密文。门户的出票入口是「在浏览器本地生成选票」;CLI 是 `ballot-encrypt` + `ballot-prove`。两边的点编码**逐字节一致**,由一组跨语言已知答案向量锁死。端到端证据:`tests/e2e/client_prover_test.go`(CLI)与 `tests/e2e/wasm_prover_test.go`(浏览器 WASM 模块,node 驱动)。**服务端没有任何接收明文选项的入口** —— `ballot-draft`(服务端代加密)已删除,`tests/architecture/` 持续盯着这条底线。
-- **浏览器端 prover 的三个静态资源要部署时备齐。** `wasm_exec.js`、`ballot-prover.wasm`(约 11.9 MB,gzip 后约 2.8 MB)、`proving.key`(约 1.2 MB):`make web-wasm` 与 `make web-proving-key PK=<路径>`。首次出票要下载它们并初始化证明器(浏览器实测约 12~14 秒,含编译电路),出证明约 3 秒。**proving key 只在客户端** —— 服务端只拿 verifying key。服务端开了资格校验时还要多备一个 `eligibility-proving.key`(`make web-eligibility-key PK=<路径>`)—— **它与选票的 proving key 不是同一把**。
-- **门户的浏览器路径已在真实浏览器里跑过（2026-10-25）。** 端到端证据有两条：node 驱动同一个 WASM 模块的自动化用例（`tests/e2e/wasm_prover_test.go`），以及一次**真实浏览器**（Chromium / Electron）的人工验收 —— 静态资源三件套真实加载 → 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 服务端以真 verifying key 验签通过（201）→ 提案关闭后计票还原出所选选项。⚠️ 但**仓库里仍然没有浏览器自动化**（无 Playwright），门户的 UI 交互仍要人工核对；首次上线仍建议人工点一次出票流程 —— 这次验收正是靠它挖出了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而不是线路名，领取流程会停在 claim 之后）。
+- **浏览器端 prover 的静态资源要部署时备齐。** `wasm_exec.js`、`ballot-prover.wasm`（约 11.9 MB，gzip 后约 2.8 MB）、`proving.key`（约 1.2 MB）、`eligibility-proving.key`（约 1.1 MB）—— **release 模式下是四个，缺一不可**：`make web-wasm`、`make web-proving-key PK=<路径>`、`make web-eligibility-key PK=<路径>`。首次出票要下载它们并初始化证明器（浏览器实测约 12~14 秒，含编译电路），出证明约 3 秒。**两把 proving key 只在客户端** —— 服务端只拿 verifying key；**它们不是同一把**（选票电路与资格电路各一套 setup）。⚠️ **发布流水线的门户包里默认没有那两把 key**（秘密材料，每套部署要用与自己服务端配对的那对）—— 部署时必须自己补进 `web/dist/`，详见 [`docs/deployment-checklist.md`](./docs/deployment-checklist.md) §1/§6。
+- **门户的浏览器路径已在真实浏览器里跑过（2026-10-25）。** 端到端证据有三条：node 驱动同一个 WASM 模块的自动化用例（`tests/e2e/wasm_prover_test.go`），一次**真实浏览器**（Chromium / Electron）的人工验收（静态资源三件套真实加载 → 出证明 init 11.8~14.3 秒、prove 2.9 秒 → 服务端以真 verifying key 验签通过 201 → 提案关闭后计票还原出所选选项），以及把整套人工流程**固化成脚本**的 `scripts/browser-acceptance.sh`（`setup` 备好环境并逐条打印步骤 → 人在浏览器里点 → `verify` 核对服务端日志与计票 → `stop` 收尾）。⚠️ 但**仓库里仍然没有浏览器自动化**（无 Playwright），门户的 UI 交互仍要人工核对；首次上线仍建议跑一次 `bash ./scripts/browser-acceptance.sh setup` 人工点一遍 —— 上一次真实验收正是靠它挖出了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而不是线路名，领取流程会停在 claim 之后）。
 - **凭证签名现在会被验证。** 投票落库前会调用签发方验签,伪造签名的请求返回 401。
 - **凭证签发是真两段式盲签名。** 客户端本地盲化(`sha256(user_id ‖ 0x00 ‖ user_pub_key)`),签发方在**签名阶段**只见盲化消息 —— 它没有、也不需要私钥以外的任何客户端秘密。⚠️ 口径:最后一次 attest 时服务端会看到公钥与 `user_id`,因为验签必须重算凭证消息;达成的是「签发方看不到被签内容」,不是「服务端全程不知道客户端是谁」。
 - **凭证不再由 admin 逐个分发。** 改为「凭证池 + 投票人匿名随机领取」：admin 往池里批量投放预签凭证，投票人自己随机领一张（`POST /api/v1/proposals/:id/credentials/claim`），运营方不再天然掌握「哪个凭证给了谁」。**一人一票由资格证明补回**（见下）。
 - **一人一票靠零知识资格证明强制。** 运营方的权威名单做成 Merkle 承诺，**服务端只拿到名单的根** —— 它能验证「这个资格在名单里」，却**无法把资格对应到任何成员**。去重键 `QualificationID = MiMC(Leaf, ProposalID)` 按提案派生，同一提案里同一资格只能领一次（跨提案互不关联），强制点是新表 `eligibility_uses` 的唯一索引。领凭证前先取一次挑战（`eligibility-challenge`），把资格证明带进 claim；**资格不过不消耗池槽位**。CLI 走 `credential-claim -eligibility`，门户在「身份」面板导入资格文件后本地出证明（资格包只留内存，不写 localStorage、不上传）。
   - ⚠️ **release 模式必须配 `crypto.eligibility_root` + `crypto.eligibility_vk_path`，否则启动失败。** 两项必须成对出现 —— 缺了资格校验的服务端只是个能发凭证的服务器。生产部署的三步（生成名单 → 生成资格密钥 → 部署）见上面的「一人一票：资格名单与资格密钥」。
-  - ⚠️ **门户的资格领取路径没有浏览器自动化**（仓库无 Playwright）—— 自动化证据只到 node 驱动的 WASM 模块，真浏览器里人工点一遍仍要做。⚠️ `cmd/loadtest` 不支持资格证明（只在未开启资格校验的服务上可用）。⚠️ **资格包丢失找不回来**（它是秘密材料）。⚠️ **真实名单的内容与成员标识形式仍需运营方提供**；单份名单上限 1024 人。
+  - ⚠️ **门户的资格领取路径没有浏览器自动化**（仓库无 Playwright）—— 自动化证据只到 node 驱动的 WASM 模块，真浏览器里人工点一遍仍要做（`bash ./scripts/browser-acceptance.sh setup` 会备好环境并打印步骤，点完跑 `verify` 核对）。⚠️ `cmd/loadtest` 不支持资格证明（只在未开启资格校验的服务上可用）。⚠️ **资格包丢失找不回来**（它是秘密材料）。⚠️ **真实名单的内容与成员标识形式仍需运营方提供**；单份名单上限 1024 人。
 - **`decryption/setup` 拒绝"投票开放中"的提案**,运营上必须在 `starts_at` 之前完成初始化。
 - **生产部署必须显式设置** `SERVER_ADMIN_BEARER_TOKEN` 与 `SERVER_CORS_ALLOWED_ORIGINS`；`release` 模式下缺 admin token 会直接启动失败,**缺 `CRYPTO_ELIGIBILITY_ROOT` / `CRYPTO_ELIGIBILITY_VK_PATH` 也会直接启动失败**(一人一票是硬要求)。`configs/config.production.yaml` **不会**被自动加载(viper 只找 `config.yaml`),用 `CONFIG_FILE=./configs/config.production.yaml` 启动即可 —— **显式指定的文件不存在时服务直接启动失败**,不会静默回退到开发配置;启动日志的 `config_file` 字段会打印实际加载的文件路径,上线先核一眼。详见该文件内的注释。
 

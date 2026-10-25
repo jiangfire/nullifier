@@ -158,4 +158,22 @@ describe('参考面板', () => {
     expect(html).toContain('proposal_id');
     expect(html).toContain('nullifier');
   });
+
+  // 门户是用户唯一能看到的产品表面 —— 它对匿名性说错话，等于产品对外承诺错了。
+  // 这三条是「已经发生过」的文案：v0.2.0 之前，门户的术语面板就是这么写的
+  // （「当前版本密文由服务端生成，生成时服务端能看到你选的选项」）。
+  // 服务端侧的同一条底线由 tests/architecture/plaintext_option_test.go 守着，
+  // 这里守文案那一半。
+  it('不对用户宣称「服务端能看到你选了哪个选项」', async () => {
+    const html = await renderPanel(ReferencePanel, createPortalApi());
+    expect(html).not.toContain('服务端能看到你选的选项');
+    expect(html).not.toContain('密文由服务端生成');
+    expect(html).not.toContain('还没有真实的选票电路');
+  });
+
+  it('说清楚密文与证明都在浏览器本地生成', async () => {
+    const html = await renderPanel(ReferencePanel, createPortalApi());
+    expect(html).toContain('浏览器里生成');
+    expect(html).toContain('eligibility_proof');
+  });
 });
