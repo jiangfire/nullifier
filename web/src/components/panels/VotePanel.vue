@@ -10,8 +10,8 @@ const emit = defineEmits<{
   submitted: [];
 }>();
 
-async function prepare(): Promise<void> {
-  const ok = await portal.prepareBallotByOption();
+async function prepareLocally(): Promise<void> {
+  const ok = await portal.generateBallotLocally();
   if (ok) {
     emit('ballotReady');
   }
@@ -175,17 +175,21 @@ async function checkStatus(): Promise<void> {
         <div id="guide-anchor-user-vote-prepare" class="flow-body">
           <h2 class="card-title">生成投票凭据</h2>
           <p class="card-sub">
-            凭据由服务端按你选中的选项生成，不需要手写 proof 或密文。
-            改选项会让已生成的凭据失效，需要重新生成。
+            选票在你的浏览器里生成：密文、nullifier 与零知识证明都在本地算完再提交，
+            服务端拿不到你选了哪个选项。第一次生成需要下载并初始化证明器（约 10 秒）。
           </p>
           <button
             class="btn btn--primary"
             type="button"
             :disabled="portal.voteLoading || !portal.walletReady"
-            @click="prepare"
+            @click="prepareLocally"
           >
-            {{ portal.voteLoading ? '生成中…' : '按选项生成凭据' }}
+            {{ portal.voteLoading ? '生成中…' : '在浏览器本地生成选票' }}
           </button>
+          <p class="card-sub">
+            正式模式下只有这一个出票入口：没有「让服务端代生成凭据」的路子 ——
+            那会让服务端看到你选了哪个选项，与匿名投票的前提冲突。
+          </p>
 
           <details class="disclosure">
             <summary>低频工具与高级字段</summary>
@@ -257,14 +261,6 @@ async function checkStatus(): Promise<void> {
                 :aria-invalid="portal.voteErrors.nullifier ? 'true' : 'false'"
               />
             </label>
-            <label class="field" for="vote-public-witness">
-              <span class="field-label">public_witness（可选）</span>
-              <textarea
-                id="vote-public-witness"
-                v-model.trim="portal.voteForm.publicWitness"
-                rows="2"
-              />
-            </label>
           </details>
         </div>
       </li>
@@ -275,8 +271,8 @@ async function checkStatus(): Promise<void> {
           <h2 class="card-title">提交选票</h2>
           <p class="card-sub">
             提交后服务端保存的是加密选票，计票需要凑齐门限份额才能还原。
-            但当前版本密文由服务端生成，生成时服务端能看到你选的选项 ——
-            客户端本地加密是下一版本的目标。
+            密文与证明都由你的浏览器生成 —— 服务端只看到密文、nullifier 与证明，
+            看不到你选了哪个选项。
           </p>
           <button
             class="btn btn--primary"

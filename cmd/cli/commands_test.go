@@ -127,14 +127,6 @@ func TestRun_HTTPCommands(t *testing.T) {
 			wantOut: `"id": "p1"`,
 		},
 		{
-			name:    "ballot-draft",
-			args:    []string{"ballot-draft", "-proposal", "p1", "-option", "A"},
-			method:  http.MethodPost,
-			path:    "/api/v1/proposals/p1/ballot-draft",
-			resp:    `{"proposal_id":"p1","option":"A","encrypted_vote":"cipher","proof":"proof","nullifier":"n1","public_witness":"w"}`,
-			wantOut: `"encrypted_vote": "cipher"`,
-		},
-		{
 			name:    "vote-status",
 			args:    []string{"vote-status", "-proposal", "p1", "-credential-file", credentialPath},
 			method:  http.MethodPost,
@@ -206,8 +198,21 @@ func TestRun_CommandsThatWriteFiles(t *testing.T) {
 	t.Run("credential-issue 落盘", func(t *testing.T) {
 		t.Parallel()
 
-		srv, requests := newRecordingServer(t, http.StatusOK,
-			`{"proposal_id":"p1","user_id":"u-1","user_pub_key":"pk","signature":"sig"}`)
+		// 管理端签发走真两段式盲签名：服务端只见盲化消息。
+		server := newBlindSigningServer(t)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server.requests = append(server.requests, r.URL.Path)
+			switch r.URL.Path {
+			case "/api/v1/credentials":
+				server.writeReservation(t, w, "p1", "u-1")
+			case "/api/v1/credentials/blind-sign":
+				server.writeBlindSignature(t, w, r)
+			default:
+				server.writeCredential(t, w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+
 		outPath := filepath.Join(dir, "issued.json")
 
 		code := 0
@@ -220,11 +225,11 @@ func TestRun_CommandsThatWriteFiles(t *testing.T) {
 
 		require.Equal(t, 0, code)
 		require.Contains(t, out, outPath)
-
-		req := <-requests
-		require.Equal(t, http.MethodPost, req.Method)
-		require.Equal(t, "/api/v1/credentials", req.Path)
-		require.Equal(t, "Bearer secret", req.Auth)
+		require.Equal(t, []string{
+			"/api/v1/credentials",
+			"/api/v1/credentials/blind-sign",
+			"/api/v1/proposals/p1/credentials/attest",
+		}, server.requests)
 
 		var issued credentialFile
 		raw, err := os.ReadFile(outPath)
@@ -234,36 +239,6 @@ func TestRun_CommandsThatWriteFiles(t *testing.T) {
 		require.Equal(t, "p1", issued.ProposalID)
 		require.Equal(t, "u-1", issued.UserID)
 		require.NotEmpty(t, issued.ExportedAt)
-	})
-
-	t.Run("ballot-draft 落盘", func(t *testing.T) {
-		t.Parallel()
-
-		srv, requests := newRecordingServer(t, http.StatusOK,
-			`{"proposal_id":"p1","option":"A","encrypted_vote":"cipher","proof":"proof","nullifier":"n1"}`)
-		outPath := filepath.Join(dir, "ballot.json")
-
-		code := 0
-		out, _ := captureOutput(t, func() {
-			code = run([]string{
-				"-base-url", srv.URL,
-				"ballot-draft", "-proposal", "p1", "-option", "A", "-out", outPath,
-			})
-		})
-
-		require.Equal(t, 0, code)
-		require.Contains(t, out, outPath)
-
-		req := <-requests
-		require.Equal(t, "/api/v1/proposals/p1/ballot-draft", req.Path)
-
-		var ballot ballotFile
-		raw, err := os.ReadFile(outPath)
-		require.NoError(t, err)
-		require.NoError(t, json.Unmarshal(raw, &ballot))
-		require.Equal(t, "p1", ballot.ProposalID)
-		require.Equal(t, "A", ballot.SelectedOption)
-		require.Equal(t, "cipher", ballot.EncryptedVote)
 	})
 
 	t.Run("vote-submit 提交选票", func(t *testing.T) {
@@ -349,6 +324,32 @@ func TestRun_CommandsThatWriteFiles(t *testing.T) {
 		req := <-requests
 		require.Equal(t, "/api/v1/proposals/p1/results/publish", req.Path)
 
+		var body map[string]any
+		require.NoError(t, json.Unmarshal([]byte(req.Body), &body))
+		require.Equal(t, []any{"s1", "s2", "s3"}, body["shares"])
+	})
+
+	// `decrypt-setup -out` 写出来的是会话对象，发布结果时必须能直接吃这个文件。
+	t.Run("result-publish 用 decrypt-setup 落盘的会话文件", func(t *testing.T) {
+		t.Parallel()
+
+		srv, requests := newRecordingServer(t, http.StatusOK, `{"status":"published"}`)
+		sharesPath := filepath.Join(dir, "session.json")
+		require.NoError(t, os.WriteFile(sharesPath, []byte(
+			`{"proposal_id":"p1","public_key":"pk","shares":["s1","s2","s3"],"threshold":2,"trustees":3}`,
+		), 0o600))
+
+		code := 0
+		_, errOut := captureOutput(t, func() {
+			code = run([]string{
+				"-base-url", srv.URL, "-admin-token", "secret",
+				"result-publish", "-proposal", "p1", "-shares-file", sharesPath,
+			})
+		})
+
+		require.Equal(t, 0, code, "命令失败: %s", errOut)
+
+		req := <-requests
 		var body map[string]any
 		require.NoError(t, json.Unmarshal([]byte(req.Body), &body))
 		require.Equal(t, []any{"s1", "s2", "s3"}, body["shares"])
@@ -496,7 +497,6 @@ func TestRun_MissingRequiredFlags(t *testing.T) {
 		{name: "proposal-create", call: func(c *cli) error { return c.cmdCreateProposal(nil) }},
 		{name: "credential-issue", call: func(c *cli) error { return c.cmdIssueCredential(nil) }},
 		{name: "credential-show", call: func(c *cli) error { return c.cmdShowCredential(nil) }},
-		{name: "ballot-draft", call: func(c *cli) error { return c.cmdBallotDraft(nil) }},
 		{name: "vote-submit", call: func(c *cli) error { return c.cmdVoteSubmit(nil) }},
 		{name: "vote-status", call: func(c *cli) error { return c.cmdVoteStatus(nil) }},
 		{name: "credentials-list", call: func(c *cli) error { return c.cmdCredentialStatuses(nil) }},

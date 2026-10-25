@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,7 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 func TestVoteRepository_Postgres(t *testing.T) {
@@ -104,6 +107,17 @@ func setupPostgresDB(t *testing.T) (context.Context, *gorm.DB, func()) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+
+	// 外部 PostgreSQL 优先：本地用 compose 起一个库就能跑，不必依赖 Docker 的
+	// testcontainers 拉镜像（离线环境拉不动）。两条路径共用同一份测试代码。
+	if settings, ok := externalPostgresSettingsFromEnv(); ok {
+		db, cleanup := connectExternalPostgres(t, ctx, settings)
+		return ctx, db, func() {
+			cleanup()
+			cancel()
+		}
+	}
+
 	req := testcontainers.ContainerRequest{
 		Image:        "postgres:16-alpine",
 		ExposedPorts: []string{"5432/tcp"},
@@ -168,6 +182,96 @@ func setupPostgresDB(t *testing.T) (context.Context, *gorm.DB, func()) {
 	}
 
 	return ctx, db, cleanup
+}
+
+// externalPostgresSettings 描述一个外部 PostgreSQL 的连接参数。
+type externalPostgresSettings struct {
+	Host     string
+	Port     int
+	User     string
+	Password string
+	Database string
+}
+
+// externalPostgresSettingsFromEnv 从环境变量读外部 PostgreSQL 的连接参数。
+//
+// 设了 `ANONVOTE_TEST_PG_HOST` 就走外部库（见仓库根的 `docker-compose.yml` 与
+// `make pg-test`）；没设就走 testcontainers 拉一个临时容器。
+func externalPostgresSettingsFromEnv() (externalPostgresSettings, bool) {
+	host := strings.TrimSpace(os.Getenv("ANONVOTE_TEST_PG_HOST"))
+	if host == "" {
+		return externalPostgresSettings{}, false
+	}
+	settings := externalPostgresSettings{
+		Host:     host,
+		Port:     5432,
+		User:     "test",
+		Password: "test",
+		Database: "anonvote",
+	}
+	if port := strings.TrimSpace(os.Getenv("ANONVOTE_TEST_PG_PORT")); port != "" {
+		parsed, err := strconv.Atoi(port)
+		if err != nil {
+			return externalPostgresSettings{}, false
+		}
+		settings.Port = parsed
+	}
+	if user := strings.TrimSpace(os.Getenv("ANONVOTE_TEST_PG_USER")); user != "" {
+		settings.User = user
+	}
+	if password := os.Getenv("ANONVOTE_TEST_PG_PASSWORD"); password != "" {
+		settings.Password = password
+	}
+	if database := strings.TrimSpace(os.Getenv("ANONVOTE_TEST_PG_DATABASE")); database != "" {
+		settings.Database = database
+	}
+	return settings, true
+}
+
+// connectExternalPostgres 连外部 PostgreSQL，并给这次测试开一个**独立的 schema**。
+//
+// 每个测试一个 schema：同一��库上反复跑测试不会撞上一次留下的表，跑完直接
+// 删掉 schema 即可清理。
+func connectExternalPostgres(
+	t *testing.T,
+	ctx context.Context,
+	settings externalPostgresSettings,
+) (*gorm.DB, func()) {
+	t.Helper()
+
+	schema := fmt.Sprintf("itest_%d", time.Now().UnixNano())
+	adminDSN := fmt.Sprintf(
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+		settings.Host,
+		settings.Port,
+		settings.User,
+		settings.Password,
+		settings.Database,
+	)
+	adminDB, err := gorm.Open(gormpostgres.Open(adminDSN), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	require.NoError(t, err)
+	require.NoError(t, adminDB.WithContext(ctx).
+		Exec(`CREATE SCHEMA IF NOT EXISTS `+schema).Error)
+
+	dsn := adminDSN + " search_path=" + schema
+	db, err := gorm.Open(gormpostgres.Open(dsn), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+	})
+	require.NoError(t, err)
+	require.NoError(t, persistence.AutoMigrate(db))
+
+	cleanup := func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+		if sqlDB, err := adminDB.DB(); err == nil {
+			_, _ = sqlDB.Exec(`DROP SCHEMA IF EXISTS ` + schema + ` CASCADE`)
+			_ = sqlDB.Close()
+		}
+	}
+	return db, cleanup
 }
 
 func isDockerUnavailable(err error) bool {

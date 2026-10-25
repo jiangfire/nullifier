@@ -59,6 +59,18 @@ func mapError(err error) (int, string) {
 	case errors.Is(err, usecase.ErrCredentialPoolEmpty):
 		// 凭证池领完是运营状态问题，不是服务端故障 —— 4xx，别进 500。
 		return http.StatusConflict, "CREDENTIAL_POOL_EMPTY"
+	case errors.Is(err, usecase.ErrEligibilityRequired):
+		// 客户端该带资格材料却没带 —— 请求不完整。
+		return http.StatusBadRequest, "ELIGIBILITY_REQUIRED"
+	case errors.Is(err, usecase.ErrInvalidEligibilityProof):
+		// 证明没验过：伪造、名单不对、提案不对或挑战不对。
+		return http.StatusForbidden, "INVALID_ELIGIBILITY_PROOF"
+	case errors.Is(err, usecase.ErrEligibilityAlreadyUsed):
+		// 一人一票的强制点：这份资格已经领过票了。
+		return http.StatusConflict, "ELIGIBILITY_ALREADY_USED"
+	case errors.Is(err, usecase.ErrEligibilityNotEnabled):
+		// 服务端没有开启资格校验 —— 部署形态问题，不是客户端的错。
+		return http.StatusConflict, "ELIGIBILITY_NOT_ENABLED"
 	case errors.Is(err, repository.ErrNotFound):
 		return http.StatusNotFound, "NOT_FOUND"
 	default:
@@ -84,6 +96,17 @@ func publicErrorMessage(err error, code string) string {
 		return "tally result already published"
 	case "UNAUTHORIZED":
 		return "unauthorized"
+	case "CREDENTIAL_POOL_EMPTY":
+		// 凭证池领完是运营状态问题，不是服务端故障 —— 别报成 internal error。
+		return "credential pool is empty"
+	case "ELIGIBILITY_REQUIRED":
+		return "eligibility proof is required"
+	case "INVALID_ELIGIBILITY_PROOF":
+		return "invalid eligibility proof"
+	case "ELIGIBILITY_ALREADY_USED":
+		return "this eligibility has already been used"
+	case "ELIGIBILITY_NOT_ENABLED":
+		return "eligibility verification is not enabled on this server"
 	case "NOT_FOUND":
 		return "resource not found"
 	default:

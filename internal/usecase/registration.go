@@ -17,16 +17,71 @@ import (
 const (
 	// maxCredentialPoolSize 限制单次备池数量，避免一个请求打爆数据库。
 	maxCredentialPoolSize = 10000
-	// claimMaxAttempts 是领取时的重试次数（被别人抢先领走时换槽位重试）。
-	claimMaxAttempts = 5
 )
+
+// BlindSignScope 规定盲签名能覆盖哪些 user_id。
+type BlindSignScope int
+
+const (
+	// BlindSignScopePoolSlot 只允许为「池里还空着的槽位」盲签 —— 公开端点用。
+	//
+	// 少了这条限制，公开的盲签名端点会把签发方变成「任意消息」的签名预言机：
+	// 任何人都能拿它签任意消息。绑定到具体槽位后，能签的就只有池里的假名。
+	BlindSignScopePoolSlot BlindSignScope = iota
+	// BlindSignScopeAnyUser 允许为任意 user_id 盲签 —— 管理端用。
+	//
+	// 运营方本来就有服务端的完整权限，这条不给他新增任何能力。
+	BlindSignScopeAnyUser
+)
+
+// CredentialReservation 是一次「预留签发权」的结果。
+//
+// 预留**不签名**：客户端拿到 user_id 与签发方公钥后，在本地把凭证消息盲化，
+// 再把盲化消息送来盲签。服务端从头到尾没见过被签内容。
+type CredentialReservation struct {
+	// ProposalID 是提案 ID。
+	ProposalID string
+	// UserID 是这次预留拿到的凭证假名。
+	UserID string
+	// IssuerKey 是签发方公钥：客户端盲化消息时需要它。
+	IssuerKey *domaincrypto.IssuerPublicKey
+}
+
+// EligibilityMaterial 是客户端提交的一份资格材料。
+//
+// 三件材料缺一不可：证明、去重键、挑战。去重键与挑战都是**公开输入**，
+// 服务端据此自拼 statement —— 客户端无从篡改。
+type EligibilityMaterial struct {
+	// Proof 是 Groth16 资格证明。
+	Proof []byte
+	// QualificationID 是去重键（十六进制的域元素）。
+	QualificationID string
+	// Challenge 是本次领取会话的挑战（十六进制的域元素）。
+	Challenge string
+}
+
+// EligibilityChallenge 是服务端签发的一次领取挑战。
+type EligibilityChallenge struct {
+	// ProposalID 是提案 ID。
+	ProposalID string
+	// Root 是资格名单的树根 —— 客户端用它出证明（以服务端为准）。
+	Root string
+	// Depth 是名单树的深度。
+	Depth int
+	// Challenge 是本次会话的一次性挑战。
+	Challenge string
+}
 
 type RegisterUseCase struct {
 	repo         repository.CredentialRepository
 	proposalRepo repository.ProposalRepository
 	issuer       domaincrypto.CredentialIssuer
 	claimRepo    repository.CredentialClaimRepository
-	logger       *zap.Logger
+	// eligibilityRepo 记录资格的使用情况 —— 一人一票的强制点。
+	eligibilityRepo repository.EligibilityUseRepository
+	// eligibility 校验资格证明。为 nil 或未开启时，服务端不强制一人一票。
+	eligibility domaincrypto.EligibilityService
+	logger      *zap.Logger
 }
 
 func NewRegisterUseCase(
@@ -46,23 +101,303 @@ func NewRegisterUseCaseWithPool(
 	claimRepo repository.CredentialClaimRepository,
 	logger *zap.Logger,
 ) *RegisterUseCase {
+	return newRegisterUseCase(repo, proposalRepo, issuer, claimRepo, nil, nil, logger)
+}
+
+// NewRegisterUseCaseWithEligibility 额外接入资格校验：凭证池仓储 + 资格使用
+// 仓储 + 资格校验器。
+//
+// 这是生产形态：没有它，服务端不强制「一人一票」。
+func NewRegisterUseCaseWithEligibility(
+	repo repository.CredentialRepository,
+	proposalRepo repository.ProposalRepository,
+	issuer domaincrypto.CredentialIssuer,
+	claimRepo repository.CredentialClaimRepository,
+	eligibilityRepo repository.EligibilityUseRepository,
+	eligibility domaincrypto.EligibilityService,
+	logger *zap.Logger,
+) *RegisterUseCase {
+	return newRegisterUseCase(repo, proposalRepo, issuer, claimRepo, eligibilityRepo, eligibility, logger)
+}
+
+func newRegisterUseCase(
+	repo repository.CredentialRepository,
+	proposalRepo repository.ProposalRepository,
+	issuer domaincrypto.CredentialIssuer,
+	claimRepo repository.CredentialClaimRepository,
+	eligibilityRepo repository.EligibilityUseRepository,
+	eligibility domaincrypto.EligibilityService,
+	logger *zap.Logger,
+) *RegisterUseCase {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	return &RegisterUseCase{
-		repo:         repo,
-		proposalRepo: proposalRepo,
-		issuer:       issuer,
-		claimRepo:    claimRepo,
-		logger:       logger,
+		repo:            repo,
+		proposalRepo:    proposalRepo,
+		issuer:          issuer,
+		claimRepo:       claimRepo,
+		eligibilityRepo: eligibilityRepo,
+		eligibility:     eligibility,
+		logger:          logger,
 	}
 }
 
-func (uc *RegisterUseCase) IssueCredential(
+// ReserveCredentialForUser 管理端为一个指定的 user_id 预留签发权。
+//
+// 它**不签名**：管理端客户端拿到 user_id 与签发方公钥后，在本地把凭证消息
+// 盲化，再走「盲签名 → attest」两步。服务端因此在签名阶段只见盲化消息。
+func (uc *RegisterUseCase) ReserveCredentialForUser(
+	ctx context.Context,
+	proposalID string,
+	userID string,
+) (*CredentialReservation, error) {
+	if uc.repo == nil {
+		return nil, errors.New("credential repository is not configured")
+	}
+	if uc.issuer == nil {
+		return nil, errors.New("credential issuer is not configured")
+	}
+	if uc.proposalRepo == nil {
+		return nil, errors.New("proposal repository is not configured")
+	}
+	if proposalID == "" {
+		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
+	}
+	if userID == "" {
+		return nil, fmt.Errorf("%w: user_id is required", ErrInvalidRequest)
+	}
+	if _, err := uc.proposalRepo.GetByID(ctx, proposalID); err != nil {
+		return nil, fmt.Errorf("load proposal: %w", err)
+	}
+
+	existing, err := uc.repo.GetByProposalAndUserID(ctx, proposalID, userID)
+	if err == nil && existing != nil {
+		return nil, ErrCredentialAlreadyIssued
+	}
+	if err != nil && !errors.Is(err, repository.ErrNotFound) {
+		return nil, fmt.Errorf("check existing credential: %w", err)
+	}
+
+	issuerKey, err := uc.issuer.IssuerPublicKey(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load issuer public key: %w", err)
+	}
+	return &CredentialReservation{
+		ProposalID: proposalID,
+		UserID:     userID,
+		IssuerKey:  issuerKey,
+	}, nil
+}
+
+// IssueEligibilityChallenge 签发一次领取会话的挑战。
+//
+// 服务端**不记账**：挑战的价值在于把证明钉在本次会话上，重放由去重键
+// （唯一索引）挡住 —— 见 docs/t22-eligibility-design.md §3.5。
+func (uc *RegisterUseCase) IssueEligibilityChallenge(
+	ctx context.Context,
+	proposalID string,
+) (*EligibilityChallenge, error) {
+	if uc.eligibility == nil || !uc.eligibility.Enabled() {
+		return nil, fmt.Errorf("%w: the server does not verify eligibility proofs", ErrEligibilityNotEnabled)
+	}
+	if uc.proposalRepo == nil {
+		return nil, errors.New("proposal repository is not configured")
+	}
+	if proposalID == "" {
+		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
+	}
+	if _, err := uc.proposalRepo.GetByID(ctx, proposalID); err != nil {
+		return nil, fmt.Errorf("load proposal: %w", err)
+	}
+
+	root, depth, err := uc.eligibility.Root()
+	if err != nil {
+		return nil, fmt.Errorf("load eligibility root: %w", err)
+	}
+	challenge, err := uc.eligibility.NewChallenge()
+	if err != nil {
+		return nil, fmt.Errorf("generate eligibility challenge: %w", err)
+	}
+	return &EligibilityChallenge{
+		ProposalID: proposalID,
+		Root:       root,
+		Depth:      depth,
+		Challenge:  challenge,
+	}, nil
+}
+
+// verifyEligibility 校验一份资格材料。
+//
+// root 用服务端自己配置的那个；statement 的五个公开输入全部由服务端拼装，
+// 客户端只能提供「证明 + 去重键 + 挑战」三样。
+func (uc *RegisterUseCase) verifyEligibility(
+	proposalID string,
+	material *EligibilityMaterial,
+) error {
+	if material == nil || len(material.Proof) == 0 ||
+		material.QualificationID == "" || material.Challenge == "" {
+		return fmt.Errorf("%w: proof, qualification_id and challenge are required", ErrEligibilityRequired)
+	}
+	root, _, err := uc.eligibility.Root()
+	if err != nil {
+		return fmt.Errorf("load eligibility root: %w", err)
+	}
+	statement := domaincrypto.EligibilityStatement{
+		Root:            root,
+		ProposalID:      proposalID,
+		Challenge:       material.Challenge,
+		QualificationID: material.QualificationID,
+	}
+	if err := uc.eligibility.Verify(material.Proof, statement); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidEligibilityProof, err)
+	}
+	return nil
+}
+
+// ReserveCredential 匿名预留一个凭证池槽位。
+//
+// 预留请求里**不含任何身份信息**：服务端随机给出一个未领取的槽位，运营方因此
+// 不知道谁领了哪一个。这一步**不签名** —— 签名在客户端盲化之后才发生。
+//
+// 开启了资格校验时，material 必填：服务端先验资格证明、再记一次「资格已用过」
+// （唯一索引），然后才给槽位。**资格不过不消耗槽位**。
+func (uc *RegisterUseCase) ReserveCredential(
+	ctx context.Context,
+	proposalID string,
+	material *EligibilityMaterial,
+) (*CredentialReservation, error) {
+	if uc.claimRepo == nil {
+		return nil, errors.New("credential claim repository is not configured")
+	}
+	if uc.issuer == nil {
+		return nil, errors.New("credential issuer is not configured")
+	}
+	if uc.proposalRepo == nil {
+		return nil, errors.New("proposal repository is not configured")
+	}
+	if proposalID == "" {
+		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
+	}
+	if _, err := uc.proposalRepo.GetByID(ctx, proposalID); err != nil {
+		return nil, fmt.Errorf("load proposal: %w", err)
+	}
+
+	// 资格校验放在取槽位之前：不合格的人拿不到槽位，池子也不会被浪费。
+	eligibilityEnabled := uc.eligibility != nil && uc.eligibility.Enabled()
+	switch {
+	case eligibilityEnabled:
+		if err := uc.verifyEligibility(proposalID, material); err != nil {
+			return nil, err
+		}
+	case material != nil:
+		// 服务端没有开启资格校验，就没法验这份证明：不能让它「看起来被验过」。
+		return nil, fmt.Errorf(
+			"%w: the server does not verify eligibility proofs", ErrEligibilityNotEnabled,
+		)
+	}
+
+	claim, err := uc.claimRepo.TakeAvailable(ctx, proposalID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, fmt.Errorf("%w: no credential available", ErrCredentialPoolEmpty)
+		}
+		return nil, fmt.Errorf("take available credential: %w", err)
+	}
+
+	// 资格使用记录放在取槽位之后：唯一约束冲突时（同一份资格第二次来领），
+	// 槽位还没被标记领取，不会被白白消耗。
+	if eligibilityEnabled {
+		// 少了去重仓储就等于「一人一票」没生效 —— 宁可报错，也不能悄悄放行。
+		if uc.eligibilityRepo == nil {
+			return nil, errors.New("eligibility use repository is not configured")
+		}
+		use := &entity.EligibilityUse{
+			ID:              uuid.NewString(),
+			ProposalID:      proposalID,
+			QualificationID: material.QualificationID,
+			UsedAt:          time.Now().UTC(),
+		}
+		if err := uc.eligibilityRepo.RecordUse(ctx, use); err != nil {
+			if errors.Is(err, repository.ErrDuplicateEligibilityUse) {
+				return nil, fmt.Errorf("%w: this eligibility has already been used", ErrEligibilityAlreadyUsed)
+			}
+			return nil, fmt.Errorf("record eligibility use: %w", err)
+		}
+	}
+
+	issuerKey, err := uc.issuer.IssuerPublicKey(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load issuer public key: %w", err)
+	}
+	return &CredentialReservation{
+		ProposalID: proposalID,
+		UserID:     claim.UserID,
+		IssuerKey:  issuerKey,
+	}, nil
+}
+
+// BlindSignCredential 对**盲化后**的消息做盲签名。
+//
+// 这是签发方在真两段式盲签名里唯一的签名动作：服务端从头到尾只见盲化消息。
+func (uc *RegisterUseCase) BlindSignCredential(
+	ctx context.Context,
+	proposalID string,
+	userID string,
+	blindedMessage []byte,
+	keyVersion int,
+	scope BlindSignScope,
+) ([]byte, error) {
+	if uc.issuer == nil {
+		return nil, errors.New("credential issuer is not configured")
+	}
+	if uc.proposalRepo == nil {
+		return nil, errors.New("proposal repository is not configured")
+	}
+	if proposalID == "" {
+		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
+	}
+	if userID == "" {
+		return nil, fmt.Errorf("%w: user_id is required", ErrInvalidRequest)
+	}
+	if len(blindedMessage) == 0 {
+		return nil, fmt.Errorf("%w: blinded_message is required", ErrInvalidRequest)
+	}
+	if _, err := uc.proposalRepo.GetByID(ctx, proposalID); err != nil {
+		return nil, fmt.Errorf("load proposal: %w", err)
+	}
+	if scope == BlindSignScopePoolSlot {
+		if uc.claimRepo == nil {
+			return nil, errors.New("credential claim repository is not configured")
+		}
+		// 公开端点只能为池里还空着的槽位盲签：否则签发方会变成「任意消息」的
+		// 签名预言机。
+		if _, err := uc.claimRepo.GetAvailableByUserID(ctx, proposalID, userID); err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				return nil, fmt.Errorf(
+					"%w: no credential slot available for this user_id", ErrInvalidRequest,
+				)
+			}
+			return nil, fmt.Errorf("look up credential slot: %w", err)
+		}
+	}
+	blindSignature, err := uc.issuer.BlindSign(ctx, keyVersion, blindedMessage)
+	if err != nil {
+		return nil, fmt.Errorf("blind sign credential: %w", err)
+	}
+	return blindSignature, nil
+}
+
+// AttestCredential 校验客户端解盲出来的最终签名，通过后落库。
+//
+// 验签绑定的消息是 `sha256(user_id ‖ 0x00 ‖ user_pub_key)`：客户端拿 A 的盲
+// 签名去签 B，服务端这边必然验不过 —— 交叉攻击就是被这一步挡住的。
+func (uc *RegisterUseCase) AttestCredential(
 	ctx context.Context,
 	proposalID string,
 	userID string,
 	userPubKey []byte,
+	signature []byte,
 ) (*entity.Credential, error) {
 	if uc.repo == nil {
 		return nil, errors.New("credential repository is not configured")
@@ -82,8 +417,17 @@ func (uc *RegisterUseCase) IssueCredential(
 	if len(userPubKey) == 0 {
 		return nil, fmt.Errorf("%w: user_pub_key is required", ErrInvalidRequest)
 	}
+	if len(signature) == 0 {
+		return nil, fmt.Errorf("%w: signature is required", ErrInvalidRequest)
+	}
 	if _, err := uc.proposalRepo.GetByID(ctx, proposalID); err != nil {
 		return nil, fmt.Errorf("load proposal: %w", err)
+	}
+
+	// 先验签：签名不对的凭证一律不落库。
+	keyVersion, err := uc.issuer.VerifyCredential(userID, userPubKey, signature)
+	if err != nil {
+		return nil, fmt.Errorf("%w: credential signature verification failed", ErrInvalidCredential)
 	}
 
 	existing, err := uc.repo.GetByProposalAndUserID(ctx, proposalID, userID)
@@ -94,38 +438,43 @@ func (uc *RegisterUseCase) IssueCredential(
 		return nil, fmt.Errorf("check existing credential: %w", err)
 	}
 
-	credential, err := uc.issuer.Issue(ctx, userID, userPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("issue credential: %w", err)
-	}
-	if credential == nil {
-		return nil, errors.New("issue credential: empty result")
-	}
-
-	if credential.ID == "" {
-		credential.ID = uuid.NewString()
-	}
-	if credential.UserID == "" {
-		credential.UserID = userID
-	}
-	if credential.ProposalID == "" {
-		credential.ProposalID = proposalID
-	}
-	if len(credential.UserPubKey) == 0 {
-		credential.UserPubKey = append([]byte(nil), userPubKey...)
-	}
-	if credential.IssuedAt.IsZero() {
-		credential.IssuedAt = time.Now().UTC()
-	}
-	if credential.IssuerKeyVersion <= 0 {
-		credential.IssuerKeyVersion = 1
+	claimedAt := time.Now().UTC()
+	// 池里的槽位要原子地标记为已领取：槽位被别人抢走时返回冲突，客户端换一个
+	// 槽位重来。管理端路径的 user_id 不在池里，没有槽位要标记。
+	if uc.claimRepo != nil {
+		claim, err := uc.claimRepo.GetAvailableByUserID(ctx, proposalID, userID)
+		switch {
+		case err == nil:
+			ok, err := uc.claimRepo.MarkClaimed(ctx, claim.ID, userPubKey, signature, claimedAt)
+			if err != nil {
+				return nil, fmt.Errorf("mark credential claimed: %w", err)
+			}
+			if !ok {
+				return nil, ErrCredentialAlreadyIssued
+			}
+		case errors.Is(err, repository.ErrNotFound):
+		default:
+			return nil, fmt.Errorf("look up credential slot: %w", err)
+		}
 	}
 
+	credential := &entity.Credential{
+		ID:               uuid.NewString(),
+		ProposalID:       proposalID,
+		UserID:           userID,
+		UserPubKey:       append([]byte(nil), userPubKey...),
+		Signature:        append([]byte(nil), signature...),
+		IssuerKeyVersion: keyVersion,
+		IssuedAt:         claimedAt,
+	}
 	if err := uc.repo.Save(ctx, credential); err != nil {
+		if errors.Is(err, repository.ErrDuplicateCredential) {
+			return nil, ErrCredentialAlreadyIssued
+		}
 		return nil, fmt.Errorf("save credential: %w", err)
 	}
 
-	uc.logger.Info("credential issued",
+	uc.logger.Info("credential attested",
 		zap.String("credential_id", credential.ID),
 		zap.String("proposal_id", credential.ProposalID),
 		zap.String("user_id", credential.UserID),
@@ -184,99 +533,4 @@ func (uc *RegisterUseCase) FillCredentialPool(
 		zap.Int("count", count),
 	)
 	return count, nil
-}
-
-// ClaimCredential 匿名领取一个凭证。
-//
-// 请求里**不含任何身份信息**：服务端随机给出一个未领取的槽位，用领取者
-// 自己带来的公钥签发凭证。因此服务端与运营方都无法把凭证和投票人对应起来。
-//
-// 代价要说清楚：服务端因此**无法强制一人一票** —— 任何人都能反复领取并投票。
-// 「一人一票」要靠资格证明（零知识证明「我符合资格」而不透露身份）来保证，
-// 那是 v0.2.0 证明链阶段的任务。
-func (uc *RegisterUseCase) ClaimCredential(
-	ctx context.Context,
-	proposalID string,
-	userPubKey []byte,
-) (*entity.Credential, error) {
-	if uc.claimRepo == nil {
-		return nil, errors.New("credential claim repository is not configured")
-	}
-	if uc.repo == nil {
-		return nil, errors.New("credential repository is not configured")
-	}
-	if uc.issuer == nil {
-		return nil, errors.New("credential issuer is not configured")
-	}
-	if uc.proposalRepo == nil {
-		return nil, errors.New("proposal repository is not configured")
-	}
-	if proposalID == "" {
-		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
-	}
-	if len(userPubKey) == 0 {
-		return nil, fmt.Errorf("%w: user_pub_key is required", ErrInvalidRequest)
-	}
-	if _, err := uc.proposalRepo.GetByID(ctx, proposalID); err != nil {
-		return nil, fmt.Errorf("load proposal: %w", err)
-	}
-
-	// 领取是「抢一个槽位」：可能被别人抢先，因此重试几次。
-	for attempt := 0; attempt < claimMaxAttempts; attempt++ {
-		claim, err := uc.claimRepo.TakeAvailable(ctx, proposalID)
-		if err != nil {
-			if errors.Is(err, repository.ErrNotFound) {
-				return nil, fmt.Errorf("%w: no credential available", ErrCredentialPoolEmpty)
-			}
-			return nil, fmt.Errorf("take available credential: %w", err)
-		}
-
-		issued, err := uc.issuer.Issue(ctx, claim.UserID, userPubKey)
-		if err != nil {
-			return nil, fmt.Errorf("issue credential: %w", err)
-		}
-		if issued == nil {
-			return nil, errors.New("issue credential: empty result")
-		}
-
-		claimedAt := time.Now().UTC()
-		ok, err := uc.claimRepo.MarkClaimed(
-			ctx,
-			claim.ID,
-			userPubKey,
-			issued.Signature,
-			claimedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("mark credential claimed: %w", err)
-		}
-		if !ok {
-			// 槽位被别人领走了，换一个再试。
-			continue
-		}
-
-		credential := &entity.Credential{
-			ID:               uuid.NewString(),
-			ProposalID:       proposalID,
-			UserID:           claim.UserID,
-			UserPubKey:       append([]byte(nil), userPubKey...),
-			Signature:        append([]byte(nil), issued.Signature...),
-			IssuerKeyVersion: issued.IssuerKeyVersion,
-			IssuedAt:         claimedAt,
-		}
-		if credential.IssuerKeyVersion <= 0 {
-			credential.IssuerKeyVersion = 1
-		}
-		if err := uc.repo.Save(ctx, credential); err != nil {
-			return nil, fmt.Errorf("save credential: %w", err)
-		}
-
-		// 只记数量，不记是哪个 user_id 被领走了 —— 领取的关联性由领取方自己掌握。
-		uc.logger.Info("credential claimed",
-			zap.String("proposal_id", proposalID),
-		)
-		return credential, nil
-	}
-
-	return nil, fmt.Errorf("%w: no credential available", ErrCredentialPoolEmpty)
 }

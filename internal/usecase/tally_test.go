@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,9 +64,10 @@ func TestTallyUseCase_SetupAndPublishResult(t *testing.T) {
 	pubKeyBytes, err := base64.StdEncoding.DecodeString(setup.PublicKey)
 	require.NoError(t, err)
 
-	cipherA, err := cryptoSvc.Encrypt(pubKeyBytes, []byte("candidate-A"))
+	// 选票密文加密的是选项下标：candidate-A=0，candidate-B=1。
+	cipherA, err := cryptoSvc.Encrypt(pubKeyBytes, 0)
 	require.NoError(t, err)
-	cipherB, err := cryptoSvc.Encrypt(pubKeyBytes, []byte("candidate-B"))
+	cipherB, err := cryptoSvc.Encrypt(pubKeyBytes, 1)
 	require.NoError(t, err)
 
 	voteRepo.items = append(voteRepo.items,
@@ -462,41 +465,56 @@ func TestTallyUseCase_GetResult_Invalid(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidRequest)
 }
 
-func TestTallyUseCase_EncryptVoteOption(t *testing.T) {
-	sessionRepo := new(inMemoryDecryptionSessionRepo)
+func TestTallyUseCase_PublishResult_RejectsOutOfRangeOptionIndex(t *testing.T) {
+	voteRepo := new(inMemoryVoteRepo)
 	proposalRepo := new(inMemoryProposalRepo)
-	proposalRepo.items = map[string]*entity.Proposal{
-		"proposal-1": {
-			ID:      "proposal-1",
-			Options: []string{"candidate-A", "candidate-B"},
-		},
-	}
-	require.NoError(t, sessionRepo.Save(context.Background(), &entity.DecryptionSession{
-		ID:         "s1",
-		ProposalID: "proposal-1",
-		PublicKey:  []byte("public-key"),
-		Threshold:  2,
-		Trustees:   3,
-	}))
+	proposalRepo.items = map[string]*entity.Proposal{}
+	sessionRepo := new(inMemoryDecryptionSessionRepo)
+	resultRepo := new(inMemoryTallyResultRepo)
+	anchorRepo := new(inMemoryAuditAnchorRepo)
+	cryptoSvc := new(fakeThresholdCrypto)
 
 	uc := NewTallyUseCase(
-		new(inMemoryVoteRepo),
+		voteRepo,
 		proposalRepo,
 		sessionRepo,
-		new(inMemoryTallyResultRepo),
-		new(inMemoryAuditAnchorRepo),
-		new(fakeThresholdCrypto),
+		resultRepo,
+		anchorRepo,
+		cryptoSvc,
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
 
-	cipher, err := uc.EncryptVoteOption(context.Background(), "proposal-1", "candidate-A")
-	require.NoError(t, err)
-	require.NotEmpty(t, cipher)
+	proposal := &entity.Proposal{
+		ID:        "proposal-1",
+		Options:   []string{"candidate-A", "candidate-B"},
+		Status:    "closed",
+		StartsAt:  time.Now().UTC().Add(-2 * time.Hour),
+		EndsAt:    time.Now().UTC().Add(-1 * time.Hour),
+		CreatedAt: time.Now().UTC().Add(-3 * time.Hour),
+	}
+	proposalRepo.items[proposal.ID] = proposal
 
-	plain, err := (&fakeThresholdCrypto{}).Decrypt([]byte("private-key"), cipher)
+	setup, err := uc.SetupThresholdSession(context.Background(), proposal.ID, 2, 3)
 	require.NoError(t, err)
-	assert.Equal(t, "candidate-A", string(plain))
+
+	// 密文里的下标超出提案选项数，必须以 ErrInvalidRequest 拒绝，不能当成密码学故障。
+	outOfRange, err := cryptoSvc.Encrypt([]byte("public-key"), 7)
+	require.NoError(t, err)
+	voteRepo.items = append(voteRepo.items,
+		&entity.Vote{
+			ID:         "v1",
+			ProposalID: proposal.ID,
+			Nullifier:  "n1",
+			Cipher:     outOfRange,
+			CreatedAt:  time.Now().UTC(),
+		},
+	)
+
+	_, err = uc.PublishResult(context.Background(), proposal.ID, setup.Shares[:2])
+	require.ErrorIs(t, err, ErrInvalidRequest)
+	require.Empty(t, resultRepo.items)
+	require.Empty(t, anchorRepo.items[proposal.ID])
 }
 
 // ---- in-memory fakes ----
@@ -660,21 +678,42 @@ func (f *fakeThresholdCrypto) RecoverPrivateKey(
 	return f.recoveredPrivate, nil
 }
 
-func (f *fakeThresholdCrypto) Encrypt(publicKey []byte, plaintext []byte) ([]byte, error) {
+// Encrypt 加密的是选项下标，不是选项文本。
+func (f *fakeThresholdCrypto) Encrypt(publicKey []byte, optionIndex int) ([]byte, error) {
 	if len(publicKey) == 0 {
 		return nil, errors.New("empty public key")
 	}
-	return append([]byte("enc:"), plaintext...), nil
+	if optionIndex < 0 {
+		return nil, errors.New("negative option index")
+	}
+	return []byte("enc:" + strconv.Itoa(optionIndex)), nil
 }
 
-func (f *fakeThresholdCrypto) Decrypt(privateKey []byte, ciphertext []byte) ([]byte, error) {
+// Decrypt 还原选项下标。
+//
+// 越界判定留给 usecase：解密出超出提案选项数的下标时，usecase 要以
+// ErrInvalidRequest 报错，而不是把错误藏进密码学层。
+func (f *fakeThresholdCrypto) Decrypt(privateKey []byte, ciphertext []byte, numOptions int) (int, error) {
 	if len(privateKey) == 0 {
-		return nil, errors.New("empty private key")
+		return 0, errors.New("empty private key")
 	}
-	if len(ciphertext) < 4 || string(ciphertext[:4]) != "enc:" {
-		return nil, errors.New("invalid ciphertext")
+	raw, ok := strings.CutPrefix(string(ciphertext), "enc:")
+	if !ok {
+		return 0, errors.New("invalid ciphertext")
 	}
-	return append([]byte(nil), ciphertext[4:]...), nil
+	index, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, errors.New("invalid ciphertext")
+	}
+	return index, nil
+}
+
+// UncompressPublicKey 把计票公钥转成未压缩形式。
+func (f *fakeThresholdCrypto) UncompressPublicKey(publicKey []byte) ([]byte, error) {
+	if len(publicKey) == 0 {
+		return nil, errors.New("empty public key")
+	}
+	return append([]byte("uncompressed:"), publicKey...), nil
 }
 
 type fakeMerkleBuilder struct{}

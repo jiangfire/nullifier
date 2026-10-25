@@ -9,6 +9,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// testEligibilityRoot 是一枚合法的资格名单根（十六进制的域元素）。
+const testEligibilityRoot = "2113d5db4b0f0a0f0f9d2c1c1e3b5a7d9c0e1f2a3b4c5d6e7f8091a2b3c4d5e6"
+
+// setReleaseEligibilityEnv 补齐 release 模式要求的资格校验配置。
+//
+// release 模式必须同时配名单根与资格验证密钥 —— 没有它们，服务端无法强制
+// 「一人一票」。
+func setReleaseEligibilityEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("CRYPTO_ELIGIBILITY_ROOT", testEligibilityRoot)
+	t.Setenv("CRYPTO_ELIGIBILITY_VK_PATH", "eligibility-vk.bin")
+}
+
 func TestLoad_DefaultsAndEnv(t *testing.T) {
 	oldWD, err := os.Getwd()
 	require.NoError(t, err)
@@ -70,10 +83,55 @@ func TestLoad_RequiresAdminTokenInReleaseMode(t *testing.T) {
 	t.Setenv("SERVER_MODE", "release")
 	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
 	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+	setReleaseEligibilityEnv(t)
 
 	_, err = Load()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "server.admin_bearer_token is required")
+}
+
+// TestLoad_RequiresEligibilityInReleaseMode 钉住「release 模式必须开启一人
+// 一票」这条硬要求：没有名单根与验证密钥，服务端启动就失败。
+func TestLoad_RequiresEligibilityInReleaseMode(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "release")
+	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "secret")
+	t.Setenv("CRYPTO_ELIGIBILITY_ROOT", "")
+	t.Setenv("CRYPTO_ELIGIBILITY_VK_PATH", "")
+
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "crypto.eligibility_root")
+}
+
+// TestLoad_EligibilityRootAndKeyMustBePaired 钉住「根与验证密钥必须成对出现」：
+// 只配根等于「不校验」，只配密钥则无从校验。
+func TestLoad_EligibilityRootAndKeyMustBePaired(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("CRYPTO_ELIGIBILITY_ROOT", testEligibilityRoot)
+	t.Setenv("CRYPTO_ELIGIBILITY_VK_PATH", "")
+
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must be configured together")
 }
 
 func TestLoad_AllowsMissingAdminTokenInDebugMode(t *testing.T) {
@@ -317,6 +375,7 @@ func TestLoad_AutoMigrateDisabledInReleaseMode(t *testing.T) {
 	t.Setenv("SERVER_AUTO_MIGRATE", "")
 	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
 	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "secret")
+	setReleaseEligibilityEnv(t)
 
 	cfg, err := Load()
 	require.NoError(t, err)
@@ -337,6 +396,7 @@ func TestLoad_AutoMigrateOverriddenByEnv(t *testing.T) {
 	t.Setenv("SERVER_AUTO_MIGRATE", "true")
 	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
 	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "secret")
+	setReleaseEligibilityEnv(t)
 
 	cfg, err := Load()
 	require.NoError(t, err)
@@ -357,6 +417,7 @@ func TestLoad_AutoMigrateOverriddenByConfigFile(t *testing.T) {
 	t.Setenv("SERVER_AUTO_MIGRATE", "")
 	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
 	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "secret")
+	setReleaseEligibilityEnv(t)
 
 	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(`
 server:
@@ -425,4 +486,138 @@ func TestLoad_InvalidConfig(t *testing.T) {
 	_, err = Load()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "read config file")
+}
+
+// CONFIG_FILE 显式指定配置文件：生产配置不叫 config.yaml，靠这条路径加载。
+func TestLoad_ConfigFileEnvPointsToExplicitFile(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("CRYPTO_VK_PATH", "")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+
+	explicit := filepath.Join(tempDir, "config.production.yaml")
+	require.NoError(t, os.WriteFile(explicit, []byte(`
+server:
+  address: ":7002"
+  mode: "debug"
+`), 0o600))
+	t.Setenv(ConfigFileEnvVar, explicit)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, ":7002", cfg.ServerAddress)
+	require.Equal(t, explicit, cfg.SourceFile)
+}
+
+// 显式指定的文件不存在时必须直接失败 —— 静默回退到开发配置是最危险的上线事故。
+func TestLoad_ConfigFileEnvMissingFileFails(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv(ConfigFileEnvVar, filepath.Join(tempDir, "does-not-exist.yaml"))
+
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "read config file")
+}
+
+// 显式路径优先于自动发现：工作目录里有 config.yaml 也不能覆盖它。
+func TestLoad_ConfigFileEnvWinsOverDiscoveredFile(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("CRYPTO_VK_PATH", "")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+
+	require.NoError(t, os.WriteFile(filepath.Join(tempDir, "config.yaml"), []byte(`
+server:
+  address: ":1111"
+`), 0o600))
+
+	explicit := filepath.Join(tempDir, "explicit.yaml")
+	require.NoError(t, os.WriteFile(explicit, []byte(`
+server:
+  address: ":2222"
+`), 0o600))
+	t.Setenv(ConfigFileEnvVar, explicit)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, ":2222", cfg.ServerAddress)
+	require.Equal(t, explicit, cfg.SourceFile)
+}
+
+// 自动发现到的配置文件也要记进 SourceFile，启动日志要能看出跑的是哪份配置。
+func TestLoad_RecordsDiscoveredSourceFile(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("CRYPTO_VK_PATH", "")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+	t.Setenv(ConfigFileEnvVar, "")
+
+	discovered := filepath.Join(tempDir, "config.yaml")
+	require.NoError(t, os.WriteFile(discovered, []byte("server:\n  address: \":3333\"\n"), 0o600))
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, discovered, cfg.SourceFile)
+}
+
+// 没有配置文件时 SourceFile 为空：启动日志据此说明「没读到配置文件」。
+func TestLoad_WithoutConfigFileHasEmptySource(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("CRYPTO_VK_PATH", "")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+	t.Setenv(ConfigFileEnvVar, "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Empty(t, cfg.SourceFile)
+}
+
+func TestIsReleaseMode(t *testing.T) {
+	require.True(t, IsReleaseMode("release"))
+	require.True(t, IsReleaseMode(" PROD "))
+	require.True(t, IsReleaseMode("production"))
+	require.False(t, IsReleaseMode("debug"))
+	require.False(t, IsReleaseMode(""))
 }

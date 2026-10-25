@@ -73,6 +73,7 @@ func TestProviders_WiringSmoke(t *testing.T) {
 		sessionRepo,
 		proofVerifier,
 		encrypter,
+		credentialIssuer,
 		logger,
 	)
 	registerUC := NewRegisterUseCase(
@@ -80,6 +81,8 @@ func TestProviders_WiringSmoke(t *testing.T) {
 		proposalRepo,
 		credentialIssuer,
 		NewCredentialClaimRepository(db),
+		NewEligibilityUseRepository(db),
+		nil,
 		logger,
 	)
 	proposalUC := NewProposalUseCase(proposalRepo, logger)
@@ -100,7 +103,7 @@ func TestProviders_WiringSmoke(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	server.Engine().ServeHTTP(resp, req)
 	require.Equal(t, http.StatusOK, resp.Code)
-	var body map[string]string
+	var body map[string]any
 	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &body))
 	require.Equal(t, "ok", body["status"])
 }

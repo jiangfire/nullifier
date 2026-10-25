@@ -184,8 +184,48 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
+      # 浏览器端 prover 是**构建产物**，不入库（web/.gitignore）。发布流水线必须
+      # 自己编一遍 —— v0.1.0 的门户由服务端代加密，不需要它；v0.2.0 的门户在浏览器
+      # 里出证明，**没有它就投不了票**。
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Install dependencies
         run: pnpm --dir web install --frozen-lockfile
+
+      - name: Build the browser-side prover
+        run: |
+          set -euo pipefail
+          mkdir -p web/public
+          GOOS=js GOARCH=wasm CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+            -o web/public/ballot-prover.wasm ./cmd/ballot-wasm
+          cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" web/public/wasm_exec.js
+
+      # 两把 proving key 是秘密材料，不入库、也不该由发布流水线统一发出去
+      # （每套部署的 key 必须与服务端那把 verifying key 配对）。
+      # 运营方若想让发布的门户开箱即用，把 base64 编码的 key 配成仓库 secret；
+      # 没配就发布一个「缺 key」的门户并明确警告 —— 部署时必须自己补。
+      - name: Inject the portal proving keys (optional)
+        env:
+          PROVING_KEY_B64: ${{ secrets.PORTAL_PROVING_KEY_B64 }}
+          ELIGIBILITY_PROVING_KEY_B64: ${{ secrets.PORTAL_ELIGIBILITY_PROVING_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PROVING_KEY_B64" ]; then
+            echo "$PROVING_KEY_B64" | base64 -d > web/public/proving.key
+            echo "portal proving key injected"
+          else
+            echo "::warning::PORTAL_PROVING_KEY_B64 is not set - the published portal cannot generate proofs until an operator adds web/public/proving.key"
+          fi
+          if [ -n "$ELIGIBILITY_PROVING_KEY_B64" ]; then
+            echo "$ELIGIBILITY_PROVING_KEY_B64" | base64 -d > web/public/eligibility-proving.key
+            echo "portal eligibility proving key injected"
+          else
+            echo "::warning::PORTAL_ELIGIBILITY_PROVING_KEY_B64 is not set - the published portal cannot claim a credential with an eligibility proof"
+          fi
 
       # 单一版本源：仓库根的 VERSION。前端 package.json 的 version 跟着它走，
       # 免得两处版本号各说各话（review N6）。
@@ -214,6 +254,24 @@ jobs:
 
       - name: Build portal
         run: pnpm --dir web run build
+
+      # prover 是门户能不能投票的前提，缺了就当构建失败 —— 不要发一个投不了票的门户。
+      # proving key 不在此检查范围（它是秘密材料，由运营方补）。
+      - name: Check the portal ships the prover
+        run: |
+          set -euo pipefail
+          for asset in ballot-prover.wasm wasm_exec.js; do
+            if [ ! -f "web/dist/$asset" ]; then
+              echo "web/dist/$asset is missing - the published portal could not generate proofs"
+              exit 1
+            fi
+          done
+          echo "the published portal ships ballot-prover.wasm and wasm_exec.js"
+          for key in proving.key eligibility-proving.key; do
+            if [ ! -f "web/dist/$key" ]; then
+              echo "::warning::web/dist/$key is missing - the operator must add it before serving the portal (docs/deployment-checklist.md §6)"
+            fi
+          done
 
       - name: Package portal
         shell: bash

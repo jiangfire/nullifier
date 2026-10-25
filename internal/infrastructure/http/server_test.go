@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	"anonvote/internal/infrastructure/persistence"
 	"anonvote/internal/usecase"
+	"anonvote/tests/testutil"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend/groth16"
@@ -71,7 +73,6 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/open"},
 		{method: http.MethodGet, path: "/api/v1/proposals"},
-		{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/results"},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/audit-anchors"},
 	}
@@ -104,7 +105,7 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 
 func TestHandler_InvalidPayload(t *testing.T) {
 	handler := NewHandlerWithTally(
-		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
+		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
 		usecase.NewProposalUseCase(nil, zap.NewNop()),
 		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
@@ -142,20 +143,36 @@ func TestHandler_InvalidPayload(t *testing.T) {
 				"proposal_id":          "p1",
 				"encrypted_vote":       base64.StdEncoding.EncodeToString([]byte("cipher")),
 				"proof":                base64.StdEncoding.EncodeToString([]byte("proof")),
-				"nullifier":            "n1",
-				"public_witness":       "%%%invalid-base64%%%",
+				"nullifier":            strings.Repeat("ab", 32),
 				"user_id":              "u1",
 				"user_pub_key":         base64.StdEncoding.EncodeToString([]byte("pub")),
-				"credential_signature": base64.StdEncoding.EncodeToString([]byte("sig")),
+				"credential_signature": "%%%invalid-base64%%%",
 			},
 		},
 		{
 			method: http.MethodPost,
 			path:   "/api/v1/credentials",
 			body: map[string]any{
-				"proposal_id":  "p1",
+				"proposal_id": "",
+				"user_id":     "u1",
+			},
+		},
+		{
+			method: http.MethodPost,
+			path:   "/api/v1/proposals/p1/credentials/blind-sign",
+			body: map[string]any{
+				"user_id":            "u1",
+				"blinded_message":    "%%%invalid-base64%%%",
+				"issuer_key_version": 1,
+			},
+		},
+		{
+			method: http.MethodPost,
+			path:   "/api/v1/proposals/p1/credentials/attest",
+			body: map[string]any{
 				"user_id":      "u1",
 				"user_pub_key": "%%%invalid-base64%%%",
+				"signature":    base64.StdEncoding.EncodeToString([]byte("sig")),
 			},
 		},
 		{
@@ -187,13 +204,6 @@ func TestHandler_InvalidPayload(t *testing.T) {
 		},
 		{
 			method: http.MethodPost,
-			path:   "/api/v1/proposals/p1/ballot-draft",
-			body: map[string]any{
-				"option": "",
-			},
-		},
-		{
-			method: http.MethodPost,
 			path:   "/api/v1/proposals/p1/results/publish",
 			body: map[string]any{
 				"shares": []string{},
@@ -208,13 +218,13 @@ func TestHandler_InvalidPayload(t *testing.T) {
 			req.Header.Set("Authorization", "Bearer secret")
 		}
 		engine.ServeHTTP(rec, req)
-		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "path=%s", tc.path)
 	}
 }
 
 func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 	handler := NewHandlerWithTally(
-		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
+		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
 		usecase.NewProposalUseCase(nil, zap.NewNop()),
 		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
@@ -236,7 +246,6 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/credentials", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", raw: "{"},
-		{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/decryption/setup", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/results/publish", raw: "{"},
 	}
@@ -355,15 +364,62 @@ func TestHandler_GetResult_NotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+// TestHandler_GetElectionKey 覆盖客户端本地加密的前提：服务端公开计票公钥。
+//
+// 公钥是公开值，客户端拿到它就能在本地把选项加密成密文，服务端全程看不到
+// 明文选项。公钥以未压缩形式返回，浏览器端就不必实现点解压。
+func TestHandler_GetElectionKey(t *testing.T) {
+	engine, _, _ := buildFullStackEngine(t)
+	ts := httptest.NewServer(engine)
+	defer ts.Close()
+
+	resp := doPostAdminJSON(t, ts.URL+"/api/v1/proposals", "secret", map[string]any{
+		"title":     "Board Election",
+		"options":   []string{"candidate-A", "candidate-B"},
+		"starts_at": time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339),
+		"ends_at":   time.Now().UTC().Add(90 * time.Minute).Format(time.RFC3339),
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	var proposalResp struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
+	_ = resp.Body.Close()
+
+	// 还没初始化解密会话：没有计票公钥可给。
+	resp, err := http.Get(ts.URL + "/api/v1/proposals/" + proposalResp.ID + "/election-key")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+	_ = resp.Body.Close()
+
+	resp = doPostAdminJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/decryption/setup", "secret",
+		map[string]any{"threshold": 2, "trustees": 3})
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	_ = resp.Body.Close()
+
+	resp, err = http.Get(ts.URL + "/api/v1/proposals/" + proposalResp.ID + "/election-key")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var keyResp struct {
+		PublicKey string `json:"public_key"`
+		Encoding  string `json:"encoding"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&keyResp))
+	_ = resp.Body.Close()
+	require.Equal(t, "uncompressed", keyResp.Encoding)
+	raw, err := base64.StdEncoding.DecodeString(keyResp.PublicKey)
+	require.NoError(t, err)
+	require.Len(t, raw, 64)
+}
+
 func TestHandler_SuccessFlow(t *testing.T) {
-	engine, _, db := buildFullStackEngine(t)
+	engine, encrypter, db := buildFullStackEngine(t)
 	ts := httptest.NewServer(engine)
 	defer ts.Close()
 
 	credentialReq := map[string]any{
-		"proposal_id":  "",
-		"user_id":      "u-1",
-		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key")),
+		"proposal_id": "",
+		"user_id":     "u-1",
 	}
 	var resp *http.Response
 	proposalReq := map[string]any{
@@ -381,15 +437,15 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
 	_ = resp.Body.Close()
 
+	// 管理端签发走真两段式盲签名。
 	credentialReq["proposal_id"] = proposalResp.ID
-	resp = doPostAdminJSON(t, ts.URL+"/api/v1/credentials", "secret", credentialReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var credentialResp struct {
-		UserPubKey string `json:"user_pub_key"`
-		Signature  string `json:"signature"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credentialResp))
-	_ = resp.Body.Close()
+	blindClient := testutil.NewBlindClient(ts.URL)
+	blindClient.AdminToken = "secret"
+	credential, err := blindClient.IssueCredential(
+		proposalResp.ID, "u-1", []byte("user-pub-key"),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, credential.Signature)
 
 	statuses := doGetProposalCredentialStatuses(t, ts.URL, proposalResp.ID)
 	require.Len(t, statuses, 1)
@@ -417,37 +473,30 @@ func TestHandler_SuccessFlow(t *testing.T) {
 			"ends_at":   time.Now().UTC().Add(30 * time.Minute),
 		}).Error)
 
-	draftReq := map[string]any{"option": "candidate-A"}
-	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/ballot-draft", draftReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var draftResp struct {
-		EncryptedVote string `json:"encrypted_vote"`
-		Proof         string `json:"proof"`
-		Nullifier     string `json:"nullifier"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&draftResp))
-	_ = resp.Body.Close()
-	require.NotEmpty(t, draftResp.EncryptedVote)
-	require.NotEmpty(t, draftResp.Proof)
-	require.NotEmpty(t, draftResp.Nullifier)
+	// 密文由客户端本地加密：服务端没有代加密的入口了。
+	pubKeyBytes, err := base64.StdEncoding.DecodeString(setupResp.PublicKey)
+	require.NoError(t, err)
+	cipher, err := encrypter.Encrypt(pubKeyBytes, 0)
+	require.NoError(t, err)
+	nullifier, err := cryptoinfra.NewBallotNullifierGenerator().GenerateNullifier()
+	require.NoError(t, err)
 
-	var err error
 	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/vote-status", map[string]any{
 		"user_id":              "u-1",
-		"user_pub_key":         credentialResp.UserPubKey,
-		"credential_signature": credentialResp.Signature,
+		"user_pub_key":         credential.UserPubKey,
+		"credential_signature": credential.Signature,
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_ = resp.Body.Close()
 
 	voteReq := map[string]any{
 		"proposal_id":          proposalResp.ID,
-		"encrypted_vote":       draftResp.EncryptedVote,
-		"proof":                draftResp.Proof,
-		"nullifier":            draftResp.Nullifier,
+		"encrypted_vote":       base64.StdEncoding.EncodeToString(cipher),
+		"proof":                base64.StdEncoding.EncodeToString([]byte("debug-proof")),
+		"nullifier":            nullifier,
 		"user_id":              "u-1",
-		"user_pub_key":         credentialResp.UserPubKey,
-		"credential_signature": credentialResp.Signature,
+		"user_pub_key":         credential.UserPubKey,
+		"credential_signature": credential.Signature,
 	}
 	resp = doPostJSON(t, ts.URL+"/api/v1/votes", voteReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -459,8 +508,8 @@ func TestHandler_SuccessFlow(t *testing.T) {
 
 	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/vote-status", map[string]any{
 		"user_id":              "u-1",
-		"user_pub_key":         credentialResp.UserPubKey,
-		"credential_signature": credentialResp.Signature,
+		"user_pub_key":         credential.UserPubKey,
+		"credential_signature": credential.Signature,
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_ = resp.Body.Close()
@@ -551,7 +600,7 @@ func doGetProposalCredentialStatuses(
 	return body.Items
 }
 
-func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.KyberElGamal, *gorm.DB) {
+func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.BallotThresholdCrypto, *gorm.DB) {
 	t.Helper()
 
 	proofVerifier, err := cryptoinfra.NewGnarkProofVerifier("")
@@ -564,7 +613,7 @@ func buildFullStackEngine(t *testing.T) (*gin.Engine, *cryptoinfra.KyberElGamal,
 func buildFullStackEngineWithVerifier(
 	t *testing.T,
 	proofVerifier domaincrypto.ProofVerifier,
-) (*gin.Engine, *cryptoinfra.KyberElGamal, *gorm.DB) {
+) (*gin.Engine, *cryptoinfra.BallotThresholdCrypto, *gorm.DB) {
 	t.Helper()
 
 	db, err := persistence.NewDB(&persistence.DBConfig{
@@ -583,7 +632,7 @@ func buildFullStackEngineWithVerifier(
 	resultRepo := persistence.NewTallyResultRepository(db)
 	anchorRepo := persistence.NewAuditAnchorRepository(db)
 
-	encrypter := cryptoinfra.NewKyberElGamal()
+	encrypter := cryptoinfra.NewBallotThresholdCrypto()
 	issuer := cryptoinfra.NewKryptologyCredentialIssuerWithFile("", 0)
 	merkleBuilder := cryptoinfra.NewGnarkMerkleRootBuilder()
 
@@ -596,6 +645,7 @@ func buildFullStackEngineWithVerifier(
 		sessionRepo,
 		proofVerifier,
 		encrypter,
+		issuer,
 		logger,
 	)
 	registerUC := usecase.NewRegisterUseCaseWithPool(
@@ -607,9 +657,25 @@ func buildFullStackEngineWithVerifier(
 	)
 	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
-	tallyUC := usecase.NewTallyUseCase(voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo, encrypter, merkleBuilder, logger)
+	tallyUC := usecase.NewTallyUseCase(
+		voteRepo,
+		proposalRepo,
+		sessionRepo,
+		resultRepo,
+		anchorRepo,
+		encrypter,
+		merkleBuilder,
+		logger,
+	)
 
-	handler := NewHandlerWithTally(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
+	handler := NewHandlerWithTally(
+		votingUC,
+		registerUC,
+		proposalUC,
+		participationUC,
+		tallyUC,
+		logger,
+	)
 	server := NewServer(&config.Config{
 		ServerAddress:    ":0",
 		GinMode:          gin.TestMode,

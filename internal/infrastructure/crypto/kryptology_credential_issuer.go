@@ -16,10 +16,8 @@ import (
 	"time"
 
 	domaincrypto "anonvote/internal/domain/crypto"
-	"anonvote/internal/domain/entity"
 
 	"github.com/cloudflare/circl/blindsign/blindrsa"
-	"github.com/google/uuid"
 )
 
 const (
@@ -43,7 +41,6 @@ type issuerKeyMaterial struct {
 	version     int
 	publicKey   *rsa.PublicKey
 	privateKey  *rsa.PrivateKey
-	client      blindrsa.Client
 	verifier    blindrsa.Verifier
 	signer      blindrsa.Signer
 	activatedAt time.Time
@@ -133,17 +130,44 @@ func (k *KryptologyCredentialIssuer) bootstrap() error {
 	return k.rotateIfNeededLocked(time.Now().UTC())
 }
 
-func (k *KryptologyCredentialIssuer) Issue(
+// BlindSign 对**盲化后**的消息做盲签名。
+//
+// 这是签发方在真两段式盲签名里**唯一**的签名动作：服务端从头到尾没见过
+// 被签消息的原文（消息是客户端用公开的签发方公钥盲化后送来的）。
+//
+// keyVersion 必须是客户端盲化时用的那一版：盲化用的是那一版的模数，解盲要靠
+// 同一把私钥做模幂运算，版本对不上解出来的签名验不过。
+func (k *KryptologyCredentialIssuer) BlindSign(
 	_ context.Context,
-	userID string,
-	userPubKey []byte,
-) (*entity.Credential, error) {
-	if userID == "" {
-		return nil, errors.New("user_id is required")
+	keyVersion int,
+	blindedMessage []byte,
+) ([]byte, error) {
+	if len(blindedMessage) == 0 {
+		return nil, errors.New("blinded message is required")
 	}
-	if len(userPubKey) == 0 {
-		return nil, errors.New("user_pub_key is required")
+	if k.initErr != nil {
+		return nil, k.initErr
 	}
+
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	material, ok := k.keys[keyVersion]
+	if !ok {
+		return nil, fmt.Errorf("issuer key version %d is not available", keyVersion)
+	}
+	blindSignature, err := material.signer.BlindSign(blindedMessage)
+	if err != nil {
+		return nil, fmt.Errorf("blind sign message: %w", err)
+	}
+	return blindSignature, nil
+}
+
+// IssuerPublicKey 返回当前签发方公钥。
+//
+// 公钥是公开值 —— 客户端盲化消息本来就需要它。
+//
+// 这里顺带做密钥轮换：客户端每次预留槽位都要拿公钥，轮换的时机就该跟着它。
+func (k *KryptologyCredentialIssuer) IssuerPublicKey(_ context.Context) (*domaincrypto.IssuerPublicKey, error) {
 	if k.initErr != nil {
 		return nil, k.initErr
 	}
@@ -153,59 +177,37 @@ func (k *KryptologyCredentialIssuer) Issue(
 	if err := k.rotateIfNeededLocked(time.Now().UTC()); err != nil {
 		return nil, err
 	}
-
 	material, ok := k.keys[k.activeVer]
 	if !ok {
 		return nil, errors.New("active issuer key is missing")
 	}
-
-	message := buildCredentialMessage(userID, userPubKey)
-	preparedMsg, err := material.client.Prepare(crand.Reader, message)
-	if err != nil {
-		return nil, fmt.Errorf("prepare blind message: %w", err)
-	}
-	blindedMsg, state, err := material.client.Blind(crand.Reader, preparedMsg)
-	if err != nil {
-		return nil, fmt.Errorf("blind message: %w", err)
-	}
-
-	blindSignature, err := material.signer.BlindSign(blindedMsg)
-	if err != nil {
-		return nil, fmt.Errorf("blind sign message: %w", err)
-	}
-	signature, err := material.client.Finalize(state, blindSignature)
-	if err != nil {
-		return nil, fmt.Errorf("finalize blind signature: %w", err)
-	}
-	if err := material.client.Verify(preparedMsg, signature); err != nil {
-		return nil, fmt.Errorf("verify issued credential: %w", err)
-	}
-
-	return &entity.Credential{
-		ID:               uuid.NewString(),
-		UserID:           userID,
-		UserPubKey:       append([]byte(nil), userPubKey...),
-		Signature:        signature,
-		IssuerKeyVersion: material.version,
-		IssuedAt:         time.Now().UTC(),
+	return &domaincrypto.IssuerPublicKey{
+		Version:  material.version,
+		Modulus:  material.publicKey.N.Bytes(),
+		Exponent: material.publicKey.E,
+		Variant:  k.variant.String(),
 	}, nil
 }
 
-func (k *KryptologyCredentialIssuer) VerifyCredential(userID string, userPubKey []byte, signature []byte) error {
+func (k *KryptologyCredentialIssuer) VerifyCredential(
+	userID string,
+	userPubKey []byte,
+	signature []byte,
+) (int, error) {
 	if userID == "" {
-		return errors.New("user_id is required")
+		return 0, errors.New("user_id is required")
 	}
 	if len(userPubKey) == 0 {
-		return errors.New("user_pub_key is required")
+		return 0, errors.New("user_pub_key is required")
 	}
 	if len(signature) == 0 {
-		return errors.New("signature is required")
+		return 0, errors.New("signature is required")
 	}
 	if k.initErr != nil {
-		return k.initErr
+		return 0, k.initErr
 	}
 
-	message := buildCredentialMessage(userID, userPubKey)
+	message := CredentialMessage(userID, userPubKey)
 
 	k.mu.RLock()
 	defer k.mu.RUnlock()
@@ -218,7 +220,7 @@ func (k *KryptologyCredentialIssuer) VerifyCredential(userID string, userPubKey 
 	var lastErr error
 	for _, version := range versions {
 		if err := k.keys[version].verifier.Verify(message, signature); err == nil {
-			return nil
+			return version, nil
 		} else {
 			lastErr = err
 		}
@@ -226,7 +228,7 @@ func (k *KryptologyCredentialIssuer) VerifyCredential(userID string, userPubKey 
 	if lastErr == nil {
 		lastErr = errors.New("no issuer key available for verification")
 	}
-	return lastErr
+	return 0, lastErr
 }
 
 func (k *KryptologyCredentialIssuer) rotateIfNeededLocked(now time.Time) error {
@@ -261,10 +263,6 @@ func (k *KryptologyCredentialIssuer) generateKeyMaterial(version int, activatedA
 	if err != nil {
 		return nil, fmt.Errorf("generate rsa keypair: %w", err)
 	}
-	client, err := blindrsa.NewClient(k.variant, &privateKey.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("new blind rsa client: %w", err)
-	}
 	verifier, err := blindrsa.NewVerifier(k.variant, &privateKey.PublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("new blind rsa verifier: %w", err)
@@ -274,7 +272,6 @@ func (k *KryptologyCredentialIssuer) generateKeyMaterial(version int, activatedA
 		version:     version,
 		publicKey:   &privateKey.PublicKey,
 		privateKey:  privateKey,
-		client:      client,
 		verifier:    verifier,
 		signer:      blindrsa.NewSigner(privateKey),
 		activatedAt: activatedAt.UTC(),
@@ -291,10 +288,6 @@ func (k *KryptologyCredentialIssuer) materialFromPersisted(key persistedIssuerKe
 		return nil, fmt.Errorf("decode public key: %w", err)
 	}
 
-	client, err := blindrsa.NewClient(k.variant, publicKey)
-	if err != nil {
-		return nil, fmt.Errorf("new blind rsa client: %w", err)
-	}
 	verifier, err := blindrsa.NewVerifier(k.variant, publicKey)
 	if err != nil {
 		return nil, fmt.Errorf("new blind rsa verifier: %w", err)
@@ -303,7 +296,6 @@ func (k *KryptologyCredentialIssuer) materialFromPersisted(key persistedIssuerKe
 		version:     key.Version,
 		publicKey:   publicKey,
 		privateKey:  privateKey,
-		client:      client,
 		verifier:    verifier,
 		signer:      blindrsa.NewSigner(privateKey),
 		activatedAt: key.ActivatedAt.UTC(),
@@ -361,7 +353,13 @@ func (k *KryptologyCredentialIssuer) persistStateLocked() error {
 	return nil
 }
 
-func buildCredentialMessage(userID string, userPubKey []byte) []byte {
+// CredentialMessage 构造凭证消息：sha256(user_id ‖ 0x00 ‖ user_pub_key)。
+//
+// 客户端与服务端必须用**同一个**函数算这条消息 —— 客户端拿它去盲化，服务端拿
+// 它来验签。对不上就是验签失败。
+//
+// 分隔符 0x00 用来避免拼接歧义：user_id 与 user_pub_key 的边界必须是确定的。
+func CredentialMessage(userID string, userPubKey []byte) []byte {
 	sum := sha256.Sum256(append(append([]byte(userID), 0), userPubKey...))
 	return sum[:]
 }

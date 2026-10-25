@@ -9,6 +9,7 @@ import (
 
 	"anonvote/internal/domain/entity"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -145,4 +146,36 @@ func TestCredentialClaimRepository_TakeAvailableNotFound(t *testing.T) {
 
 	_, err := repo.TakeAvailable(context.Background(), "p-missing")
 	require.Error(t, err)
+}
+
+// 备池一次投几千个槽位是允许的（上限 10000），所以写入必须分批 ——
+// 一次性 INSERT 会撞上 SQLite 的绑定参数上限，报 "too many SQL variables"。
+//
+// 这条用例必须用**文件库**：内存库的临时表天生就在内存里（temp_store 相当于
+// MEMORY），复现不出「多行 INSERT 的临时索引溢写临时文件失败」那条路径
+// （见 db.go 里 temp_store 那段说明）。
+//
+// id / user_id 用 UUID 长度（36 字符）：临时索引的键越长，越早撑破内存去落
+// 临时文件 —— 真实备池用的就是 UUID（usecase/registration.go）。
+func TestCredentialClaimRepository_SaveLargeBatch(t *testing.T) {
+	repo := newClaimRepoWithDSN(t, filepath.Join(t.TempDir(), "big-claims.db"))
+	ctx := context.Background()
+
+	const count = 5000
+	claims := make([]*entity.CredentialClaim, 0, count)
+	for i := 0; i < count; i++ {
+		claims = append(claims, &entity.CredentialClaim{
+			ID:         uuid.NewString(),
+			ProposalID: "p-big",
+			UserID:     uuid.NewString(),
+			UserPubKey: []byte{},
+			Signature:  []byte{},
+			CreatedAt:  time.Now().UTC(),
+		})
+	}
+	require.NoError(t, repo.Save(ctx, claims))
+
+	available, err := repo.CountAvailable(ctx, "p-big")
+	require.NoError(t, err)
+	require.Equal(t, int64(count), available)
 }

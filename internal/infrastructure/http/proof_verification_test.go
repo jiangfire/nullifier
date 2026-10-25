@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -14,60 +13,13 @@ import (
 
 	"anonvote/internal/domain/entity"
 	cryptoinfra "anonvote/internal/infrastructure/crypto"
+	"anonvote/internal/infrastructure/crypto/ballot"
+	"anonvote/tests/testutil"
 
-	"github.com/consensys/gnark-crypto/ecc"
-	"github.com/consensys/gnark/backend/groth16"
-	"github.com/consensys/gnark/frontend"
-	"github.com/consensys/gnark/frontend/cs/r1cs"
+	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
-
-// proofMaterial 是一次真实 Groth16 证明所需的全部材料。
-type proofMaterial struct {
-	proof         []byte
-	publicWitness []byte
-	verifyingKey  []byte
-}
-
-// buildProofMaterial 跑一次真实的电路编译 + Setup + Prove，
-// 产出 proof、public witness 与 verifying key。
-func buildProofMaterial(t *testing.T, x int, y int) proofMaterial {
-	t.Helper()
-
-	var circuit serverTestCircuit
-	ccs, err := frontend.Compile(ecc.BN254, r1cs.NewBuilder, &circuit)
-	require.NoError(t, err)
-	pk, vk, err := groth16.Setup(ccs)
-	require.NoError(t, err)
-
-	assignment := serverTestCircuit{X: x, Y: y}
-	fullWitness, err := frontend.NewWitness(&assignment, ecc.BN254)
-	require.NoError(t, err)
-
-	proof, err := groth16.Prove(ccs, pk, fullWitness)
-	require.NoError(t, err)
-
-	var proofBuf bytes.Buffer
-	_, err = proof.WriteTo(&proofBuf)
-	require.NoError(t, err)
-
-	// public_witness 只放公开输入部分：gnark 的 groth16.Verify 要求 witness
-	// 的大小正好等于公开输入个数，放整个 witness 会被拒。
-	publicWitness, err := fullWitness.Public()
-	require.NoError(t, err)
-	witnessBytes, err := publicWitness.MarshalBinary()
-	require.NoError(t, err)
-
-	var vkBuf bytes.Buffer
-	_, err = vk.WriteTo(&vkBuf)
-	require.NoError(t, err)
-
-	return proofMaterial{
-		proof:         proofBuf.Bytes(),
-		publicWitness: witnessBytes,
-		verifyingKey:  vkBuf.Bytes(),
-	}
-}
 
 // readErrorBody 读出错误响应的正文，用于断言失败时给出可读的原因。
 func readErrorBody(t *testing.T, resp *http.Response) string {
@@ -78,117 +30,251 @@ func readErrorBody(t *testing.T, resp *http.Response) string {
 	return string(raw)
 }
 
-// TestServer_RealProofVerification 跑通真实 gnark 验证的 HTTP 链路。
+// ballotKeys 是电路密钥与其落盘路径。
+type ballotKeys struct {
+	verifyingKeyPath string
+	provingKeyPath   string
+}
+
+// generateBallotKeys 生成选票电路的密钥并落盘。
 //
-// 之前所有 HTTP 层测试用的都是空操作验证器（NewGnarkProofVerifier("")），
-// 于是 public_witness 字段、PublicInputs()、错误到 HTTP 状态码的映射
-// 全都没有被真正验证过：改坏 handler 丢掉 public_witness，CI 依然是绿的。
-func TestServer_RealProofVerification(t *testing.T) {
-	// 3^3 + 3 + 5 = 35，满足电路约束 Y = X^3 + X + 5。
-	material := buildProofMaterial(t, 3, 35)
+// verifying key 给服务端验签，proving key 只留在客户端侧。
+func generateBallotKeys(t *testing.T) ballotKeys {
+	t.Helper()
 
-	vkPath := filepath.Join(t.TempDir(), "verifying.key")
-	require.NoError(t, os.WriteFile(vkPath, material.verifyingKey, 0o600))
+	provingKey, verifyingKey, err := ballot.GenerateKeys()
+	require.NoError(t, err)
 
-	verifier, err := cryptoinfra.NewGnarkProofVerifier(vkPath)
+	dir := t.TempDir()
+	keys := ballotKeys{
+		verifyingKeyPath: filepath.Join(dir, "verifying.key"),
+		provingKeyPath:   filepath.Join(dir, "proving.key"),
+	}
+	require.NoError(t, os.WriteFile(keys.verifyingKeyPath, verifyingKey, 0o600))
+	require.NoError(t, os.WriteFile(keys.provingKeyPath, provingKey, 0o600))
+	return keys
+}
+
+// clientBallot 是客户端侧生成的一份选票：密文、nullifier 与证明。
+type clientBallot struct {
+	ciphertext []byte
+	nullifier  string
+	proof      []byte
+}
+
+// buildClientBallot 在客户端侧完成「选票 → 加密 → 证明」的全流程。
+func buildClientBallot(
+	t *testing.T,
+	prover *ballot.Prover,
+	proposalID string,
+	electionPublicKey []byte,
+	optionIndex uint64,
+	numOptions int,
+) clientBallot {
+	t.Helper()
+
+	secret, err := ballot.GenerateNullifierSecret()
+	require.NoError(t, err)
+	var secretElement fr.Element
+	secretElement.SetBytes(secret)
+
+	nullifier := ballot.DeriveNullifier(secretElement, ballot.DeriveProposalField(proposalID))
+	nullifierBytes := nullifier.Bytes()
+	ciphertext, nonce, err := ballot.EncryptBallot(electionPublicKey, optionIndex)
+	require.NoError(t, err)
+
+	statement := entity.BallotStatement{
+		ProposalID:        proposalID,
+		Nullifier:         nullifierBytes[:],
+		ElectionPublicKey: electionPublicKey,
+		Ciphertext:        ciphertext,
+		NumOptions:        numOptions,
+	}
+	inputs, err := ballot.BuildPublicInputs(statement)
+	require.NoError(t, err)
+
+	proof, err := prover.Prove(inputs, optionIndex, nonce, secretElement)
+	require.NoError(t, err)
+
+	return clientBallot{
+		ciphertext: ciphertext,
+		nullifier:  ballot.EncodeScalarHex(nullifier),
+		proof:      proof,
+	}
+}
+
+// TestServer_RealBallotProof 跑通真实选票电路的 HTTP 链路。
+//
+// 这是 v0.2.0 能力 B 与能力 C 的验收证据：真实 Groth16 证明被服务端接受，
+// 而任何一处公开输入被改动都必须被拒（400）。
+func TestServer_RealBallotProof(t *testing.T) {
+	keys := generateBallotKeys(t)
+	verifier, err := cryptoinfra.NewGnarkProofVerifier(keys.verifyingKeyPath)
+	require.NoError(t, err)
+	prover, err := ballot.NewProver(keys.provingKeyPath)
 	require.NoError(t, err)
 
 	engine, _, db := buildFullStackEngineWithVerifier(t, verifier)
 	ts := httptest.NewServer(engine)
 	defer ts.Close()
 
-	proposalReq := map[string]any{
-		"title":     "Board Election",
-		"options":   []string{"candidate-A", "candidate-B"},
-		"starts_at": time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339),
-		"ends_at":   time.Now().UTC().Add(90 * time.Minute).Format(time.RFC3339),
-	}
-	resp := doPostAdminJSON(t, ts.URL+"/api/v1/proposals", "secret", proposalReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var proposal struct {
-		ID string `json:"id"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposal))
-	_ = resp.Body.Close()
+	// 建两个提案：跨提案复用证明要靠第二个提案验证。
+	proposalID := createOpenProposal(t, ts, "Board Election")
+	otherProposalID := createOpenProposal(t, ts, "Other Election")
 
-	credentialReq := map[string]any{
-		"proposal_id":  proposal.ID,
-		"user_id":      "u-1",
-		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key")),
-	}
-	resp = doPostAdminJSON(t, ts.URL+"/api/v1/credentials", "secret", credentialReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var credential struct {
-		UserPubKey string `json:"user_pub_key"`
-		Signature  string `json:"signature"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credential))
-	_ = resp.Body.Close()
+	credential := issueCredential(t, ts, proposalID, "u-1")
+	otherCredential := issueCredential(t, ts, otherProposalID, "u-2")
 
-	// 解密会话必须在投票窗口开启之前初始化。
-	setupReq := map[string]any{"threshold": 2, "trustees": 3}
-	resp = doPostAdminJSON(t, ts.URL+"/api/v1/proposals/"+proposal.ID+"/decryption/setup", "secret", setupReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	_ = resp.Body.Close()
+	publicKey := setupDecryptionSession(t, ts, proposalID)
+	// 第二个提案也需要解密会话：没有会话时请求会先被「会话未就绪」拦下，
+	// 那样就测不到「证明跨提案复用」这条路径了。
+	setupDecryptionSession(t, ts, otherProposalID)
 
-	// 把投票窗口调整到现在。
-	require.NoError(t, db.Model(&entity.Proposal{}).
-		Where("id = ?", proposal.ID).
-		Updates(map[string]any{
-			"starts_at": time.Now().UTC().Add(-5 * time.Minute),
-			"ends_at":   time.Now().UTC().Add(30 * time.Minute),
-		}).Error)
+	openVotingWindow(t, db, proposalID)
+	openVotingWindow(t, db, otherProposalID)
 
-	draftReq := map[string]any{"option": "candidate-A"}
-	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposal.ID+"/ballot-draft", draftReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var draft struct {
-		EncryptedVote string `json:"encrypted_vote"`
-		Nullifier     string `json:"nullifier"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&draft))
-	_ = resp.Body.Close()
+	ballot := buildClientBallot(t, prover, proposalID, publicKey, 0, 2)
 
-	voteBody := func(extra map[string]any) map[string]any {
-		body := map[string]any{
-			"proposal_id":          proposal.ID,
-			"encrypted_vote":       draft.EncryptedVote,
-			"proof":                base64.StdEncoding.EncodeToString(material.proof),
-			"nullifier":            draft.Nullifier,
-			"user_id":              "u-1",
-			"user_pub_key":         credential.UserPubKey,
-			"credential_signature": credential.Signature,
+	voteBody := func(proposal string, cred credentialMaterial, b clientBallot) map[string]any {
+		return map[string]any{
+			"proposal_id":          proposal,
+			"encrypted_vote":       base64.StdEncoding.EncodeToString(b.ciphertext),
+			"proof":                base64.StdEncoding.EncodeToString(b.proof),
+			"nullifier":            b.nullifier,
+			"user_id":              cred.UserID,
+			"user_pub_key":         cred.UserPubKey,
+			"credential_signature": cred.Signature,
 		}
-		for key, value := range extra {
-			body[key] = value
-		}
-		return body
 	}
 
-	t.Run("有效 proof 与 public_witness 被接受", func(t *testing.T) {
-		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(map[string]any{
-			"public_witness": base64.StdEncoding.EncodeToString(material.publicWitness),
-		}))
+	t.Run("真实证明被接受", func(t *testing.T) {
+		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(proposalID, credential, ballot))
 		defer func() { _ = resp.Body.Close() }()
 		require.Equal(t, http.StatusCreated, resp.StatusCode, readErrorBody(t, resp))
 	})
 
-	t.Run("缺少 public_witness 返回 400", func(t *testing.T) {
-		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(map[string]any{
-			"nullifier": "null-missing-witness",
-		}))
+	t.Run("跨提案复用证明返回 400", func(t *testing.T) {
+		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(otherProposalID, otherCredential, ballot))
+		defer func() { _ = resp.Body.Close() }()
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-		_ = resp.Body.Close()
 	})
 
-	t.Run("被篡改的 public_witness 返回 400", func(t *testing.T) {
-		tampered := append([]byte(nil), material.publicWitness...)
-		tampered[len(tampered)-1] ^= 0xff
-		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(map[string]any{
-			"nullifier":      "null-tampered-witness",
-			"public_witness": base64.StdEncoding.EncodeToString(tampered),
-		}))
+	t.Run("篡改 nullifier 返回 400", func(t *testing.T) {
+		tampered := ballot
+		tampered.nullifier = flipHexNibble(tampered.nullifier)
+
+		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(proposalID, credential, tampered))
+		defer func() { _ = resp.Body.Close() }()
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
-		_ = resp.Body.Close()
 	})
+
+	t.Run("篡改密文返回 400", func(t *testing.T) {
+		tampered := ballot
+		tampered.ciphertext = append([]byte(nil), ballot.ciphertext...)
+		tampered.ciphertext[len(tampered.ciphertext)-1] ^= 0xff
+
+		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(proposalID, credential, tampered))
+		defer func() { _ = resp.Body.Close() }()
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	})
+
+	t.Run("伪造的凭证签名返回 401", func(t *testing.T) {
+		forged := credential
+		forged.Signature = base64.StdEncoding.EncodeToString([]byte("forged-signature"))
+
+		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(proposalID, forged, ballot))
+		defer func() { _ = resp.Body.Close() }()
+		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+}
+
+// credentialMaterial 是一次投票要带的凭证材料。
+type credentialMaterial struct {
+	UserID     string
+	UserPubKey string
+	Signature  string
+}
+
+// flipHexNibble 翻转十六进制字符串最后一个字符的最低位，用来模拟篡改。
+func flipHexNibble(value string) string {
+	if value == "" {
+		return value
+	}
+	last := value[len(value)-1]
+	replacement := byte('0')
+	if last == '0' {
+		replacement = '1'
+	}
+	return value[:len(value)-1] + string(replacement)
+}
+
+// createOpenProposal 建一个处于投票窗口内的提案，返回提案 ID。
+func createOpenProposal(t *testing.T, ts *httptest.Server, title string) string {
+	t.Helper()
+
+	req := map[string]any{
+		"title":     title,
+		"options":   []string{"candidate-A", "candidate-B"},
+		"starts_at": time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339),
+		"ends_at":   time.Now().UTC().Add(90 * time.Minute).Format(time.RFC3339),
+	}
+	resp := doPostAdminJSON(t, ts.URL+"/api/v1/proposals", "secret", req)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var proposal struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposal))
+	return proposal.ID
+}
+
+// issueCredential 给用户签发一张凭证（走真两段式盲签名）。
+func issueCredential(t *testing.T, ts *httptest.Server, proposalID, userID string) credentialMaterial {
+	t.Helper()
+
+	client := testutil.NewBlindClient(ts.URL)
+	client.AdminToken = "secret"
+	userPubKey := []byte("user-pub-key-" + userID)
+	credential, err := client.IssueCredential(proposalID, userID, userPubKey)
+	require.NoError(t, err)
+	return credentialMaterial{
+		UserID:     userID,
+		UserPubKey: credential.UserPubKey,
+		Signature:  credential.Signature,
+	}
+}
+
+// setupDecryptionSession 初始化门限解密会话，返回提案的计票公钥。
+func setupDecryptionSession(t *testing.T, ts *httptest.Server, proposalID string) []byte {
+	t.Helper()
+
+	resp := doPostAdminJSON(
+		t,
+		ts.URL+"/api/v1/proposals/"+proposalID+"/decryption/setup",
+		"secret",
+		map[string]any{"threshold": 2, "trustees": 3},
+	)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	var setup struct {
+		PublicKey string `json:"public_key"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&setup))
+	publicKey, err := base64.StdEncoding.DecodeString(setup.PublicKey)
+	require.NoError(t, err)
+	return publicKey
+}
+
+// openVotingWindow 把提案的投票窗口调整到现在。
+func openVotingWindow(t *testing.T, db *gorm.DB, proposalID string) {
+	t.Helper()
+
+	require.NoError(t, db.Model(&entity.Proposal{}).
+		Where("id = ?", proposalID).
+		Updates(map[string]any{
+			"starts_at": time.Now().UTC().Add(-5 * time.Minute),
+			"ends_at":   time.Now().UTC().Add(30 * time.Minute),
+		}).Error)
 }

@@ -25,6 +25,7 @@ import type { OpsStepId, SectionId, WorkspaceId } from './types/portal';
 const portalState = useVotePortal();
 const portal = reactive(portalState);
 const credentialFileInput = portalState.credentialFileInput;
+const eligibilityFileInput = portalState.eligibilityFileInput;
 
 type JourneyId = 'user' | 'admin';
 
@@ -383,5 +384,12 @@ function handleResultLoaded(): void {
     type="file"
     accept="application/json"
     @change="portal.importCredentialFile"
+  />
+  <input
+    ref="eligibilityFileInput"
+    class="hidden-input"
+    type="file"
+    accept="application/json"
+    @change="portal.importEligibilityPackage"
   />
 </template>

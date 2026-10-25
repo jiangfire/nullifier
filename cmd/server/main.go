@@ -106,6 +106,7 @@ func serve(migrateOnly bool) error {
 	}
 	logger.Info("effective configuration",
 		zap.String("version", version),
+		zap.String("config_file", cfg.SourceFile),
 		zap.String("server_mode", cfg.GinMode),
 		zap.String("server_address", cfg.ServerAddress),
 		zap.String("db_driver", cfg.DB.Driver),
@@ -117,6 +118,8 @@ func serve(migrateOnly bool) error {
 		zap.Int("cors_allowed_origins", len(cfg.CORSAllowedOrigins)),
 		zap.String("admin_token_source", adminTokenSource),
 		zap.Bool("proof_verification_enabled", strings.TrimSpace(cfg.VerifyingKeyPath) != ""),
+		// 一人一票是不是真的开着：这是运营最需要一眼看到的运行状态。
+		zap.Bool("eligibility_enforced", strings.TrimSpace(cfg.EligibilityRoot) != ""),
 	)
 
 	// 临时 token 只对当前进程有效，必须让运维看见；
@@ -133,6 +136,10 @@ func serve(migrateOnly bool) error {
 			"crypto.vk_path is empty: vote proof verification is DISABLED, any non-empty proof will be accepted",
 		)
 	}
+
+	// CORS 留空只有一种合法场景：门户与后端同源部署。不同源时浏览器会拦掉
+	// 所有跨域请求 —— 这类事故在启动日志里看不出来，所以要在这里喊一声。
+	warnIfCORSEmpty(logger, cfg)
 
 	// 关闭自动迁移时，运维必须知道表结构得自己先迁。
 	if !cfg.AutoMigrate {
@@ -152,4 +159,18 @@ func serve(migrateOnly bool) error {
 		return err
 	}
 	return nil
+}
+
+// warnIfCORSEmpty 在 release 模式下 CORS 白名单为空时告警。
+//
+// 空 CORS 只有一种合法场景：门户与后端同源部署。不同源时浏览器会拦掉所有
+// 跨域请求 —— 这类事故在启动日志里看不出来，所以要在这里喊一声。
+// 不阻止启动：同源部署留空是合法的。
+func warnIfCORSEmpty(logger *zap.Logger, cfg *config.Config) {
+	if !config.IsReleaseMode(cfg.GinMode) || len(cfg.CORSAllowedOrigins) > 0 {
+		return
+	}
+	logger.Warn(
+		"server.cors_allowed_origins is empty: a portal served from another origin will be blocked by the browser",
+	)
 }

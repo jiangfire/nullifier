@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,7 +63,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 
 	proofVerifier, err := crypto.NewGnarkProofVerifier("")
 	require.NoError(t, err)
-	encrypter := crypto.NewKyberElGamal()
+	encrypter := crypto.NewBallotThresholdCrypto()
 	issuer := crypto.NewKryptologyCredentialIssuerWithFile("", 0)
 	merkleBuilder := crypto.NewGnarkMerkleRootBuilder()
 
@@ -74,6 +76,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 		sessionRepo,
 		proofVerifier,
 		encrypter,
+		issuer,
 		logger,
 	)
 	registerUC := usecase.NewRegisterUseCase(credentialRepo, proposalRepo, issuer, logger)
@@ -101,11 +104,6 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	defer ts.Close()
 
 	// 1) 签发凭证
-	credentialReq := map[string]any{
-		"proposal_id":  "",
-		"user_id":      "u-1",
-		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key")),
-	}
 	var resp *http.Response
 	// 2) 创建提案
 	startAt := time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339)
@@ -126,15 +124,9 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	resp.Body.Close()
 	require.NotEmpty(t, proposalResp.ID)
 
-	credentialReq["proposal_id"] = proposalResp.ID
-	resp = postAdminJSON(t, ts.URL+"/api/v1/credentials", adminToken, credentialReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var credentialResp struct {
-		UserPubKey string `json:"user_pub_key"`
-		Signature  string `json:"signature"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credentialResp))
-	resp.Body.Close()
+	credentialResp := issueCredential(
+		t, ts, adminToken, proposalResp.ID, "u-1", []byte("user-pub-key"),
+	)
 	require.NotEmpty(t, credentialResp.UserPubKey)
 	require.NotEmpty(t, credentialResp.Signature)
 
@@ -157,7 +149,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	publicKey, err := base64.StdEncoding.DecodeString(setupResp.PublicKey)
 	require.NoError(t, err)
 
-	ciphertext, err := encrypter.Encrypt(publicKey, []byte("candidate-A"))
+	ciphertext, err := encrypter.Encrypt(publicKey, 0)
 	require.NoError(t, err)
 
 	require.NoError(t, db.Model(&entity.Proposal{}).
@@ -172,7 +164,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 		"proposal_id":          proposalResp.ID,
 		"encrypted_vote":       base64.StdEncoding.EncodeToString(ciphertext),
 		"proof":                base64.StdEncoding.EncodeToString(proofBytes),
-		"nullifier":            "null-e2e-1",
+		"nullifier":            strings.Repeat("a1", 32),
 		"user_id":              "u-1",
 		"user_pub_key":         credentialResp.UserPubKey,
 		"credential_signature": credentialResp.Signature,
@@ -197,7 +189,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	resp.Body.Close()
 
 	// 5) 同一用户再次投票（不同 nullifier）必须冲突
-	voteReq["nullifier"] = "null-e2e-2"
+	voteReq["nullifier"] = strings.Repeat("b2", 32)
 	resp = postJSON(t, ts.URL+"/api/v1/votes", voteReq)
 	require.Equal(t, http.StatusConflict, resp.StatusCode)
 	resp.Body.Close()
@@ -207,7 +199,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 		"proposal_id":          proposalResp.ID,
 		"encrypted_vote":       base64.StdEncoding.EncodeToString(ciphertext),
 		"proof":                base64.StdEncoding.EncodeToString(proofBytes),
-		"nullifier":            "null-e2e-3",
+		"nullifier":            strings.Repeat("c3", 32),
 		"user_id":              "u-2",
 		"user_pub_key":         credentialResp.UserPubKey,
 		"credential_signature": credentialResp.Signature,
@@ -288,15 +280,23 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 	const adminToken = "secret"
 	db, err := persistence.NewDB(&persistence.DBConfig{
-		Driver:   "sqlite",
-		Database: "file:e2e-concurrent?mode=memory&cache=shared&_busy_timeout=5000",
+		Driver: "sqlite",
+		// 文件库 + WAL：共享缓存的内存库在并发写时会直接抛 "table is locked"
+		//（共享缓存用表级锁，busy_timeout 不管用）。两个并发投票会因此双双
+		// 失败，断言「恰好一张票入库」变成 flaky。WAL 允许一个写者 + 并发读者，
+		// 写写冲突由 busy_timeout 等待，_txlock=immediate 让事务一开始就拿写锁，
+		// 避免「先读后写」的升级死锁。
+		Database: "file:" + filepath.ToSlash(filepath.Join(t.TempDir(), "concurrent-user.db")) +
+			"?_busy_timeout=10000&_journal_mode=WAL&_txlock=immediate",
 	})
 	require.NoError(t, err)
 	require.NoError(t, persistence.AutoMigrate(db))
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetMaxOpenConns(2)
+	sqlDB.SetMaxIdleConns(2)
+	// 句柄不关的话，Windows 上临时目录清理会因文件被占用而失败。
+	t.Cleanup(func() { _ = sqlDB.Close() })
 
 	voteRepo := persistence.NewVoteRepository(db)
 	credentialRepo := persistence.NewCredentialRepository(db)
@@ -308,7 +308,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 
 	proofVerifier, err := crypto.NewGnarkProofVerifier("")
 	require.NoError(t, err)
-	encrypter := crypto.NewKyberElGamal()
+	encrypter := crypto.NewBallotThresholdCrypto()
 	issuer := crypto.NewKryptologyCredentialIssuerWithFile("", 0)
 	merkleBuilder := crypto.NewGnarkMerkleRootBuilder()
 
@@ -321,6 +321,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 		sessionRepo,
 		proofVerifier,
 		encrypter,
+		issuer,
 		logger,
 	)
 	registerUC := usecase.NewRegisterUseCase(credentialRepo, proposalRepo, issuer, logger)
@@ -347,11 +348,6 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 	ts := httptest.NewServer(server.Engine())
 	defer ts.Close()
 
-	credentialReq := map[string]any{
-		"proposal_id":  "",
-		"user_id":      "u-concurrent",
-		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key-concurrent")),
-	}
 	var resp *http.Response
 	proposalReq := map[string]any{
 		"title":       "Concurrent Vote Test",
@@ -368,15 +364,9 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
 	_ = resp.Body.Close()
 
-	credentialReq["proposal_id"] = proposalResp.ID
-	resp = postAdminJSON(t, ts.URL+"/api/v1/credentials", adminToken, credentialReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var credentialResp struct {
-		UserPubKey string `json:"user_pub_key"`
-		Signature  string `json:"signature"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credentialResp))
-	_ = resp.Body.Close()
+	credentialResp := issueCredential(
+		t, ts, adminToken, proposalResp.ID, "u-concurrent", []byte("user-pub-key-concurrent"),
+	)
 
 	setupReq := map[string]any{
 		"threshold": 2,
@@ -398,7 +388,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 			"starts_at": time.Now().UTC().Add(-5 * time.Minute),
 			"ends_at":   time.Now().UTC().Add(30 * time.Minute),
 		}).Error)
-	ciphertext, err := encrypter.Encrypt(publicKey, []byte("candidate-concurrent"))
+	ciphertext, err := encrypter.Encrypt(publicKey, 0)
 	require.NoError(t, err)
 	proofBytes := mustBuildProofBytes(t, 3, 35)
 
@@ -410,7 +400,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 
 	start := make(chan struct{})
 	results := make(chan submitResult, 2)
-	nullifiers := []string{"null-concurrent-1", "null-concurrent-2"}
+	nullifiers := []string{strings.Repeat("d4", 32), strings.Repeat("e5", 32)}
 	var wg sync.WaitGroup
 	for _, nullifier := range nullifiers {
 		wg.Add(1)

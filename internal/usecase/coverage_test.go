@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 )
 
 func TestConstructors_DefaultLogger(t *testing.T) {
-	require.NotNil(t, NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil))
+	require.NotNil(t, NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, nil))
 	require.NotNil(t, NewRegisterUseCase(nil, nil, nil, nil))
 	require.NotNil(t, NewProposalUseCase(nil, nil))
 	require.NotNil(t, NewParticipationUseCase(nil, nil, nil))
@@ -30,7 +31,7 @@ func TestSubmitVoteRequest_Validate(t *testing.T) {
 
 	valid := SubmitVoteRequest{
 		ProposalID:          "p1",
-		Nullifier:           "n1",
+		Nullifier:           strings.Repeat("ab", 32),
 		EncryptedVote:       []byte("cipher"),
 		Proof:               &entity.Proof{Data: []byte("proof")},
 		UserID:              "u1",
@@ -66,18 +67,22 @@ func TestCreateProposalRequest_Validate(t *testing.T) {
 	require.ErrorIs(t, req.Validate(), ErrInvalidRequest)
 }
 
-func TestRegisterUseCase_IssueCredential_InvalidAndMissingDeps(t *testing.T) {
+func TestRegisterUseCase_ReserveCredential_InvalidAndMissingDeps(t *testing.T) {
 	uc := NewRegisterUseCase(nil, nil, nil, nil)
-	_, err := uc.IssueCredential(context.Background(), "p1", "u1", []byte("pub"))
+	_, err := uc.ReserveCredentialForUser(context.Background(), "p1", "u1")
 	require.Error(t, err)
 
 	repo := new(credentialRepositoryMock)
 	uc = NewRegisterUseCase(repo, nil, nil, nil)
-	_, err = uc.IssueCredential(context.Background(), "", "", []byte("pub"))
+	_, err = uc.ReserveCredentialForUser(context.Background(), "", "")
+	require.Error(t, err)
+
+	uc = NewRegisterUseCaseWithPool(repo, nil, nil, nil, nil)
+	_, err = uc.ReserveCredential(context.Background(), "p1", nil)
 	require.Error(t, err)
 }
 
-func TestRegisterUseCase_IssueCredential_CheckExistingError(t *testing.T) {
+func TestRegisterUseCase_ReserveCredentialForUser_CheckExistingError(t *testing.T) {
 	repo := new(credentialRepositoryMock)
 	proposalRepo := new(proposalRepositoryMock)
 	issuer := new(credentialIssuerMock)
@@ -85,7 +90,7 @@ func TestRegisterUseCase_IssueCredential_CheckExistingError(t *testing.T) {
 
 	proposalRepo.On("GetByID", mock.Anything, "p1").Return(&entity.Proposal{ID: "p1"}, nil).Once()
 	repo.On("GetByProposalAndUserID", mock.Anything, "p1", "u1").Return((*entity.Credential)(nil), errors.New("db down")).Once()
-	_, err := uc.IssueCredential(context.Background(), "p1", "u1", []byte("pub"))
+	_, err := uc.ReserveCredentialForUser(context.Background(), "p1", "u1")
 	require.Error(t, err)
 }
 
@@ -104,11 +109,11 @@ func TestParticipationUseCase_HasVoted_RepoError(t *testing.T) {
 }
 
 func TestVotingUseCase_Submit_MissingDeps(t *testing.T) {
-	uc := NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil)
+	uc := NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	err := uc.Submit(context.Background(), &SubmitVoteRequest{})
 	require.Error(t, err)
 
-	uc = NewVotingUseCase(new(voteRepositoryMock), nil, nil, nil, nil, nil, nil, nil)
+	uc = NewVotingUseCase(new(voteRepositoryMock), nil, nil, nil, nil, nil, nil, nil, nil)
 	err = uc.Submit(context.Background(), &SubmitVoteRequest{})
 	require.Error(t, err)
 }

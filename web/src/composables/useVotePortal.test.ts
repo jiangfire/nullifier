@@ -1,6 +1,35 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nextTick } from 'vue';
+import { bytesToBase64 } from '../lib/credential';
 import { useVotePortal } from './useVotePortal';
+
+/**
+ * 浏览器端 prover 的桩。
+ *
+ * WASM 模块在 node 环境里跑不起来（没有 WebAssembly 胶水、也没有 Worker），
+ * 这里只验证门户这一侧的编排：取计票公钥、传选项下标、把结果写进表单。
+ */
+const { generateLocalBallotMock } = vi.hoisted(() => ({
+  generateLocalBallotMock: vi.fn(),
+}));
+
+vi.mock('../lib/wasm-prover', () => ({
+  generateLocalBallot: generateLocalBallotMock,
+}));
+
+/**
+ * 浏览器端资格 prover 的桩。
+ *
+ * 资格证明在真实环境里由 WASM 模块在 Worker 里出；这里只验证门户这一侧的
+ * 编排：先取一次挑战、再把成员包与挑战交给 prover、最后把证明带进领取请求。
+ */
+const { generateEligibilityProofMock } = vi.hoisted(() => ({
+  generateEligibilityProofMock: vi.fn(),
+}));
+
+vi.mock('../lib/eligibility-prover', () => ({
+  generateEligibilityProof: generateEligibilityProofMock,
+}));
 
 /**
  * node 环境没有 DOM，composable 初始化时就要读 localStorage，这里补一个最小实现。
@@ -62,8 +91,9 @@ interface FetchCall {
 
 interface FetchRoute {
   match: (url: string) => boolean;
-  payload: unknown;
-  status?: number;
+  /** 可以是常量，也可以是函数 —— 后者用于「第 1 次失败、第 2 次成功」这类场景。 */
+  payload: unknown | (() => unknown);
+  status?: number | (() => number);
 }
 
 function stubFetch(routes: FetchRoute[]): FetchCall[] {
@@ -78,11 +108,14 @@ function stubFetch(routes: FetchRoute[]): FetchCall[] {
       }
       calls.push({ url, body });
       const route = routes.find((item) => item.match(url));
-      const status = route?.status ?? 200;
+      const status =
+        typeof route?.status === 'function' ? route.status() : (route?.status ?? 200);
+      const payload =
+        typeof route?.payload === 'function' ? route.payload() : route?.payload;
       return {
         ok: status >= 200 && status < 300,
         status,
-        text: async () => JSON.stringify(route ? route.payload : {}),
+        text: async () => JSON.stringify(payload ?? {}),
       };
     }),
   );
@@ -106,27 +139,90 @@ function setupPortal() {
   return portal;
 }
 
-const draftRoute = {
-  match: (url: string) => url.includes('ballot-draft'),
-  payload: {
+/**
+ * 模拟「在浏览器本地生成选票」写进表单的材料。
+ *
+ * 真实路径是 WASM prover 在浏览器里算出密文与证明后写进表单；这里直接写，
+ * 因为这些用例要验的是**材料与当前意图的绑定**，不是密码学本身。
+ */
+function bindLocalBallot(portal: ReturnType<typeof useVotePortal>): void {
+  portal.voteForm.encryptedVote = 'cipher-A';
+  portal.voteForm.proof = 'proof-A';
+  portal.voteForm.nullifier = 'null-1';
+  portal.voteForm.ballotProposalId = 'p1';
+  portal.voteForm.ballotOption = 'A';
+}
+
+/**
+ * 签发方公钥（2048 位 RSA）。
+ *
+ * 与 Go 侧跨语言向量测试用的是同一把测试密钥 —— 它只出现在测试里，不参与任何
+ * 生产路径。
+ */
+const issuerModulusHex =
+  'a8f6a0ae71df41acaa192da461e1e12503dd57e23646fd22fa6130e7fb821895f' +
+  '1508a7bd20d5e173736552a9b2e1d2758d97777eaa7350e668239574fb01126a5' +
+  '06eeb4773451ef64e948b1b0f5f6365c20e037dc5ab824e32a425777cfa8e4205e' +
+  '9be1684fe103d13c628266cf41205d8d849ac977f2f0f400fdb2547c3803e03f5' +
+  'e512b32275b8079db69250633dd10c8e3dd77e8246f550bd236a4fad1535dbe06' +
+  '17c5b7bc24c1cdb94b2f865e77eee33f03fe593709555f1c1969cc555da085f53' +
+  'e267c058aac495c180e2583974dee64d5f9094c025504d4545e5ba65a52c7dbf5b' +
+  'ccac52c05244d8f09b9196590e80ad0a0ecfdf0cf2be35325a745a9';
+
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/** 「预留签发权」的响应。 */
+function reservationPayload(attempt = 1) {
+  return {
     proposal_id: 'p1',
-    option: 'A',
-    encrypted_vote: 'cipher-A',
-    proof: 'proof-A',
-    nullifier: 'null-1',
-  },
-};
+    user_id: attempt === 1 ? 'pseudonym-from-pool' : 'pseudonym-from-pool-2',
+    issuer_key_version: 1,
+    // 服务端线路上的变体名，与 `supportedBlindSignatureVariant` 一致。
+    variant: 'RSABSSA-SHA384-PSS-Deterministic',
+    modulus: bytesToBase64(hexToBytes(issuerModulusHex)),
+    exponent: 65537,
+  };
+}
+
+/**
+ * 盲签名的响应。
+ *
+ * 这里给的是一串占位字节：门户只关心解盲这一步能跑通（长度必须等于密钥长度），
+ * 真正的验签在服务端做。
+ */
+function blindSignaturePayload() {
+  return { blind_signature: bytesToBase64(new Uint8Array(256)) };
+}
+
+/** attest 之后的凭证。 */
+function attestedCredential(userId = 'pseudonym-from-pool') {
+  return {
+    id: 'cred-1',
+    proposal_id: 'p1',
+    user_id: userId,
+    user_pub_key: 'pub-key',
+    signature: 'sig',
+    issuer_key_version: 1,
+    issued_at: '2026-10-21T00:00:00Z',
+  };
+}
 
 describe('投票凭据与当前意图的绑定', () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it('按选项生成凭据后，材料绑定到该选项', async () => {
-    stubFetch([draftRoute]);
+  it('本地生成选票后，材料绑定到该选项', async () => {
+    stubFetch([]);
     const portal = setupPortal();
 
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     expect(portal.voteForm.encryptedVote).toBe('cipher-A');
     expect(portal.voteForm.proof).toBe('proof-A');
@@ -136,9 +232,9 @@ describe('投票凭据与当前意图的绑定', () => {
   });
 
   it('改了选项之后，已生成的凭据被清空', async () => {
-    stubFetch([draftRoute]);
+    stubFetch([]);
     const portal = setupPortal();
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     portal.selectedVoteOption.value = 'B';
     await nextTick();
@@ -149,9 +245,9 @@ describe('投票凭据与当前意图的绑定', () => {
   });
 
   it('换了提案之后，已生成的凭据被清空', async () => {
-    stubFetch([draftRoute]);
+    stubFetch([]);
     const portal = setupPortal();
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     portal.voteForm.proposalId = 'p2';
     await nextTick();
@@ -162,11 +258,10 @@ describe('投票凭据与当前意图的绑定', () => {
 
   it('凭据还指向旧选项时拒绝提交（防止静默投错票）', async () => {
     const calls = stubFetch([
-      draftRoute,
       { match: (url) => url.includes('/api/v1/votes'), payload: { status: 'ok' } },
     ]);
     const portal = setupPortal();
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     // 同步改选项，watcher 还没执行：材料还在，但绑定的目标已经过期。
     portal.selectedVoteOption.value = 'B';
@@ -179,11 +274,10 @@ describe('投票凭据与当前意图的绑定', () => {
 
   it('目标一致时正常提交', async () => {
     const calls = stubFetch([
-      draftRoute,
       { match: (url) => url.includes('/api/v1/votes'), payload: { status: 'ok' } },
     ]);
     const portal = setupPortal();
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     const submitted = await portal.submitVote();
 
@@ -196,7 +290,7 @@ describe('投票凭据与当前意图的绑定', () => {
   });
 
   it('导入的凭据带 selected_option 时绑定到该选项', async () => {
-    stubFetch([draftRoute]);
+    stubFetch([]);
     const portal = setupPortal();
 
     portal.voteForm.ballotJson = JSON.stringify({
@@ -221,7 +315,7 @@ describe('凭证与会话卫生', () => {
   });
 
   it('管理令牌只进 sessionStorage，不落 localStorage', async () => {
-    stubFetch([draftRoute]);
+    stubFetch([]);
     const portal = setupPortal();
 
     portal.adminBearerToken.value = 'super-secret';
@@ -232,7 +326,7 @@ describe('凭证与会话卫生', () => {
   });
 
   it('换提案时重置「是否已投票」', async () => {
-    stubFetch([draftRoute]);
+    stubFetch([]);
     const portal = setupPortal();
 
     portal.hasVoted.value = true;
@@ -244,11 +338,10 @@ describe('凭证与会话卫生', () => {
 
   it('错误提示不自动消失', async () => {
     stubFetch([
-      draftRoute,
       { match: (url) => url.includes('/api/v1/votes'), payload: { status: 'ok' } },
     ]);
     const portal = setupPortal();
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     // 让投票失败：把材料清空到不满足提交条件。
     portal.voteForm.encryptedVote = '';
@@ -273,16 +366,66 @@ describe('匿名领取凭证', () => {
     vi.unstubAllGlobals();
   });
 
-  it('只提交公钥，不提交任何身份信息', async () => {
+  it('走完整两段式：预留不带公钥，盲签名只见盲化消息', async () => {
+    const calls = stubFetch([
+      { match: (url) => url.includes('/credentials/claim'), payload: reservationPayload() },
+      { match: (url) => url.includes('/credentials/blind-sign'), payload: blindSignaturePayload() },
+      { match: (url) => url.includes('/credentials/attest'), payload: attestedCredential() },
+    ]);
+    const portal = setupPortal();
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(true);
+
+    // ① 预留阶段：请求体是空的 —— 服务端一旦知道公钥就能算出消息原文，
+    //    盲化当场失效，所以公钥只能在 attest 那一步才出现。
+    const reserveCall = calls.find((item) => item.url.includes('/credentials/claim'));
+    expect(reserveCall).toBeDefined();
+    expect(reserveCall?.url).toContain('/api/v1/proposals/p1/credentials/claim');
+    expect(reserveCall?.body).not.toHaveProperty('user_pub_key');
+    expect(reserveCall?.body).not.toHaveProperty('user_id');
+    expect(Object.keys(reserveCall?.body ?? {})).toEqual([]);
+
+    // ② 盲签名阶段：服务端拿到的只是盲化消息。
+    const blindSignCall = calls.find((item) => item.url.includes('/credentials/blind-sign'));
+    expect(blindSignCall).toBeDefined();
+    expect(blindSignCall?.body?.user_id).toBe('pseudonym-from-pool');
+    expect(blindSignCall?.body?.issuer_key_version).toBe(1);
+    expect(String(blindSignCall?.body?.blinded_message ?? '')).not.toBe('');
+
+    // ③ attest 阶段：公钥与最终签名一起交回。
+    const attestCall = calls.find((item) => item.url.includes('/credentials/attest'));
+    expect(attestCall).toBeDefined();
+    expect(attestCall?.body?.user_id).toBe('pseudonym-from-pool');
+    expect(String(attestCall?.body?.user_pub_key ?? '')).not.toBe('');
+    expect(String(attestCall?.body?.signature ?? '')).not.toBe('');
+
+    expect(portal.wallet.userId).toBe('pseudonym-from-pool');
+  });
+
+  it('槽位被别人抢走时换一个槽位重来', async () => {
+    let claimAttempts = 0;
+    let attestAttempts = 0;
     const calls = stubFetch([
       {
         match: (url) => url.includes('/credentials/claim'),
-        payload: {
-          proposal_id: 'p1',
-          user_id: 'pseudonym-from-pool',
-          user_pub_key: 'pub-from-server',
-          signature: 'sig',
+        payload: () => {
+          claimAttempts += 1;
+          return reservationPayload(claimAttempts);
         },
+      },
+      { match: (url) => url.includes('/credentials/blind-sign'), payload: blindSignaturePayload() },
+      {
+        match: (url) => url.includes('/credentials/attest'),
+        status: () => {
+          attestAttempts += 1;
+          return attestAttempts === 1 ? 409 : 200;
+        },
+        payload: () =>
+          attestAttempts === 1
+            ? { code: 'CREDENTIAL_EXISTS', error: '凭证已存在' }
+            : attestedCredential('pseudonym-from-pool-2'),
       },
     ]);
     const portal = setupPortal();
@@ -290,14 +433,29 @@ describe('匿名领取凭证', () => {
     const claimed = await portal.claimCredential();
 
     expect(claimed).toBe(true);
-    const call = calls.find((item) => item.url.includes('/credentials/claim'));
-    expect(call).toBeDefined();
-    expect(call?.url).toContain('/api/v1/proposals/p1/credentials/claim');
-    // 请求体里只有公钥：没有 user_id，服务器无从知道是谁领的。
-    expect(call?.body).toHaveProperty('user_pub_key');
-    expect(call?.body).not.toHaveProperty('user_id');
-    expect(Object.keys(call?.body ?? {})).toEqual(['user_pub_key']);
-    expect(portal.wallet.userId).toBe('pseudonym-from-pool');
+    // 预留重试了一次：换一个槽位重新盲化。
+    const reserveCalls = calls.filter((item) => item.url.includes('/credentials/claim'));
+    expect(reserveCalls.length).toBe(2);
+    expect(portal.wallet.userId).toBe('pseudonym-from-pool-2');
+  });
+
+  it('凭证池领完时不重试', async () => {
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('/credentials/claim'),
+        status: 409,
+        payload: { code: 'CREDENTIAL_POOL_EMPTY', error: '凭证池已空' },
+      },
+    ]);
+    const portal = setupPortal();
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(false);
+    const reserveCalls = calls.filter((item) => item.url.includes('/credentials/claim'));
+    expect(reserveCalls.length).toBe(1);
+    const errors = portal.notices.value.filter((item) => item.level === 'error');
+    expect(errors.length).toBeGreaterThan(0);
   });
 
   it('领取失败时给出提示', async () => {
@@ -313,6 +471,105 @@ describe('匿名领取凭证', () => {
     const claimed = await portal.claimCredential();
 
     expect(claimed).toBe(false);
+    const errors = portal.notices.value.filter((item) => item.level === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('没导入资格包时，领取请求体仍然是空的', async () => {
+    const calls = stubFetch([
+      { match: (url) => url.includes('/credentials/claim'), payload: reservationPayload() },
+      { match: (url) => url.includes('/credentials/blind-sign'), payload: blindSignaturePayload() },
+      { match: (url) => url.includes('/credentials/attest'), payload: attestedCredential() },
+    ]);
+    const portal = setupPortal();
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(true);
+    const reserveCall = calls.find((item) => item.url.includes('/credentials/claim'));
+    expect(Object.keys(reserveCall?.body ?? {})).toEqual([]);
+    expect(generateEligibilityProofMock).not.toHaveBeenCalled();
+  });
+
+  it('导入了资格包时：先取挑战，再把证明带进领取请求', async () => {
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('/eligibility-challenge'),
+        payload: {
+          proposal_id: 'p1',
+          root: 'root-hex',
+          depth: 10,
+          challenge: 'challenge-hex',
+        },
+      },
+      { match: (url) => url.includes('/credentials/claim'), payload: reservationPayload() },
+      { match: (url) => url.includes('/credentials/blind-sign'), payload: blindSignaturePayload() },
+      { match: (url) => url.includes('/credentials/attest'), payload: attestedCredential() },
+    ]);
+    generateEligibilityProofMock.mockResolvedValue({
+      proof: 'eligibility-proof',
+      qualificationId: 'qualification-hex',
+      initMs: 100,
+      proveMs: 200,
+    });
+    const portal = setupPortal();
+    portal.eligibilityPackage.value = {
+      member_id: 'member-1',
+      secret: 'secret',
+      leaf: 'leaf',
+      index: 0,
+      path: ['sibling'],
+      root: 'root-hex',
+      depth: 10,
+    };
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(true);
+
+    // 挑战先到，prover 拿到的就是它与成员包。
+    const challengeCall = calls.find((item) => item.url.includes('/eligibility-challenge'));
+    expect(challengeCall).toBeDefined();
+    expect(generateEligibilityProofMock).toHaveBeenCalledWith({
+      proposalId: 'p1',
+      challenge: 'challenge-hex',
+      root: 'root-hex',
+      memberPackage: portal.eligibilityPackage.value,
+    });
+
+    // 领取请求体里只有资格材料那三样，**没有真人身份字段**。
+    const reserveCall = calls.find((item) => item.url.includes('/credentials/claim'));
+    expect(reserveCall?.body).toEqual({
+      eligibility_proof: 'eligibility-proof',
+      qualification_id: 'qualification-hex',
+      challenge: 'challenge-hex',
+    });
+  });
+
+  it('资格证明失败时不发起领取，并给出提示', async () => {
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('/eligibility-challenge'),
+        payload: { proposal_id: 'p1', root: 'root-hex', depth: 10, challenge: 'challenge-hex' },
+      },
+    ]);
+    generateEligibilityProofMock.mockRejectedValue(new Error('证明生成失败'));
+    const portal = setupPortal();
+    portal.eligibilityPackage.value = {
+      member_id: 'member-1',
+      secret: 'secret',
+      leaf: 'leaf',
+      index: 0,
+      path: ['sibling'],
+      root: 'root-hex',
+      depth: 10,
+    };
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(false);
+    // 证明没过就不该消耗池槽位：领取这一步根本没发生。
+    expect(calls.filter((item) => item.url.includes('/credentials/claim')).length).toBe(0);
     const errors = portal.notices.value.filter((item) => item.level === 'error');
     expect(errors.length).toBeGreaterThan(0);
   });
@@ -385,5 +642,101 @@ describe('查询投票状态', () => {
     await portal.fetchVoteStatus();
     expect(portal.voteStatusError.value).toBe('');
     expect(portal.hasVoted.value).toBe(false);
+  });
+});
+
+describe('浏览器本地出票', () => {
+  const proposalItem = {
+    id: 'p1',
+    title: '提案一',
+    description: '',
+    options: ['A', 'B'],
+    status: 'open',
+    startsAt: '',
+    endsAt: '',
+  };
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    generateLocalBallotMock.mockReset();
+    generateLocalBallotMock.mockResolvedValue({
+      ciphertext: 'cipher-local',
+      nullifier: 'null-local',
+      proof: 'proof-local',
+      initMs: 7000,
+      proveMs: 2000,
+    });
+  });
+
+  function setupPortalWithProposal() {
+    const portal = setupPortal();
+    portal.hallState.proposals = [proposalItem];
+    portal.selectedVoteOption.value = 'B';
+    return portal;
+  }
+
+  it('取计票公钥、调用 prover、把材料写进表单', async () => {
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('election-key'),
+        payload: { public_key: 'KEY-BASE64', encoding: 'uncompressed' },
+      },
+    ]);
+    const portal = setupPortalWithProposal();
+
+    const ok = await portal.generateBallotLocally();
+
+    expect(ok).toBe(true);
+    expect(
+      calls.some((call) => call.url.includes('/api/v1/proposals/p1/election-key')),
+    ).toBe(true);
+    expect(generateLocalBallotMock).toHaveBeenCalledWith({
+      proposalId: 'p1',
+      electionPublicKey: 'KEY-BASE64',
+      optionIndex: 1,
+      numOptions: 2,
+    });
+    expect(portal.voteForm.encryptedVote).toBe('cipher-local');
+    expect(portal.voteForm.proof).toBe('proof-local');
+    expect(portal.voteForm.nullifier).toBe('null-local');
+    expect(portal.voteForm.ballotOption).toBe('B');
+    expect(portal.voteForm.ballotProposalId).toBe('p1');
+  });
+
+  it('prover 失败时给出错误提示，且不写表单', async () => {
+    stubFetch([
+      {
+        match: (url) => url.includes('election-key'),
+        payload: { public_key: 'KEY-BASE64', encoding: 'uncompressed' },
+      },
+    ]);
+    generateLocalBallotMock.mockRejectedValue(
+      new Error('下载 WASM 模块失败：HTTP 404'),
+    );
+    const portal = setupPortalWithProposal();
+
+    const ok = await portal.generateBallotLocally();
+
+    expect(ok).toBe(false);
+    expect(portal.voteForm.proof).toBe('');
+    const errors = portal.notices.value.filter((item) => item.level === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]?.detail).toContain('下载 WASM 模块失败');
+  });
+
+  it('没有选中的提案选项时不调用 prover', async () => {
+    stubFetch([
+      {
+        match: (url) => url.includes('election-key'),
+        payload: { public_key: 'KEY-BASE64', encoding: 'uncompressed' },
+      },
+    ]);
+    const portal = setupPortalWithProposal();
+    portal.selectedVoteOption.value = '不存在的选项';
+
+    const ok = await portal.generateBallotLocally();
+
+    expect(ok).toBe(false);
+    expect(generateLocalBallotMock).not.toHaveBeenCalled();
   });
 });

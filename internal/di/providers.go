@@ -76,6 +76,10 @@ func NewCredentialClaimRepository(db *gorm.DB) repository.CredentialClaimReposit
 	return persistence.NewCredentialClaimRepository(db)
 }
 
+func NewEligibilityUseRepository(db *gorm.DB) repository.EligibilityUseRepository {
+	return persistence.NewEligibilityUseRepository(db)
+}
+
 func NewProposalRepository(db *gorm.DB) repository.ProposalRepository {
 	return persistence.NewProposalRepository(db)
 }
@@ -101,11 +105,11 @@ func NewProofVerifier(cfg *config.Config) (domaincrypto.ProofVerifier, error) {
 }
 
 func NewEncrypter() domaincrypto.Encrypter {
-	return cryptoinfra.NewKyberElGamal()
+	return cryptoinfra.NewBallotThresholdCrypto()
 }
 
 func NewThresholdCrypto() usecase.ThresholdCrypto {
-	return cryptoinfra.NewKyberElGamal()
+	return cryptoinfra.NewBallotThresholdCrypto()
 }
 
 func NewMerkleRootBuilder() usecase.MerkleRootBuilder {
@@ -119,6 +123,14 @@ func NewCredentialIssuer(cfg *config.Config) domaincrypto.CredentialIssuer {
 	)
 }
 
+// NewEligibilityService 造资格校验服务。
+//
+// 没配置名单根与验证密钥时它返回「未开启」的服务（开发环境的降级形态）；
+// 只配一半则直接报错 —— 那等于「不校验」。
+func NewEligibilityService(cfg *config.Config) (domaincrypto.EligibilityService, error) {
+	return cryptoinfra.NewEligibilityService(cfg.EligibilityRoot, cfg.EligibilityVerifyingKeyPath)
+}
+
 func NewVotingUseCase(
 	repo repository.VoteRepository,
 	participationRepo repository.ParticipationRepository,
@@ -127,6 +139,7 @@ func NewVotingUseCase(
 	sessionRepo repository.DecryptionSessionRepository,
 	verifier domaincrypto.ProofVerifier,
 	encrypter domaincrypto.Encrypter,
+	issuer domaincrypto.CredentialIssuer,
 	logger *zap.Logger,
 ) *usecase.VotingUseCase {
 	return usecase.NewVotingUseCase(
@@ -137,6 +150,7 @@ func NewVotingUseCase(
 		sessionRepo,
 		verifier,
 		encrypter,
+		issuer,
 		logger,
 	)
 }
@@ -146,9 +160,19 @@ func NewRegisterUseCase(
 	proposalRepo repository.ProposalRepository,
 	issuer domaincrypto.CredentialIssuer,
 	claimRepo repository.CredentialClaimRepository,
+	eligibilityUseRepo repository.EligibilityUseRepository,
+	eligibility domaincrypto.EligibilityService,
 	logger *zap.Logger,
 ) *usecase.RegisterUseCase {
-	return usecase.NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, logger)
+	return usecase.NewRegisterUseCaseWithEligibility(
+		repo,
+		proposalRepo,
+		issuer,
+		claimRepo,
+		eligibilityUseRepo,
+		eligibility,
+		logger,
+	)
 }
 
 func NewProposalUseCase(
@@ -196,7 +220,14 @@ func NewHTTPHandler(
 	tallyUC *usecase.TallyUseCase,
 	logger *zap.Logger,
 ) *httpapi.Handler {
-	return httpapi.NewHandlerWithTally(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
+	return httpapi.NewHandlerWithTally(
+		votingUC,
+		registerUC,
+		proposalUC,
+		participationUC,
+		tallyUC,
+		logger,
+	)
 }
 
 func NewHTTPServer(cfg *config.Config, handler *httpapi.Handler, logger *zap.Logger) *httpapi.Server {

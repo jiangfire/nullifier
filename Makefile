@@ -24,10 +24,12 @@ endif
 .DEFAULT_GOAL := help
 
 .PHONY: help \
-	deps tidy build run cli \
-	test test-short cover \
+	deps tidy build run cli loadtest \
+	test test-short cover pg-test \
 	vet fmt fmt-check \
 	web-install web-dev web-build web-test web-lint web-typecheck web-format web-format-check \
+	web-wasm web-proving-key web-eligibility-key eligibility-list \
+	browser-acceptance \
 	check ci clean
 
 help: ## Show available targets
@@ -55,6 +57,9 @@ run: ## Start the HTTP server (SQLite file anonvote.db)
 cli: ## Run the CLI (make cli ARGS="help")
 	$(GO) run ./cmd/cli $(ARGS)
 
+loadtest: ## Run the concurrent voting load test (make loadtest ARGS="-votes 200")
+	$(GO) run ./cmd/loadtest $(ARGS)
+
 # ---------- 测试 ----------
 
 test: ## Run every test
@@ -65,6 +70,21 @@ test-short: ## Run tests, skipping container-backed integration tests
 
 cover: ## Coverage gate (per-package floors in scripts/coverage-thresholds.txt)
 	bash ./scripts/check-coverage.sh $(or $(THRESHOLD),80) coverage.out
+
+pg-test: ## Run the PostgreSQL integration tests against a local compose database
+	@echo "starting postgres (docker compose) ..."; \
+	docker compose up -d --wait postgres; \
+	echo "running the postgres integration tests ..."; \
+	status=0; \
+	ANONVOTE_TEST_PG_HOST=127.0.0.1 \
+	ANONVOTE_TEST_PG_PORT=5432 \
+	ANONVOTE_TEST_PG_USER=test \
+	ANONVOTE_TEST_PG_PASSWORD=test \
+	ANONVOTE_TEST_PG_DATABASE=anonvote \
+	$(GO) test -count=1 -v ./tests/integration/ -run Postgres || status=$$?; \
+	echo "stopping postgres ..."; \
+	docker compose down -v || true; \
+	exit $$status
 
 # ---------- 静态检查 ----------
 
@@ -107,6 +127,37 @@ web-format: ## Format frontend sources
 
 web-format-check: ## Check frontend formatting
 	$(PNPM) --dir web exec prettier --check .
+
+web-wasm: ## Build the browser-side prover (WASM) into web/public
+	@mkdir -p web/public
+	GOOS=js GOARCH=wasm CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w" \
+		-o web/public/ballot-prover.wasm ./cmd/ballot-wasm
+	cp "$$($(GO) env GOROOT)/lib/wasm/wasm_exec.js" web/public/wasm_exec.js
+	@echo "web/public/ballot-prover.wasm and web/public/wasm_exec.js are ready"
+
+web-proving-key: ## Publish the proving key to web/public (make web-proving-key PK=<path>)
+	@if [ -z "$(PK)" ]; then \
+		echo "usage: make web-proving-key PK=<path to proving.key>"; \
+		exit 2; \
+	fi
+	@mkdir -p web/public
+	cp "$(PK)" web/public/proving.key
+	@echo "web/public/proving.key is ready (never commit it)"
+
+web-eligibility-key: ## Publish the eligibility proving key (make web-eligibility-key PK=<path>)
+	@if [ -z "$(PK)" ]; then \
+		echo "usage: make web-eligibility-key PK=<path to eligibility-proving.key>"; \
+		exit 2; \
+	fi
+	@mkdir -p web/public
+	cp "$(PK)" web/public/eligibility-proving.key
+	@echo "web/public/eligibility-proving.key is ready (never commit it)"
+
+eligibility-list: ## Build the offline eligibility-list tool
+	$(GO) build -o eligibility-list ./cmd/eligibility-list
+
+browser-acceptance: ## Prepare the browser acceptance environment (make browser-acceptance ARGS=setup|verify|stop)
+	bash ./scripts/browser-acceptance.sh $(or $(ARGS),setup)
 
 # ---------- 组合目标 ----------
 

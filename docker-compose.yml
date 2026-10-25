@@ -1,0 +1,29 @@
+# 本地 PostgreSQL —— 集成测试用。
+#
+# 用法：`make pg-test`（起库 → 跑集成测试 → 关库）。
+# 端口与口令要与 `tests/integration/persistence_postgres_test.go` 里
+# `ANONVOTE_TEST_PG_*` 的默认值一致。
+#
+# 这份 compose 存在的意义：路线图 §4.3 的第一个盲区是「PostgreSQL 集成测试
+# 从未被验证」。CI 会用 testcontainers 实跑，本地则用这个库 —— 两条路径共用
+# 同一份测试代码。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nullifier-postgres
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: anonvote
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      # 集成测试要的是「能建 schema 的库」，不只是「端口通了」。
+      test: ["CMD-SHELL", "pg_isready -U test -d anonvote"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      # 库是一次性的 —— 测完就丢，不落盘。
+      - /var/lib/postgresql/data

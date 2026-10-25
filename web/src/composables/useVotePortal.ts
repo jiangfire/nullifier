@@ -6,6 +6,17 @@ import {
   isTargetUnknown,
 } from '../lib/ballot';
 import { localInputToRfc3339, toLocalDateTimeInput } from '../lib/datetime';
+import {
+  base64ToBytes,
+  blindCredentialMessage,
+  bytesToBase64,
+  finalizeCredentialSignature,
+  parseIssuerKey,
+} from '../lib/credential';
+import { generateNullifier } from '../lib/nullifier';
+import { generateLocalBallot } from '../lib/wasm-prover';
+import { generateEligibilityProof } from '../lib/eligibility-prover';
+import type { EligibilityMemberPackage } from '../lib/wasm-prover-protocol';
 import { describeApiError } from '../lib/error-messages';
 import {
   buildPortalSearch,
@@ -125,6 +136,42 @@ function boolOf(object: JsonMap | null, key: string): boolean | null {
   return typeof value === 'boolean' ? value : null;
 }
 
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+/**
+ * 匿名领取的重试次数。
+ *
+ * 服务端取槽位时**不占位**（占位会变成「只预留不 attest 就能耗尽池」的 DoS），
+ * 所以并发领取会抢到同一个槽位。抢输的那个换一个槽位重来 —— 但重试要重新
+ * 盲化（新的 user_id 意味着新的消息），所以重试只能在客户端做。
+ */
+const claimMaxAttempts = 5;
+
+/**
+ * 判断错误是不是「槽位被别人抢走」—— 只有这种情况值得重试。
+ *
+ * 409 有两种：槽位被抢（换个槽位重来就行）与凭证池已空（重试也没用）。
+ */
+function isSlotTaken(status: number, code: string | null): boolean {
+  return status === 409 && code === 'CREDENTIAL_EXISTS';
+}
+
+/** 凭证两段式流程的结果。 */
+type CredentialFlowResult =
+  | { ok: true; credential: JsonMap }
+  | {
+      ok: false;
+      title: string;
+      message: string;
+      /** 换一个槽位重来就能成（只有槽位被抢时为真）。 */
+      retryable?: boolean;
+    };
+
 function randomBase64(size: number): string {
   const bytes = new Uint8Array(size);
   crypto.getRandomValues(bytes);
@@ -139,17 +186,17 @@ function regenerateBase64Key(): string {
   return randomBase64(32);
 }
 
+/**
+ * 生成一个 nullifier。
+ *
+ * 服务端要求 nullifier 是 32 字节的规范域元素编码（十六进制）：
+ * 同一个值不能有两种字节表示，否则双重投票的唯一索引就拦不住了。
+ */
 function newNullifier(): string {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  const suffix = Array.from(bytes, (item) =>
-    item.toString(16).padStart(2, '0'),
-  ).join('');
-  return `null-${Date.now()}-${suffix}`;
+  return generateNullifier();
 }
 
-function splitShares(raw: string): string[] {
-  return raw
+function splitShares(raw: string): string[] {  return raw
     .split(/[\s,]+/)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
@@ -301,13 +348,21 @@ export function useVotePortal() {
   const credentialLoading = ref(false);
   const credentialFileInput = ref<HTMLInputElement | null>(null);
 
+  // 资格包：成员自己拿到的 JSON 文件（离线名单工具生成）。
+  //
+  // 导入它，领取凭证时门户就能在本地出资格证明 —— 服务端据此强制「一人一票」，
+  // 却始终不知道这份资格属于谁。没导入时能不能领，取决于服务端是否强制。
+  const eligibilityPackage = ref<EligibilityMemberPackage | null>(null);
+  const eligibilityPackageName = ref('');
+  const eligibilityFileInput = ref<HTMLInputElement | null>(null);
+  const eligibilityError = ref('');
+
   const voteForm = reactive({
     proposalId: '',
     ballotJson: '',
     encryptedVote: '',
     proof: '',
     nullifier: '',
-    publicWitness: '',
     // 这份凭据材料是针对哪个提案、哪个选项生成的。
     // 选项或提案变了就必须作废它，否则会投出旧选项。
     ballotProposalId: '',
@@ -714,7 +769,6 @@ export function useVotePortal() {
         encrypted_vote: voteForm.encryptedVote,
         proof: voteForm.proof,
         nullifier: voteForm.nullifier,
-        public_witness: voteForm.publicWitness,
       },
       null,
       2,
@@ -752,13 +806,10 @@ export function useVotePortal() {
         proof: textOf(base, 'proof') || voteForm.proof,
         nullifier:
           textOf(base, 'nullifier') || voteForm.nullifier || newNullifier(),
-        public_witness:
-          textOf(base, 'public_witness') || voteForm.publicWitness,
       };
       voteForm.encryptedVote = textOf(payload, 'encrypted_vote');
       voteForm.proof = textOf(payload, 'proof');
       voteForm.nullifier = textOf(payload, 'nullifier');
-      voteForm.publicWitness = textOf(payload, 'public_witness');
       voteForm.ballotJson = JSON.stringify(payload, null, 2);
       // 材料本来没有绑定目标时（外部导入且没带 selected_option），
       // 以用户这次显式写入的选项为准。
@@ -796,8 +847,6 @@ export function useVotePortal() {
         textOf(parsed, 'encrypted_vote') || textOf(parsed, 'encryptedVote');
       voteForm.proof = textOf(parsed, 'proof');
       voteForm.nullifier = textOf(parsed, 'nullifier');
-      voteForm.publicWitness =
-        textOf(parsed, 'public_witness') || textOf(parsed, 'publicWitness');
       const chosenOption =
         textOf(parsed, 'selected_option') || textOf(parsed, 'option');
       // 外部导入的凭据：读到 selected_option 就绑定上，读不到就保持「不可判定」，
@@ -816,60 +865,92 @@ export function useVotePortal() {
     }
   }
 
-  async function prepareBallotByOption(): Promise<boolean> {
+  /**
+   * 在浏览器本地生成选票（密文 + nullifier + 零知识证明）。
+   *
+   * 这是正式（非 debug）模式下唯一的出票入口：密文由浏览器里的 WASM prover
+   * 生成，服务端全程只看到密文、nullifier 与证明，看不到选了哪个选项。
+   *
+   * 依赖门户静态目录里的三个文件（`wasm_exec.js` / `ballot-prover.wasm` /
+   * `proving.key`），由 `make web-wasm` 与 `make web-proving-key` 准备。
+   */
+  async function generateBallotLocally(): Promise<boolean> {
     clearErrorGroup(voteErrors);
     if (!walletReady.value) {
       addNotice('error', '生成失败', '请先领取或导入匿名凭证');
       return false;
     }
-    if (voteForm.proposalId.trim() === '') {
+    const proposalId = voteForm.proposalId.trim();
+    if (proposalId === '') {
       voteErrors.proposalId = '请先选择 proposal_id';
       addNotice('error', '生成失败', voteErrors.proposalId);
       return false;
     }
-    if (selectedVoteOption.value.trim() === '') {
-      voteErrors.option = '请先选择投票选项';
+    const proposal = selectedProposal.value;
+    if (!proposal || proposal.options.length === 0) {
+      voteErrors.option = '当前提案没有可选项';
+      addNotice('error', '生成失败', voteErrors.option);
+      return false;
+    }
+    const option = selectedVoteOption.value.trim();
+    const optionIndex = proposal.options.indexOf(option);
+    if (optionIndex < 0) {
+      voteErrors.option = '请选择一个投票选项';
       addNotice('error', '生成失败', voteErrors.option);
       return false;
     }
 
     voteLoading.value = true;
-    const result = await apiCall({
-      baseUrl: apiBaseUrl.value,
-      path: `/api/v1/proposals/${encodeURIComponent(voteForm.proposalId.trim())}/ballot-draft`,
-      method: 'POST',
-      body: { option: selectedVoteOption.value.trim() },
-    });
-    voteLoading.value = false;
+    try {
+      const keyResult = await apiCall({
+        baseUrl: apiBaseUrl.value,
+        path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/election-key`,
+      });
+      if (!keyResult.ok) {
+        addNotice(
+          'error',
+          '生成失败',
+          describeApiError(
+            keyResult.error,
+            keyResult.code,
+            '该提案还没初始化解密，请先在「计票与审计」完成「初始化解密」',
+          ),
+        );
+        return false;
+      }
+      const keyPayload = toObject(keyResult.data);
+      const electionPublicKey = textOf(keyPayload, 'public_key');
+      if (electionPublicKey === '') {
+        addNotice('error', '生成失败', '服务端没有返回计票公钥');
+        return false;
+      }
 
-    if (!result.ok) {
+      const result = await generateLocalBallot({
+        proposalId,
+        electionPublicKey,
+        optionIndex,
+        numOptions: proposal.options.length,
+      });
+
+      voteForm.encryptedVote = result.ciphertext;
+      voteForm.proof = result.proof;
+      voteForm.nullifier = result.nullifier;
+      voteForm.ballotProposalId = proposalId;
+      voteForm.ballotOption = option;
+      updateBallotJson(option);
       addNotice(
-        'error',
-        '生成失败',
-        describeApiError(
-          result.error,
-          result.code,
-          '该提案还没初始化解密，请先在「计票与审计」完成「初始化解密」',
-        ),
+        'success',
+        '生成成功',
+        `已在浏览器本地生成密文与证明（初始化 ${Math.round(result.initMs / 100) / 10}s，出证明 ${Math.round(result.proveMs / 100) / 10}s）；服务端看不到你选了哪个选项`,
       );
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : '浏览器端生成选票失败';
+      addNotice('error', '生成失败', detail);
       return false;
+    } finally {
+      voteLoading.value = false;
     }
-
-    const payload = toObject(result.data);
-    voteForm.encryptedVote = textOf(payload, 'encrypted_vote');
-    voteForm.proof = textOf(payload, 'proof');
-    voteForm.nullifier = textOf(payload, 'nullifier') || newNullifier();
-    const option = textOf(payload, 'option');
-    // 先绑定目标再回写选项：回写会触发下面的 watcher，watcher 是延迟执行的，
-    // 那时 ballotOption 已经是新值，不会误清刚拿到的材料。
-    voteForm.ballotProposalId = voteForm.proposalId.trim();
-    voteForm.ballotOption = (option || selectedVoteOption.value).trim();
-    if (option !== '') {
-      selectedVoteOption.value = option;
-    }
-    updateBallotJson(selectedVoteOption.value);
-    addNotice('success', '生成成功', '已根据选项生成可提交的投票凭据');
-    return true;
   }
 
   async function checkHealth(showNotice = true): Promise<void> {
@@ -979,57 +1060,336 @@ export function useVotePortal() {
   /**
    * 匿名领取凭证。
    *
-   * 请求里只有自己生成的公钥，没有任何身份信息：服务端随机给出一个凭证，
-   * 因此服务端与运营方都无法把凭证和投票人对应起来。
+   * 走真两段式盲签名：客户端本地盲化凭证消息，服务端只见盲化消息；
+   * 客户端解盲后再把最终签名交回去，服务端验签后落库。
+   *
+   * 预留请求里**没有任何身份信息**：服务端随机给出一个凭证假名，服务端与运营方
+   * 都无法把凭证和投票人对应起来。
+   *
+   * 槽位被别人抢走时换一个槽位重来（服务端取槽位时不占位，并发领取会撞车）。
    */
   async function claimCredential(): Promise<boolean> {
     clearErrorGroup(identityErrors);
-    if (voteForm.proposalId.trim() === '') {
+    const proposalId = voteForm.proposalId.trim();
+    if (proposalId === '') {
       identityErrors.userId = '请先选择 proposal_id，再领取该提案的凭证';
       addNotice('error', '领取失败', identityErrors.userId);
       return false;
     }
 
-    const pubKey = regenerateBase64Key();
+    const userPubKey = regenerateBase64Key();
     credentialLoading.value = true;
-    const result = await apiCall({
+    let failure: CredentialFlowResult | null = null;
+    for (let attempt = 0; attempt < claimMaxAttempts; attempt += 1) {
+      const result = await claimCredentialOnce(proposalId, userPubKey);
+      if (result.ok) {
+        credentialLoading.value = false;
+        const credential = result.credential;
+        wallet.proposalId = textOf(credential, 'proposal_id') || proposalId;
+        wallet.userId = textOf(credential, 'user_id');
+        wallet.userPubKey = textOf(credential, 'user_pub_key') || userPubKey;
+        wallet.signature = textOf(credential, 'signature');
+        wallet.issuerKeyVersion = textOf(credential, 'issuer_key_version');
+        wallet.issuedAt = textOf(credential, 'issued_at');
+        hasVoted.value = null;
+        addNotice(
+          'success',
+          '凭证已领取',
+          '凭证与你的身份没有绑定，服务端也不知道是谁领的',
+        );
+        return true;
+      }
+      if (!result.retryable) {
+        credentialLoading.value = false;
+        addNotice('error', result.title, result.message);
+        return false;
+      }
+      failure = result;
+    }
+    credentialLoading.value = false;
+    addNotice(
+      'error',
+      failure?.title ?? '领取失败',
+      failure?.message ?? '凭证池的槽位一直被占用，请稍后重试',
+    );
+    return false;
+  }
+
+  /** 匿名领取的单次尝试：预留 → 盲化 → 盲签名 → 解盲 → attest。 */
+  async function claimCredentialOnce(
+    proposalId: string,
+    userPubKey: string,
+  ): Promise<CredentialFlowResult> {
+    // 资格材料在**领取之前**备好：证明不过就不该消耗池槽位。
+    let claimBody: Record<string, string> = {};
+    try {
+      const eligibility = await buildEligibilityBody(proposalId);
+      if (eligibility !== null) {
+        claimBody = eligibility;
+      }
+    } catch (error) {
+      return { ok: false, title: '资格证明失败', message: describeError(error) };
+    }
+
+    const reserve = await apiCall({
       baseUrl: apiBaseUrl.value,
-      path: `/api/v1/proposals/${encodeURIComponent(voteForm.proposalId.trim())}/credentials/claim`,
+      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/claim`,
+      method: 'POST',
+      body: claimBody,
+    });
+    if (!reserve.ok) {
+      return {
+        ok: false,
+        title: '领取失败',
+        message: describeApiError(reserve.error, reserve.code, '凭证池可能已经领完'),
+      };
+    }
+    const reservation = toObject(reserve.data);
+    return completeCredentialBlindSignature(proposalId, userPubKey, reservation, {
+      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/blind-sign`,
+      buildBody: (issuerKeyVersion, blindedMessage) => ({
+        user_id: textOf(reservation, 'user_id'),
+        blinded_message: blindedMessage,
+        issuer_key_version: issuerKeyVersion,
+      }),
+    });
+  }
+
+  /**
+   * 备好领取请求里的资格材料。
+   *
+   * 服务端开启了资格校验时必须带：先向服务端要一次挑战，再用资格包在本地
+   * 出零知识证明。没导入资格包时返回 null —— 服务端会回
+   * `ELIGIBILITY_REQUIRED`，门户据此提示先导入资格文件。
+   */
+  async function buildEligibilityBody(
+    proposalId: string,
+  ): Promise<Record<string, string> | null> {
+    const pack = eligibilityPackage.value;
+    if (pack === null) {
+      return null;
+    }
+
+    const challengeResult = await apiCall({
+      baseUrl: apiBaseUrl.value,
+      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/eligibility-challenge`,
+      method: 'POST',
+      body: {},
+    });
+    if (!challengeResult.ok) {
+      throw new Error(
+        describeApiError(challengeResult.error, challengeResult.code, '服务端没有签发领取挑战'),
+      );
+    }
+    const challenge = toObject(challengeResult.data);
+    const root = textOf(challenge, 'root');
+    const challengeValue = textOf(challenge, 'challenge');
+    if (root === '' || challengeValue === '') {
+      throw new Error('服务端返回的领取挑战不完整');
+    }
+
+    const proof = await generateEligibilityProof({
+      proposalId,
+      challenge: challengeValue,
+      root,
+      memberPackage: pack,
+    });
+    return {
+      eligibility_proof: proof.proof,
+      qualification_id: proof.qualificationId,
+      challenge: challengeValue,
+    };
+  }
+
+  /** 打开资格文件选择框。 */
+  function openEligibilityImport(): void {
+    eligibilityFileInput.value?.click();
+  }
+
+  /** 清掉已导入的资格包。 */
+  function clearEligibilityPackage(): void {
+    eligibilityPackage.value = null;
+    eligibilityPackageName.value = '';
+    eligibilityError.value = '';
+  }
+
+  /**
+   * 导入成员自己的资格包。
+   *
+   * 资格包是**秘密材料**：谁拿到它谁就能领这一票。因此门户只把它留在内存里
+   * （不写进 localStorage、不上传），刷新页面就要重新导入。
+   */
+  async function importEligibilityPackage(event: Event): Promise<void> {
+    const target = event.target;
+    eligibilityError.value = '';
+    if (!(target instanceof HTMLInputElement) || !target.files || target.files.length === 0) {
+      return;
+    }
+    const file = target.files[0];
+    target.value = '';
+    try {
+      const raw = await file.text();
+      const parsed: unknown = JSON.parse(raw);
+      const pack = toObject(parsed);
+      if (pack === null) {
+        throw new Error('资格文件不是 JSON 对象');
+      }
+      const secret = textOf(pack, 'secret');
+      const leaf = textOf(pack, 'leaf');
+      const root = textOf(pack, 'root');
+      const path = pack.path;
+      if (secret === '' || leaf === '' || root === '') {
+        throw new Error('资格文件缺少 secret / leaf / root');
+      }
+      if (!Array.isArray(path) || path.some((item) => typeof item !== 'string')) {
+        throw new Error('资格文件的 path 不对');
+      }
+      const depth = pack.depth;
+      if (typeof depth !== 'number' || !Number.isFinite(depth) || depth <= 0) {
+        throw new Error('资格文件的 depth 不对');
+      }
+      const index = pack.index;
+      if (typeof index !== 'number' || !Number.isFinite(index) || index < 0) {
+        throw new Error('资格文件的 index 不对');
+      }
+      eligibilityPackage.value = {
+        member_id: textOf(pack, 'member_id'),
+        secret,
+        leaf,
+        index,
+        path: path as string[],
+        root,
+        depth,
+      };
+      eligibilityPackageName.value = file.name;
+      addNotice('success', '资格文件已导入', '领凭证时会用它在本机出资格证明');
+    } catch (error) {
+      eligibilityPackage.value = null;
+      eligibilityPackageName.value = '';
+      eligibilityError.value = describeError(error);
+      addNotice('error', '资格文件无效', eligibilityError.value);
+    }
+  }
+
+  /**
+   * 走完凭证盲签名的客户端侧：本地盲化 → 盲签名 → 本地解盲 → attest。
+   *
+   * 匿名领取与管理端签发只差「预留」与「盲签名」两步的端点，中间完全一样。
+   */
+  async function completeCredentialBlindSignature(
+    proposalId: string,
+    userPubKey: string,
+    reservation: JsonMap | null,
+    blindSign: {
+      path: string;
+      headers?: Record<string, string>;
+      buildBody: (
+        issuerKeyVersion: number,
+        blindedMessage: string,
+      ) => Record<string, unknown>;
+    },
+  ): Promise<CredentialFlowResult> {
+    if (reservation === null) {
+      return { ok: false, title: '领取失败', message: '服务端返回的预留结果格式不对' };
+    }
+    const userId = textOf(reservation, 'user_id');
+    if (userId === '') {
+      return { ok: false, title: '领取失败', message: '服务端没有返回 user_id' };
+    }
+
+    let issuerKey;
+    try {
+      issuerKey = parseIssuerKey(reservation);
+    } catch (error) {
+      return {
+        ok: false,
+        title: '领取失败',
+        message: `签发方公钥不可用：${describeError(error)}`,
+      };
+    }
+
+    let blinded;
+    try {
+      blinded = blindCredentialMessage(issuerKey, userId, base64ToBytes(userPubKey));
+    } catch (error) {
+      return {
+        ok: false,
+        title: '领取失败',
+        message: `本地盲化失败：${describeError(error)}`,
+      };
+    }
+
+    const blindSignResult = await apiCall({
+      baseUrl: apiBaseUrl.value,
+      path: blindSign.path,
+      method: 'POST',
+      headers: blindSign.headers,
+      body: blindSign.buildBody(
+        issuerKey.version,
+        bytesToBase64(blinded.blindedMessage),
+      ),
+    });
+    if (!blindSignResult.ok) {
+      return {
+        ok: false,
+        title: '盲签名失败',
+        message: describeApiError(
+          blindSignResult.error,
+          blindSignResult.code,
+          '服务端拒绝了这次盲签名',
+        ),
+      };
+    }
+    const blindSignature = textOf(toObject(blindSignResult.data), 'blind_signature');
+    if (blindSignature === '') {
+      return { ok: false, title: '盲签名失败', message: '服务端没有返回盲签名' };
+    }
+
+    let signature;
+    try {
+      signature = finalizeCredentialSignature(
+        blinded,
+        base64ToBytes(blindSignature),
+        issuerKey,
+      );
+    } catch (error) {
+      return { ok: false, title: '解盲失败', message: describeError(error) };
+    }
+
+    const attestResult = await apiCall({
+      baseUrl: apiBaseUrl.value,
+      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/attest`,
       method: 'POST',
       body: {
-        user_pub_key: pubKey,
+        user_id: userId,
+        user_pub_key: userPubKey,
+        signature: bytesToBase64(signature),
       },
     });
-    credentialLoading.value = false;
-
-    if (!result.ok) {
-      addNotice(
-        'error',
-        '领取失败',
-        describeApiError(result.error, result.code, '凭证池可能已经领完'),
-      );
-      return false;
+    if (!attestResult.ok) {
+      return {
+        ok: false,
+        title: '凭证落库失败',
+        message: describeApiError(
+          attestResult.error,
+          attestResult.code,
+          '服务端没有接受这张凭证',
+        ),
+        // 槽位被别人抢走时，换一个槽位重来就能成。
+        retryable: isSlotTaken(attestResult.status, attestResult.code),
+      };
     }
-    const payload = toObject(result.data);
-    wallet.proposalId =
-      textOf(payload, 'proposal_id') || voteForm.proposalId.trim();
-    wallet.userId = textOf(payload, 'user_id');
-    wallet.userPubKey = textOf(payload, 'user_pub_key') || pubKey;
-    wallet.signature = textOf(payload, 'signature');
-    wallet.issuerKeyVersion = textOf(payload, 'issuer_key_version');
-    wallet.issuedAt = textOf(payload, 'issued_at');
-    hasVoted.value = null;
-    addNotice(
-      'success',
-      '凭证已领取',
-      '凭证与你的身份没有绑定，服务端也不知道是谁领的',
-    );
-    return true;
+    const credential = toObject(attestResult.data);
+    if (credential === null) {
+      return { ok: false, title: '凭证落库失败', message: '服务端返回的凭证格式不对' };
+    }
+    return { ok: true, credential };
   }
 
   async function issueCredential(): Promise<boolean> {
     clearErrorGroup(identityErrors);
-    if (voteForm.proposalId.trim() === '') {
+    const proposalId = voteForm.proposalId.trim();
+    if (proposalId === '') {
       identityErrors.userId = '请先选择 proposal_id，再领取该提案的凭证';
       addNotice('error', '签发失败', identityErrors.userId);
       return false;
@@ -1055,35 +1415,54 @@ export function useVotePortal() {
     }
 
     credentialLoading.value = true;
-    const result = await apiCall({
+    const reserve = await apiCall({
       baseUrl: apiBaseUrl.value,
       path: '/api/v1/credentials',
       method: 'POST',
       headers: adminHeaders(),
       body: {
-        proposal_id: voteForm.proposalId.trim(),
+        proposal_id: proposalId,
         user_id: identityForm.userId.trim(),
-        user_pub_key: currentPubKey.value,
       },
     });
-    credentialLoading.value = false;
-
-    if (!result.ok) {
+    if (!reserve.ok) {
+      credentialLoading.value = false;
       addNotice(
         'error',
         '签发失败',
-        describeApiError(result.error, result.code, '后端未返回凭证'),
+        describeApiError(reserve.error, reserve.code, '后端未返回凭证'),
       );
       return false;
     }
-    const payload = toObject(result.data);
-    wallet.proposalId =
-      textOf(payload, 'proposal_id') || voteForm.proposalId.trim();
-    wallet.userId = textOf(payload, 'user_id') || identityForm.userId.trim();
-    wallet.userPubKey = textOf(payload, 'user_pub_key');
-    wallet.signature = textOf(payload, 'signature');
-    wallet.issuerKeyVersion = textOf(payload, 'issuer_key_version');
-    wallet.issuedAt = textOf(payload, 'issued_at');
+    const reservation = toObject(reserve.data);
+    const result = await completeCredentialBlindSignature(
+      proposalId,
+      currentPubKey.value,
+      reservation,
+      {
+        path: '/api/v1/credentials/blind-sign',
+        headers: adminHeaders(),
+        buildBody: (issuerKeyVersion, blindedMessage) => ({
+          proposal_id: proposalId,
+          user_id: textOf(reservation, 'user_id'),
+          blinded_message: blindedMessage,
+          issuer_key_version: issuerKeyVersion,
+        }),
+      },
+    );
+    credentialLoading.value = false;
+
+    if (!result.ok) {
+      addNotice('error', result.title, result.message);
+      return false;
+    }
+    const credential = result.credential;
+    wallet.proposalId = textOf(credential, 'proposal_id') || proposalId;
+    wallet.userId = textOf(credential, 'user_id') || identityForm.userId.trim();
+    wallet.userPubKey = textOf(credential, 'user_pub_key') || currentPubKey.value;
+    wallet.signature = textOf(credential, 'signature');
+    wallet.issuerKeyVersion = textOf(credential, 'issuer_key_version');
+    wallet.issuedAt = textOf(credential, 'issued_at');
     hasVoted.value = null;
     addNotice('success', '凭证已领取', '你已可以进行匿名投票');
     return true;
@@ -1145,9 +1524,6 @@ export function useVotePortal() {
     };
     // 注意：不要发送 selected_option。服务端不消费这个字段，而明文选项上服务端
     // 会抵消「选票是加密的」这个属性。选票是否对得上当前选项由本地绑定校验。
-    if (voteForm.publicWitness.trim() !== '') {
-      body.public_witness = voteForm.publicWitness.trim();
-    }
 
     voteLoading.value = true;
     const result = await apiCall({
@@ -1753,6 +2129,13 @@ export function useVotePortal() {
     openCredentialImport,
     importCredentialFile,
     exportCredentialFile,
+    eligibilityPackage,
+    eligibilityPackageName,
+    eligibilityFileInput,
+    eligibilityError,
+    openEligibilityImport,
+    importEligibilityPackage,
+    clearEligibilityPackage,
 
     voteForm,
     voteLoading,
@@ -1766,7 +2149,7 @@ export function useVotePortal() {
     applySelectedOptionToBallot,
     fillBallotTemplate,
     importBallotJson,
-    prepareBallotByOption,
+    generateBallotLocally,
     submitVote,
     fetchVoteStatus,
     newNullifier,

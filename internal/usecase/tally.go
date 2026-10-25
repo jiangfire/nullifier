@@ -23,8 +23,13 @@ type ThresholdCrypto interface {
 	GenerateKeyPair() ([]byte, []byte, error)
 	SplitPrivateKey(privateKey []byte, threshold, trustees int) ([][]byte, error)
 	RecoverPrivateKey(shares [][]byte, threshold, trustees int) ([]byte, error)
-	Encrypt(publicKey []byte, plaintext []byte) ([]byte, error)
-	Decrypt(privateKey []byte, ciphertext []byte) ([]byte, error)
+	// Decrypt 用计票私钥还原选项下标。numOptions 是提案的选项数，
+	// 解密方据此在选项集合里比对。
+	Decrypt(privateKey []byte, ciphertext []byte, numOptions int) (int, error)
+	// UncompressPublicKey 把计票公钥转成未压缩形式（X 与 Y 各 32 字节大端）。
+	// 客户端用它本地加密选票 —— 公钥是公开值，客户端拿到它就能在不告诉
+	// 服务端「选了哪个」的前提下完成加密。
+	UncompressPublicKey(publicKey []byte) ([]byte, error)
 }
 
 type MerkleRootBuilder interface {
@@ -220,17 +225,14 @@ func (uc *TallyUseCase) PublishResult(
 	tally := make(map[string]int)
 	leaves := make([][]byte, 0, len(votes))
 	for _, vote := range votes {
-		plain, err := uc.crypto.Decrypt(privateKey, vote.Cipher)
+		index, err := uc.crypto.Decrypt(privateKey, vote.Cipher, len(proposal.Options))
 		if err != nil {
 			return nil, fmt.Errorf("decrypt vote %s: %w", vote.ID, err)
 		}
-		candidate := strings.TrimSpace(string(plain))
-		if candidate == "" {
-			return nil, fmt.Errorf("%w: empty candidate in vote %s", ErrInvalidRequest, vote.ID)
+		if index < 0 || index >= len(proposal.Options) {
+			return nil, fmt.Errorf("%w: option index %d in vote %s is not defined for proposal", ErrInvalidRequest, index, vote.ID)
 		}
-		if !proposalAllowsOption(proposal, candidate) {
-			return nil, fmt.Errorf("%w: option %q in vote %s is not defined for proposal", ErrInvalidRequest, candidate, vote.ID)
-		}
+		candidate := proposal.Options[index]
 		tally[candidate]++
 		leaves = append(leaves, buildVoteLeaf(vote))
 	}
@@ -322,44 +324,29 @@ func (uc *TallyUseCase) ListAuditAnchors(ctx context.Context, proposalID string)
 	return uc.anchorRepo.ListByProposal(ctx, proposalID)
 }
 
-func (uc *TallyUseCase) EncryptVoteOption(
-	ctx context.Context,
-	proposalID string,
-	option string,
-) ([]byte, error) {
+// ElectionPublicKey 返回提案的计票公钥（未压缩形式）。
+//
+// 公钥是公开值：客户端拿到它就能在本地把选项加密，服务端全程看不到明文
+// 选项 —— 这是能力 A（选票内容对服务端不可知）的前提。
+func (uc *TallyUseCase) ElectionPublicKey(ctx context.Context, proposalID string) ([]byte, error) {
 	if uc.sessionRepo == nil {
 		return nil, errors.New("decryption session repository is not configured")
 	}
 	if uc.crypto == nil {
 		return nil, errors.New("threshold crypto is not configured")
 	}
-	if proposalID == "" {
+	if strings.TrimSpace(proposalID) == "" {
 		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
 	}
-	candidate := strings.TrimSpace(option)
-	if candidate == "" {
-		return nil, fmt.Errorf("%w: option is required", ErrInvalidRequest)
-	}
-	if uc.proposalRepo == nil {
-		return nil, errors.New("proposal repository is not configured")
-	}
-	proposal, err := uc.proposalRepo.GetByID(ctx, proposalID)
-	if err != nil {
-		return nil, fmt.Errorf("load proposal: %w", err)
-	}
-	if !proposalAllowsOption(proposal, candidate) {
-		return nil, fmt.Errorf("%w: option %q is not defined for proposal", ErrInvalidRequest, candidate)
-	}
-
 	session, err := uc.sessionRepo.GetByProposal(ctx, proposalID)
 	if err != nil {
 		return nil, fmt.Errorf("load decryption session: %w", err)
 	}
-	cipher, err := uc.crypto.Encrypt(session.PublicKey, []byte(candidate))
+	key, err := uc.crypto.UncompressPublicKey(session.PublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("encrypt vote option: %w", err)
+		return nil, fmt.Errorf("uncompress election public key: %w", err)
 	}
-	return cipher, nil
+	return key, nil
 }
 
 func (uc *TallyUseCase) validateDeps() error {
@@ -514,20 +501,4 @@ func cloneTallyMap(in map[string]int) map[string]int {
 		out[k] = v
 	}
 	return out
-}
-
-func proposalAllowsOption(proposal *entity.Proposal, candidate string) bool {
-	if proposal == nil {
-		return false
-	}
-	normalized := strings.TrimSpace(candidate)
-	if normalized == "" {
-		return false
-	}
-	for _, option := range proposal.Options {
-		if strings.TrimSpace(option) == normalized {
-			return true
-		}
-	}
-	return false
 }

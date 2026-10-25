@@ -21,6 +21,7 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 	voteRepository := NewVoteRepository(db)
 	credentialRepository := NewCredentialRepository(db)
 	credentialClaimRepository := NewCredentialClaimRepository(db)
+	eligibilityUseRepository := NewEligibilityUseRepository(db)
 	proposalRepository := NewProposalRepository(db)
 	participationRepository := NewParticipationRepository(db)
 	decryptionSessionRepository := NewDecryptionSessionRepository(db)
@@ -31,6 +32,11 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		return nil, err
 	}
 	encrypter := NewEncrypter()
+	credentialIssuer := NewCredentialIssuer(cfg)
+	eligibilityService, err := NewEligibilityService(cfg)
+	if err != nil {
+		return nil, err
+	}
 	votingUseCase := NewVotingUseCase(
 		voteRepository,
 		participationRepository,
@@ -39,10 +45,18 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		decryptionSessionRepository,
 		proofVerifier,
 		encrypter,
+		credentialIssuer,
 		logger,
 	)
-	credentialIssuer := NewCredentialIssuer(cfg)
-	registerUseCase := NewRegisterUseCase(credentialRepository, proposalRepository, credentialIssuer, credentialClaimRepository, logger)
+	registerUseCase := NewRegisterUseCase(
+		credentialRepository,
+		proposalRepository,
+		credentialIssuer,
+		credentialClaimRepository,
+		eligibilityUseRepository,
+		eligibilityService,
+		logger,
+	)
 	proposalUseCase := NewProposalUseCase(proposalRepository, logger)
 	participationUseCase := NewParticipationUseCase(participationRepository, credentialRepository, logger)
 	thresholdCrypto := NewThresholdCrypto()
