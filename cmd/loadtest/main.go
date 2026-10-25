@@ -549,7 +549,6 @@ func submitVote(
 		nullifier = generated
 	}
 	payload := map[string]any{
-		"proposal_id":          proposalID,
 		"encrypted_vote":       encodedCiphertext,
 		"proof":                devProofBase64,
 		"nullifier":            nullifier,
@@ -561,8 +560,10 @@ func submitVote(
 	if err != nil {
 		return outcome{status: 0, code: "marshal: " + err.Error()}
 	}
+	// 提案 ID 走路径，不走请求体（见 docs/api-contract-v1.md）。
+	votePath := "/api/v1/proposals/" + url.PathEscape(proposalID) + "/votes"
 	request, err := http.NewRequest(
-		http.MethodPost, strings.TrimRight(opts.baseURL, "/")+"/api/v1/votes", bytes.NewReader(body),
+		http.MethodPost, strings.TrimRight(opts.baseURL, "/")+votePath, bytes.NewReader(body),
 	)
 	if err != nil {
 		return outcome{status: 0, code: "request: " + err.Error()}

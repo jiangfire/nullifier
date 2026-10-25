@@ -1514,7 +1514,6 @@ export function useVotePortal() {
     }
 
     const body: JsonMap = {
-      proposal_id: voteForm.proposalId.trim(),
       encrypted_vote: voteForm.encryptedVote.trim(),
       proof: voteForm.proof.trim(),
       nullifier: voteForm.nullifier.trim(),
@@ -1524,11 +1523,12 @@ export function useVotePortal() {
     };
     // 注意：不要发送 selected_option。服务端不消费这个字段，而明文选项上服务端
     // 会抵消「选票是加密的」这个属性。选票是否对得上当前选项由本地绑定校验。
+    // 也不发送 proposal_id：它只从路径来（见 docs/api-contract-v1.md）。
 
     voteLoading.value = true;
     const result = await apiCall({
       baseUrl: apiBaseUrl.value,
-      path: '/api/v1/votes',
+      path: `/api/v1/proposals/${encodeURIComponent(voteForm.proposalId.trim())}/votes`,
       method: 'POST',
       body,
     });

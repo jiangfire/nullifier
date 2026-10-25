@@ -866,7 +866,6 @@ func (c *cli) cmdVoteSubmit(args []string) error {
 		return errors.New("凭证和选票里都没有 proposal_id")
 	}
 	body := map[string]any{
-		"proposal_id":          proposalID,
 		"encrypted_vote":       ballot.EncryptedVote,
 		"proof":                ballot.Proof,
 		"nullifier":            ballot.Nullifier,
@@ -876,8 +875,13 @@ func (c *cli) cmdVoteSubmit(args []string) error {
 	}
 	// 不发送 selected_option：服务端不消费这个字段，而明文选项上服务端
 	// 会抵消「选票是加密的」这个属性。
+	// 也不发送 proposal_id：它只从路径来（见 docs/api-contract-v1.md）。
 	var out map[string]any
-	if err := c.postJSON("/api/v1/votes", body, false, &out); err != nil {
+	path := fmt.Sprintf(
+		"/api/v1/proposals/%s/votes",
+		url.PathEscape(proposalID),
+	)
+	if err := c.postJSON(path, body, false, &out); err != nil {
 		return err
 	}
 	printJSON(out)

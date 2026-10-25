@@ -83,7 +83,7 @@ func (f *fakeAPI) handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/proposals/{id}/election-key", f.electionKey)
 	mux.HandleFunc("GET /api/v1/proposals/{id}/credentials", f.listCredentials)
 	mux.HandleFunc("GET /api/v1/proposals", f.listProposals)
-	mux.HandleFunc("POST /api/v1/votes", f.submitVote)
+	mux.HandleFunc("POST /api/v1/proposals/{id}/votes", f.submitVote)
 	return mux
 }
 

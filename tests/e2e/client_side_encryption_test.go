@@ -138,8 +138,7 @@ func TestAPI_ClientSideEncryption_E2E(t *testing.T) {
 			"ends_at":   time.Now().UTC().Add(30 * time.Minute),
 		}).Error)
 
-	resp = postJSON(t, ts.URL+"/api/v1/votes", map[string]any{
-		"proposal_id":          proposalResp.ID,
+	resp = postJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/votes", map[string]any{
 		"encrypted_vote":       base64.StdEncoding.EncodeToString(ciphertext),
 		"proof":                base64.StdEncoding.EncodeToString([]byte("dev-proof")),
 		"nullifier":            strings.Repeat("a1", 32),

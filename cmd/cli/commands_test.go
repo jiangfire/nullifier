@@ -267,12 +267,15 @@ func TestRun_CommandsThatWriteFiles(t *testing.T) {
 
 		req := <-requests
 		require.Equal(t, http.MethodPost, req.Method)
-		require.Equal(t, "/api/v1/votes", req.Path)
+		// 提案 ID 走路径，不走请求体（见 docs/api-contract-v1.md）。
+		require.Equal(t, "/api/v1/proposals/p1/votes", req.Path)
 
 		var body map[string]any
 		require.NoError(t, json.Unmarshal([]byte(req.Body), &body))
 		require.Equal(t, "cipher", body["encrypted_vote"])
 		require.Equal(t, "u-1", body["user_id"])
+		require.NotContains(t, body, "proposal_id",
+			"提案 ID 只从路径来 —— 请求体里再放一份，两个来源可能打架")
 	})
 
 	t.Run("decrypt-setup 落盘", func(t *testing.T) {

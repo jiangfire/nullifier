@@ -161,7 +161,6 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 
 	proofBytes := mustBuildProofBytes(t, 3, 35)
 	voteReq := map[string]any{
-		"proposal_id":          proposalResp.ID,
 		"encrypted_vote":       base64.StdEncoding.EncodeToString(ciphertext),
 		"proof":                base64.StdEncoding.EncodeToString(proofBytes),
 		"nullifier":            strings.Repeat("a1", 32),
@@ -184,19 +183,18 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	resp.Body.Close()
 	require.False(t, statusBefore.HasVoted)
 
-	resp = postJSON(t, ts.URL+"/api/v1/votes", voteReq)
+	resp = postJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/votes", voteReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	resp.Body.Close()
 
 	// 5) 同一用户再次投票（不同 nullifier）必须冲突
 	voteReq["nullifier"] = strings.Repeat("b2", 32)
-	resp = postJSON(t, ts.URL+"/api/v1/votes", voteReq)
+	resp = postJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/votes", voteReq)
 	require.Equal(t, http.StatusConflict, resp.StatusCode)
 	resp.Body.Close()
 
 	// 5.1) 冒充他人凭证必须被拒绝
 	forgedVoteReq := map[string]any{
-		"proposal_id":          proposalResp.ID,
 		"encrypted_vote":       base64.StdEncoding.EncodeToString(ciphertext),
 		"proof":                base64.StdEncoding.EncodeToString(proofBytes),
 		"nullifier":            strings.Repeat("c3", 32),
@@ -204,7 +202,7 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 		"user_pub_key":         credentialResp.UserPubKey,
 		"credential_signature": credentialResp.Signature,
 	}
-	resp = postJSON(t, ts.URL+"/api/v1/votes", forgedVoteReq)
+	resp = postJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/votes", forgedVoteReq)
 	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	resp.Body.Close()
 
@@ -409,7 +407,6 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 			<-start
 
 			reqBody := map[string]any{
-				"proposal_id":          proposalResp.ID,
 				"encrypted_vote":       base64.StdEncoding.EncodeToString(ciphertext),
 				"proof":                base64.StdEncoding.EncodeToString(proofBytes),
 				"nullifier":            n,
@@ -423,7 +420,7 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 				return
 			}
 
-			resp, err := http.Post(ts.URL+"/api/v1/votes", "application/json", bytes.NewReader(raw))
+			resp, err := http.Post(ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/votes", "application/json", bytes.NewReader(raw))
 			if err != nil {
 				results <- submitResult{err: err}
 				return

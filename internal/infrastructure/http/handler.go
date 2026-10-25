@@ -59,7 +59,10 @@ func NewHandlerWithTally(
 }
 
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
-	r.POST("/votes", h.SubmitVote)
+	// 投票提交与其他提案级端点同形：提案 ID 走路径，不走请求体 ——
+	// 同一个提案 ID 只有**一个**来源，客户端不可能把两个提案搞混。
+	// 这条路径在 v0.3.0 被冻结（见 docs/api-contract-v1.md）。
+	r.POST("/proposals/:proposal_id/votes", h.SubmitVote)
 	r.GET("/proposals", h.ListProposals)
 	r.GET("/proposals/open", h.ListOpenProposals)
 	r.POST("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
@@ -80,8 +83,14 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/proposals/:proposal_id/audit-anchors", h.ListAuditAnchors)
 }
 
+// submitVotePayload 是投票提交的请求体。
+//
+// ⚠️ 这里**没有** `proposal_id`：它只从路径来（`/proposals/:proposal_id/votes`）。
+// 一个提案 ID 只有**一个**来源 —— 请求体里再放一份，两份不一致时
+// 服务端只能猜，而猜错就是「把票投到别的提案去」。
+//
+// 字段名在 v0.3.0 被冻结（见 docs/api-contract-v1.md）。
 type submitVotePayload struct {
-	ProposalID          string `json:"proposal_id" validate:"required"`
 	EncryptedVote       string `json:"encrypted_vote" validate:"required,base64"`
 	Proof               string `json:"proof" validate:"required,base64"`
 	Nullifier           string `json:"nullifier" validate:"required"`
@@ -93,6 +102,12 @@ type submitVotePayload struct {
 func (h *Handler) SubmitVote(c *gin.Context) {
 	if h.votingUC == nil {
 		c.Error(fmt.Errorf("voting usecase is not configured"))
+		return
+	}
+
+	proposalID := c.Param("proposal_id")
+	if proposalID == "" {
+		c.Error(fmt.Errorf("%w: proposal_id is required", usecase.ErrInvalidRequest))
 		return
 	}
 
@@ -127,7 +142,7 @@ func (h *Handler) SubmitVote(c *gin.Context) {
 		return
 	}
 	req := &usecase.SubmitVoteRequest{
-		ProposalID:          payload.ProposalID,
+		ProposalID:          proposalID,
 		EncryptedVote:       encryptedVote,
 		Proof:               &entity.Proof{Data: proofBytes},
 		Nullifier:           payload.Nullifier,
