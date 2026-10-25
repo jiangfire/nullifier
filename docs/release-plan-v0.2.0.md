@@ -117,14 +117,15 @@ git push origin feat/v0.2.0-m2-proof-chain v0.2.0
 | 后端测试 | `go test -count=1 ./...` 全过 | ✅ |
 | 覆盖率门槛 | 逐包分档，合计 **80.80%**（门槛 77%） | ✅ |
 | 静态检查 | `go vet` 干净、`gofmt -l` 无输出 | ✅ |
-| 前端 | eslint 0 / `tsc --noEmit` 0 / vitest **19 文件 154 用例** | ✅ |
+| 前端 | eslint 0 / `tsc --noEmit` 0 / vitest **19 文件 156 用例** | ✅ |
 | 架构不变量 | `tests/architecture/` —— 服务端不得拿到明文选项（**不设豁免**） | ✅ |
 | 能力 A 底线 | 同上 + `ballot-draft` 端点任何模式都 404 | ✅ |
 | 能力 B/C | 篡改公开输入 / 跨提案复用 → 验签失败（`tests/e2e/`） | ✅ |
 | 能力 E/F | 伪造凭证签名 → 401；盲签名交叉攻击失败 | ✅ |
 | 能力 G | `tests/e2e/eligibility_test.go` 验收 ①–⑤ + `tests/e2e/wasm_eligibility_test.go`（node 驱动真 WASM） | ✅ |
 | **浏览器路径** | **真浏览器（Chromium / Electron）里两条路径都走通**（2026-10-25）：选票链路与资格链路（导入资格文件 → 匿名领取 201 → **重复领取 409** → 本地生成选票 → 提交 201 → 计票还原 `{"tally":{"beta":1},"total_votes":1}`）。整套手工流程已固化成 `scripts/browser-acceptance.sh`（`setup` / `verify` / `stop`） | ✅ |
-| **PG 集成测试** | `tests/integration/eligibility_postgres_test.go` 等 2 个新用例（一人一票的复合唯一索引在 PG 上的行为） | ⚠️ **本机无 Docker，未实跑** —— CI 的 go job 跑在 ubuntu-latest（自带 Docker），**缺 Docker 时测试失败而不是跳过** |
+| **PG 集成测试** | `tests/integration/eligibility_postgres_test.go` 等 2 个新用例（一人一票的复合唯一索引在 PG 上的行为） | ✅ **已在本机真 PostgreSQL 17.7 上实跑通过**（2026-10-25：便携版 PG 起临时集群 + 集成测试的外部库路径，`go test ./tests/integration/ -run Postgres` 全过）；⏳ **testcontainers 那条路径仍要 CI 实跑** —— CI 的 go job 跑在 ubuntu-latest（自带 Docker），**缺 Docker 时测试失败而不是跳过** |
+| **浏览器路径（PG 形态）** | 同上，但服务端连的是**生产库形态**（PG + 资格校验强制）：`scripts/browser-acceptance.sh` 的 `DB_DRIVER=postgres` | ✅ **已跑通**（2026-10-25）：导入资格文件 → 匿名领取 201 → 重复领取 409 → 本地生成选票 → 提交 201 → 计票还原 `{"tally":{"beta":1},"total_votes":1}`（此前所有浏览器证据都跑在 SQLite 上） |
 | **门户 UI 自动化** | 无 | ⚠️ 仓库**没有** Playwright，门户交互只能人工点（步骤见部署清单 §8.1 / `scripts/browser-acceptance.sh`） |
 | 容量 | `cmd/loadtest`（200 票 / 并发 20 → 257 req/s，同 nullifier 并发 8 次恰好放行 1 张） | ⚠️ **不是容量规划** —— SQLite 单写者；容量规划按路线图属 v0.3.0 |
 
@@ -175,7 +176,7 @@ git push origin feat/v0.2.0-m2-proof-chain v0.2.0
 | 1 | **是否推送分支 + 打 tag 发 v0.2.0** | 用户 | ⬜ 未决 |
 | 2 | **是否引入 Playwright 做门户 UI 自动化**（体量大、影响 CI；离线装不了） | 用户 | ⬜ 未决 |
 | 3 | **真实名单的内容与成员标识形式**（工号 / 选民编号 / 会员号……） | 运营方 | ⬜ 未提供 |
-| 4 | **PG 集成测试的真 PG 实跑** | CI | ⬜ 待 CI |
+| 4 | **PG 集成测试的 testcontainers 路径实跑** | CI | ⬜ 待 CI（**外部库路径已在本机真 PG 17.7 实跑通过**，断言与 CI 同一套） |
 | 5 | 决策门 G6（路线图 §5） | 用户 | ⬜ 未拍板 |
 | 6 | 生产部署清单逐项核对（真实环境） | 运营方 | ⬜ 未执行 |
 
@@ -197,6 +198,10 @@ git push origin feat/v0.2.0-m2-proof-chain v0.2.0
 
 - ✅ 代码侧全部完成并通过门禁（§4）。
 - ✅ 浏览器路径在真浏览器里验过两遍（2026-10-25：人工一遍 + 脚本一遍）。
+- ✅ **PG 形态也验过一遍**（2026-10-25）：便携版 PostgreSQL 17.7 起临时集群 →
+  集成测试外部库路径全过 → `scripts/browser-acceptance.sh` 的 `DB_DRIVER=postgres`
+  跑完整条浏览器流程，计票还原 `{"tally":{"beta":1},"total_votes":1}`。
+  **生产用的就是 PostgreSQL —— 这是本版最贴近生产形态的一条证据。**
 - ✅ **§2 的第 1、2 步已在分支上完成**：`VERSION` → `0.2.0`，`CHANGELOG.md` 的
   `[未发布]` → `## [0.2.0] — 2026-10-25`（并写明密文 v2 → v3 不兼容）。
   剩下的是第 3 步（打注解 tag）与第 4 步（推分支 + 推 tag）—— **等拍板**。

@@ -345,9 +345,18 @@ go run ./cmd/cli credential-claim -proposal <提案> \
 > 领取 201 → 重复领取 409 → 本地生成选票 → 提交 201 → 计票还原出所选选项）。仓库里**没有**
 > 浏览器自动化，所以**每次上线仍要跑一遍**上面这张表。
 >
+> 💡 **要验生产库形态就把验收跑在 PostgreSQL 上**：`scripts/browser-acceptance.sh` 支持
+> `DB_DRIVER=postgres`（配套 `PG_HOST` / `PG_PORT` / `PG_USER` / `PG_PASSWORD` / `PG_DATABASE`），
+> 服务端会连真 PG 而不是 SQLite —— **生产用的就是 PostgreSQL**，SQLite 上验过不算数。
+> 2026-10-25 已在 PostgreSQL 17.7 上跑通一遍（计票还原 `{"tally":{"beta":1},"total_votes":1}`）。
+> PG 的库要**先存在**（脚本不建库）。
+>
 > ⚠️ 验收时注意：**「匿名领取」要等十几秒**（浏览器要下载并初始化 prover），中途别以为卡住；
 > 若页面上出现 `Failed to execute 'postMessage' on 'Worker'`，说明门户这一版有 bug
 > （资格包被当成响应式对象发给 Worker 了），**不要上线**。
+>
+> ⚠️ 「在浏览器本地生成选票」之前**一定要先把选项选对**：门户默认选中的是**第一个选项**，
+> 默认点「生成」会投出第一个选项，不是你以为的那个。
 
 > ⚠️ 「重复领取」必须在**同一个提案**下验：去重键是 `(proposal_id, qualification_id)`。
 > 换到**另一个提案**时，同一份成员包要**重新出一份证明**（证明里绑了提案 ID），

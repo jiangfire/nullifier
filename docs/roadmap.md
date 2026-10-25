@@ -367,7 +367,9 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 - **浏览器端没有自动化**：仓库里没有 Playwright。门户的资格领取路径**已在真浏览器里人工
   验过一遍**（2026-10-25，见上面的验收表），但**每次上线仍要人工点一遍**
   （步骤见 `docs/deployment-checklist.md` §8.1）—— 自动化证据只到 node 驱动的 WASM 模块。
-- **PG 集成测试本机无 Docker**（与 T22 无关，但整体验收仍缺）。
+- **PG 集成测试本机无 Docker**（与 T22 无关，但整体验收仍缺）—— ✅ 2026-10-25 已用本机的
+  便携版 PostgreSQL 17.7 起临时集群实跑通过（外部库路径，见 §4.3 盲区 1）；**testcontainers
+  那条路径仍要 CI 实跑**。
 - **`cmd/loadtest` 不支持资格证明**：它只在**未开启资格校验**的服务上可用。
 - **资格包丢失无法找回**（成员包是秘密材料，发放靠安全渠道）。
 - **真实名单的内容与成员标识形式仍需运营方提供**。
@@ -405,10 +407,28 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 以下三项在本机（无 Docker）从未实跑过，CI 会实跑其中第一项：
 
 1. **PostgreSQL testcontainers 集成测试** —— 本机走的是跳过分支
+   - ✅ **已在本机真 PostgreSQL 上实跑**（2026-10-25）：本机有一份便携版 PostgreSQL
+     （`C:\Users\yimo\Tools\pgsql`，PG 17.7），用它的二进制 `initdb` 起了一个**临时独立集群**
+     （trust 认证、独立端口、独立数据目录，不碰机器上原有的实例），然后走集成测试的
+     **外部库路径**（`ANONVOTE_TEST_PG_HOST`）跑：`go test ./tests/integration/ -run Postgres`
+     **全过** —— 含 `TestEligibilityUseRepository_Postgres`（复合唯一索引的行为证明）、
+     `TestEligibilityUseRepository_Postgres_ConcurrentSameQualification`（并发记同一份资格
+     恰好一个成功）、`TestVoteRepository_Postgres_ConcurrentSameUser`。
+     ⚠️ **Docker 仍然没有**，所以「testcontainers 路径」仍要 CI 实跑 —— 但两者是**同一份测试
+     代码**，断言一致（`setupPostgresDB` 按环境变量二选一）。
+   - ✅ **连整条浏览器验收都在 PG 上跑通了一遍**（2026-10-25）：`scripts/browser-acceptance.sh`
+     新增 `DB_DRIVER=postgres` 后，服务端连的是**生产库形态**（PG + 真 verifying key +
+     资格校验强制），真浏览器里导入资格文件 → 匿名领取（claim 201）→ 重复领取
+     409「这份资格已经领过票了 —— 一人一票」→ 浏览器本地生成选票 → 提交 201 →
+     计票还原出所选选项（`{"tally":{"beta":1},"total_votes":1}`，并带 anchor_hash 与
+     merkle_root）。**这是「生产用的就是 PostgreSQL」这条最硬的证据** ——
+     此前所有浏览器证据都跑在 SQLite 上。
+     ⚠️ 复现前提：机器上要有 PostgreSQL 二进制（本次用的是 `C:\Users\yimo\Tools\pgsql`
+     的便携版 17.7，`initdb` 起临时集群 + 外部库路径）。
    - 🟡 **已补可复现脚本**（本轮落地）：仓库根 `docker-compose.yml` + `make pg-test`；
      集成测试也支持外部库模式（`ANONVOTE_TEST_PG_HOST`），每个测试开独立 schema。
-     ⚠️ **本机无 Docker，仍未实跑** —— CI 会实跑（CI 的 go job 跑在 ubuntu-latest，
-     自带 Docker；缺 Docker 时集成测试**失败而不是跳过**，免得「跳过」被误读成「通过」）。
+     CI 仍会实跑（CI 的 go job 跑在 ubuntu-latest，自带 Docker；缺 Docker 时集成测试
+     **失败而不是跳过**，免得「跳过」被误读成「通过」）。
    - ✅ **「一人一票」的强制点也纳入 PG 覆盖**（`tests/integration/eligibility_postgres_test.go`）：
      去重靠的是 AutoMigrate 建出来的**复合唯一索引** `(proposal_id, qualification_id)`，
      而 SQLite 与 PG 的 DDL 行为不同 —— 索引没建出来或建成单列，生产上就会变成
@@ -418,7 +438,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
      ⚠️ 本机无 Docker，这两条要等 CI 实跑才算证据。
 2. **门户 7 个 `.vue` 面板的浏览器实际渲染** —— 仓库里 `.vue` 曾零测试
    - 🟡 **已用服务端渲染补上一半**（本轮落地）：`web/src/components/panels/panels.test.ts`
-     （15 个用例）把面板渲染成 HTML 字符串，模板 / setup / computed 都真跑一遍。
+     （16 个用例）把面板渲染成 HTML 字符串，模板 / setup / computed 都真跑一遍。
      ⚠️ **不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载。
    - ✅ **浏览器端的关键路径已在真实浏览器里跑通**（2026-10-25，Chromium / Electron）：
      门户的静态资源三件套（`wasm_exec.js` / `ballot-prover.wasm` / `proving.key`）从浏览器
@@ -473,9 +493,9 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 3 | 存在「服务端能拿到明文选项」的代码路径（grep 不到才过） | ✅ **已过** —— 这条检查从人工 grep 变成持续门禁 `tests/architecture/plaintext_option_test.go`，而且**不设豁免机制**：HTTP 层请求体不得有明文选项 json tag、usecase 层不得有接受明文选项的入口、服务端代加密那条链的符号不许复活、`ballot-draft` 端点不许复活（POST 它必须 404）。**残留为零** |
 | 4 | 存在「proof 可以跨提案复用」的路径 | ✅ **已过** —— 公开输入由服务端自拼，跨提案 / 跨 nullifier 复用均验签失败 |
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
-| 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.4% |
+| 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.80% |
 | 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 19 个测试文件 / 156 个用例全过 |
-| 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未完全闭合（盲区 3 的「防重投」与「容量」两半已补；盲区 1 的 PG 集成测试已有 compose + `make pg-test` 可复现脚本，⚠️ 本机无 Docker 未实跑；盲区 2 已闭合「WASM 路径在真实浏览器里可用」这一半 —— **选票与资格两条浏览器路径都已在真浏览器里人工验过**（2026-10-25），**且整套手工流程已固化成 `scripts/browser-acceptance.sh`**（`setup` / `verify` / `stop`），⚠️ 但门户面板仍没有 UI 自动化回归） |
+| 8 | §4.3 三项盲区没有可复现输出 | 🟡 **已过两半，剩门户 UI 自动化**（盲区 3 的「防重投」与「容量」两半已补；盲区 1 ✅ **PG 集成测试已在本机真 PostgreSQL 17.7 上实跑通过**（外部库路径，`go test ./tests/integration/ -run Postgres` 全过），**整条浏览器验收也在 PG 上跑通**（`DB_DRIVER=postgres`，计票还原出所选选项）—— 剩 testcontainers 那条路径要 CI 实跑；盲区 2 ✅ 已闭合「WASM 路径在真实浏览器里可用」这一半 —— **选票与资格两条浏览器路径都已在真浏览器里人工验过**（2026-10-25），**且整套手工流程已固化成 `scripts/browser-acceptance.sh`**（`setup` / `verify` / `stop`），⚠️ 但门户面板仍没有 UI 自动化回归） |
 | 9 | README / techspec / 门户三处的匿名性声明不一致 | ✅ **已过**（2026-10-25 复核）—— 三处与 §4.1 的能力表对齐。复核时**在门户里挖出一处对用户说错的陈述**：门户「术语参考」面板仍写着「**当前版本密文由服务端生成，生成时服务端能看到你选的选项**」「还没有真实的选票电路」—— 那是 v0.1.0 的口径，v0.2.0 的密文与证明都在浏览器本地生成。已改（`fix(web): tell the truth about where the ballot is encrypted`），并加了一条守卫用例钉住它（`web/src/components/panels/panels.test.ts`）：文案里再出现「服务端能看到你选的选项」这类说法就红。**服务端那条底线由 `tests/architecture/` 守，门户文案这一半现在也守了** |
 
 **Go**
@@ -707,7 +727,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 问题 | review §5 列的三项**从未被验证**：① PostgreSQL testcontainers 集成测试；② 门户 7 个 `.vue` 面板的浏览器实际渲染；③ 并发投票下的防重投与性能容量。 |
 | 证据 | `docs/release-review-2026-10-20.md` §5 |
 | 改法 | ① Docker 环境跑通 `tests/integration`（CI 会实跑，本地补一份 compose）；② 引入 Playwright 覆盖关键路径（领凭证 → 投票 → 查询状态 → 计票）；③ 用 `hey`/`k6` 写并发投票脚本，验证防重投（唯一索引兜底）与容量 |
-| 落地核对 | ① ⏳ CI 已实跑 PG 集成测试，本机无 Docker 走跳过分支；✅ **compose 已补**（仓库根 `docker-compose.yml` + `make pg-test`：起库 → 跑 `go test ./tests/integration/ -run Postgres` → 关库），且集成测试新增**外部库路径**（设 `ANONVOTE_TEST_PG_HOST` 即连已有 PostgreSQL，每个测试开一个独立 schema 并在跑完时 `DROP SCHEMA ... CASCADE`）—— 两条路径共用同一份测试代码，本地与 CI 跑的是同一套断言；② 🟡 **Playwright 离线装不了，但盲区已用另一种方式部分补上**：门户 7 个 `.vue` 面板此前**既无类型检查也无测试**（`tsc` 不认 `.vue`），现在有**服务端渲染测试**（`web/src/components/panels/panels.test.ts`，15 个用例）—— 模板、setup、computed 都会真跑一遍，顺带覆盖了 T2 的 debug 门控（非 debug 模式下按钮不渲染）。⚠️ **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载，视觉与交互仍靠人工核对；✅ **但浏览器端的关键路径已在真实浏览器里跑通**（2026-10-25）：静态资源三件套真实加载 → WASM 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 凭证匿名领取三步全过 → 服务端真验签通过（201）→ 解密计票还原出所选选项。这次验收还挖出并修掉了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而非线路名，会让领取流程停在 claim 之后）—— 这类问题单测测不出来，只有真浏览器对真服务端才暴露；③ 🟡 **防重投这一半已落地**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求 + 同一 nullifier + 不同凭证，断言恰好 1 张票入库、其余 409 `DOUBLE_VOTING`（本机可复现，`go test ./tests/e2e/ -run TestAPI_ConcurrentSameNullifier_E2E`）；**容量这一半也已落地**：新工具 `cmd/loadtest`（纯 HTTP API，不碰数据库）输出吞吐 / 延迟分位 / 状态分布 / 防重投结论，`-json` 可机器读，**防重投没守住时退出码非 0**；本机实测 200 票 / 并发 20 → 257 req/s、200 张全 201、同 nullifier 并发 8 次恰好放行 1 张（⚠️ SQLite 单写者 + 只能在 debug 模式跑，**不是容量规划**） |
+| 落地核对 | ① ✅ **PG 集成测试已在本机真 PostgreSQL 上实跑**（2026-10-25：用便携版 PostgreSQL 17.7 的二进制 `initdb` 起临时独立集群，走集成测试的**外部库路径** `ANONVOTE_TEST_PG_HOST`，`go test ./tests/integration/ -run Postgres` 全过 —— 含「一人一票」复合唯一索引的行为证明与并发用例）；✅ **整条浏览器验收也在 PG 上跑通**（`scripts/browser-acceptance.sh` 新增 `DB_DRIVER=postgres`，服务端连真 PG，计票还原出所选选项）；⏳ **testcontainers 那条路径仍要 CI 实跑**（CI 的 go job 跑在 ubuntu-latest，自带 Docker；缺 Docker 时集成测试**失败而不是跳过**，免得「跳过」被误读成「通过」）；✅ **compose 已补**（仓库根 `docker-compose.yml` + `make pg-test`：起库 → 跑 `go test ./tests/integration/ -run Postgres` → 关库），且集成测试新增**外部库路径**（设 `ANONVOTE_TEST_PG_HOST` 即连已有 PostgreSQL，每个测试开一个独立 schema 并在跑完时 `DROP SCHEMA ... CASCADE`）—— 两条路径共用同一份测试代码，本地与 CI 跑的是同一套断言；② 🟡 **Playwright 离线装不了，但盲区已用另一种方式部分补上**：门户 7 个 `.vue` 面板此前**既无类型检查也无测试**（`tsc` 不认 `.vue`），现在有**服务端渲染测试**（`web/src/components/panels/panels.test.ts`，16 个用例）—— 模板、setup、computed 都会真跑一遍，顺带覆盖了 T2 的 debug 门控（非 debug 模式下按钮不渲染）。⚠️ **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载，视觉与交互仍靠人工核对；✅ **但浏览器端的关键路径已在真实浏览器里跑通**（2026-10-25）：静态资源三件套真实加载 → WASM 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 凭证匿名领取三步全过 → 服务端真验签通过（201）→ 解密计票还原出所选选项。这次验收还挖出并修掉了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而非线路名，会让领取流程停在 claim 之后）—— 这类问题单测测不出来，只有真浏览器对真服务端才暴露；③ 🟡 **防重投这一半已落地**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求 + 同一 nullifier + 不同凭证，断言恰好 1 张票入库、其余 409 `DOUBLE_VOTING`（本机可复现，`go test ./tests/e2e/ -run TestAPI_ConcurrentSameNullifier_E2E`）；**容量这一半也已落地**：新工具 `cmd/loadtest`（纯 HTTP API，不碰数据库）输出吞吐 / 延迟分位 / 状态分布 / 防重投结论，`-json` 可机器读，**防重投没守住时退出码非 0**；本机实测 200 票 / 并发 20 → 257 req/s、200 张全 201、同 nullifier 并发 8 次恰好放行 1 张（⚠️ SQLite 单写者 + 只能在 debug 模式跑，**不是容量规划**） |
 | 验收 | 三项都有**可复现的脚本 + 输出**，并把结果贴进 PR |
 | 预估 | 2–3 天 |
 | 依赖 | T14（浏览器端投票链路才完整） |

@@ -27,6 +27,14 @@
 #   MEMBERS="alice bob carol"   名单成员（每人一份资格包）
 #   PROPOSAL_TITLE=...          提案标题（用 ASCII：Git Bash 会把中文参数转成乱码）
 #
+#   DB_DRIVER=sqlite            数据库驱动：sqlite（默认）或 postgres
+#   PG_HOST=127.0.0.1           postgres 主机（DB_DRIVER=postgres 时用）
+#   PG_PORT=5432                postgres 端口
+#   PG_USER=test                postgres 用户
+#   PG_PASSWORD=test            postgres 密码
+#   PG_DATABASE=anonvote        postgres 库名（**必须已经存在**，脚本不建库）
+#   PG_SSLMODE=disable          postgres sslmode
+#
 # 这个脚本只在本地开发机上跑：它会生成密钥、名单和数据库，全部落在 WORK_DIR 里。
 
 set -euo pipefail
@@ -47,6 +55,16 @@ MEMBERS="${MEMBERS:-alice bob carol}"
 # 提案标题用 ASCII：Git Bash 会把命令行参数按本地代码页转码，中文标题会变成乱码
 # （msys 的 argv 转换）—— 那是本机 shell 的问题，不是服务端的。
 PROPOSAL_TITLE="${PROPOSAL_TITLE:-browser acceptance}"
+
+# 数据库：默认 sqlite（省事）。DB_DRIVER=postgres 时跑的是**生产库形态** ——
+# 生产用的就是 PostgreSQL，整条投票流程在 PG 上跑通才算数。
+DB_DRIVER="${DB_DRIVER:-sqlite}"
+PG_HOST="${PG_HOST:-127.0.0.1}"
+PG_PORT="${PG_PORT:-5432}"
+PG_USER="${PG_USER:-test}"
+PG_PASSWORD="${PG_PASSWORD:-test}"
+PG_DATABASE="${PG_DATABASE:-anonvote}"
+PG_SSLMODE="${PG_SSLMODE:-disable}"
 
 # 门户一律用 127.0.0.1：`localhost` 在很多机器上先命中 IPv6，会打到别的服务上。
 API_BASE="http://127.0.0.1:${API_PORT}"
@@ -187,6 +205,29 @@ cmd_setup() {
   info "名单根: $root_hex"
 
   log "4/8 写验收用配置并启动服务端"
+  # db 段：sqlite 走本地文件；postgres 走**生产库形态**（生产用的就是 PostgreSQL）。
+  # PG 的库必须**已经存在** —— 脚本不建库，避免顺手改别人的库。
+  local db_block
+  if [ "$DB_DRIVER" = "postgres" ]; then
+    # 先探端口：连不上就早失败，别等服务端起来再报一堆驱动错误。
+    if ! (exec 3<>"/dev/tcp/${PG_HOST}/${PG_PORT}") 2>/dev/null; then
+      die "连不上 PostgreSQL ${PG_HOST}:${PG_PORT} —— 先起库（或改用 DB_DRIVER=sqlite）"
+    fi
+    db_block="db:
+  driver: \"postgres\"
+  host: \"${PG_HOST}\"
+  port: ${PG_PORT}
+  name: \"${PG_DATABASE}\"
+  user: \"${PG_USER}\"
+  password: \"${PG_PASSWORD}\"
+  sslmode: \"${PG_SSLMODE}\""
+    info "数据库: PostgreSQL ${PG_HOST}:${PG_PORT}/${PG_DATABASE}"
+  else
+    db_block="db:
+  driver: \"sqlite\"
+  path: \"${WORK_DIR_NATIVE}/acceptance.db\""
+    info "数据库: SQLite ${WORK_DIR_NATIVE}/acceptance.db"
+  fi
   cat >"$WORK_DIR_ABS/config.yaml" <<EOF
 server:
   address: ":${API_PORT}"
@@ -200,9 +241,7 @@ crypto:
   issuer_key_path: "${WORK_DIR_NATIVE}/issuer_keys.json"
   eligibility_root: "${root_hex}"
   eligibility_vk_path: "${WORK_DIR_NATIVE}/keys/eligibility-verifying.key"
-db:
-  driver: "sqlite"
-  path: "${WORK_DIR_NATIVE}/acceptance.db"
+${db_block}
 EOF
   CONFIG_FILE="$WORK_DIR_NATIVE/config.yaml" \
     "$WORK_DIR_NATIVE/bin/server" >"$WORK_DIR_ABS/server.log" 2>&1 &
@@ -281,8 +320,8 @@ EOF
        ${WORK_DIR_NATIVE}/eligibility/eligibility-${first_member}.json
   4. 点「匿名领取」→ 等十几秒（浏览器要下载并初始化 prover）→ 徽标变成「已就绪」
   5. 再点一次「匿名领取」→ 应提示「这份资格已经领过票了 —— 一人一票」
-  6. 左侧「参与投票」→ 选 ${ACCEPT_OPTION} →「在浏览器本地生成选票」→ 等十几秒
-     →「提交匿名选票」
+  6. 左侧「参与投票」→ **点选 ${ACCEPT_OPTION}**（门户默认选中的是**第一个选项**，要点一下才切）
+     →「在浏览器本地生成选票」→ 等十几秒 →「提交匿名选票」
   7. 服务端日志出现 credential attested 与 vote submitted
 
   窗口 ${starts_at} → ${ends_at} 关闭。窗口关掉之后回来跑：

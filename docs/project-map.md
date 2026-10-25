@@ -654,6 +654,18 @@ go run ./cmd/loadtest -admin-token dev-admin-token -votes 200 -concurrency 20 -j
 make pg-test                       # 起库 → 跑集成测试 → 关库
 go test ./tests/integration/ -run TestExternalPostgresSettingsFromEnv -v   # 连接参数解析（不需要数据库）
 
+# 没有 Docker 但机器上有 PostgreSQL 二进制时：走**外部库路径**（同一份测试代码、同一套断言）
+# 前提是库里能建 schema（每个测试一个，跑完 DROP SCHEMA ... CASCADE）
+export ANONVOTE_TEST_PG_HOST=127.0.0.1
+export ANONVOTE_TEST_PG_PORT=5432 ANONVOTE_TEST_PG_USER=test
+export ANONVOTE_TEST_PG_PASSWORD=test ANONVOTE_TEST_PG_DATABASE=anonvote
+go test ./tests/integration/ -run Postgres -v
+
+# 浏览器验收跑在**生产库形态**（PG）上：脚本支持 DB_DRIVER=postgres
+DB_DRIVER=postgres PG_HOST=127.0.0.1 PG_PORT=5432 PG_USER=test \
+PG_PASSWORD=test PG_DATABASE=anonvote \
+  bash ./scripts/browser-acceptance.sh setup
+
 # 前端
 pnpm --dir web run test
 pnpm --dir web run test -- src/lib/nullifier.test.ts   # 只跑 nullifier 单测
