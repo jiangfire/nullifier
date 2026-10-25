@@ -462,6 +462,7 @@ publish        → 提案必须已关闭（isProposalClosed）
 26. **盲签名变体名要用线路名，不是 Go 的枚举名。** 服务端在 `issuer_key` 响应里回的 `variant` 是 CIRCL 的线路名 `RSABSSA-SHA384-PSS-Deterministic`；Go 侧的枚举标识符是 `SHA384PSSDeterministic`，两者**不是同一个字符串**。门户把后者写进 `supportedBlindSignatureVariant` 时，领取流程会停在第 ① 步之后（服务端只看到 claim，blind-sign 从未发出），界面上表现为「领取失败：签发方公钥不可用」—— 匿名领取与管理端签发两条路都断。**这类跨语言字符串不会自己暴露**：单测里两边都拿同一个常量自证，只有真浏览器 / 真服务端对跑才会露馅。防线：Go 侧 `TestKAT_BlindRsaVariantName` + TS 侧 `credential.test.ts` 的「变体名与服务端线路上的名字一致」。
 27. **`web/public/` 放的是构建产物，不是源码。** `wasm_exec.js`（来自 GOROOT）、`ballot-prover.wasm`（`make web-wasm` 生成）、`proving.key`（`make web-proving-key` 拷入）三个文件都不入库，eslint 也整目录忽略（否则 `make check` 会被 Go 官方胶水里的 lint 报错卡住）。构建顺序固定是 `web-wasm` → `web-proving-key` → `web-build`。
 28. **并发写要测试请用文件库 + WAL，不要用共享缓存的内存库。** SQLite 的共享缓存（`cache=shared`）用**表级锁**，`busy_timeout` 对它无效，并发写直接抛 `database table is locked` —— 表现为「两个并发请求双双失败」，而不是「恰好一个成功」。正确姿势：文件库 + `?_busy_timeout=10000&_journal_mode=WAL&_txlock=immediate`（见 `tests/e2e/concurrent_nullifier_test.go`），并记得 `t.Cleanup` 关掉句柄 —— 否则 Windows 上临时目录清不掉。
+29. **「服务端不得拿到明文选项」由守卫测试把守，改请求体时先看它。** `tests/architecture/plaintext_option_test.go` 用 go/ast 扫 `internal/`，四条断言：HTTP 层请求体结构体不得有明文选项 json tag（`option` / `selected_option` / `option_index` / `choice` / `selected_choice` / `vote_option` / `ballot_option`，刻意**不含**复数 `options` —— 那是提案的候选项列表）；usecase 层不得出现第二个接受明文选项（形参名 `option` / `candidate`）的入口；debug 链函数（`PrepareBallotDraft` / `EncryptVoteOption`）的调用点必须在允许文件里；**每一条豁免在 release 模式必须真的 404**（豁免表因此自证 —— 加豁免就得同时证明它在生产里是死的）。当前唯一豁免是 `handler.go` 的 `prepareBallotDraftPayload.Option`（debug 模式联调端点）。**要豁免就改表并写清理由**，别把表改空来骗自己。扫描**只覆盖 `internal/`**：`cmd/` 里的明文选项字段是客户端在说话，不是服务端在收。
 
 ---
 
@@ -510,6 +511,9 @@ pnpm --dir web run test -- src/lib/credential.test.ts
 go run ./cmd/keygen -dir ./keys
 go run ./cmd/keygen -dir ./keys -force
 go test ./cmd/keygen/ -v
+
+# 架构不变量守卫：服务端不得拿到明文选项（能力 A 的验收 ①）
+go test ./tests/architecture/ -v   # 请求体字段 / usecase 入口 / 调用点 / 豁免项 release 模式 404
 
 # 浏览器里的真实出票验收（真浏览器 + 真服务端，人工跑一次）：
 #   1) make web-wasm && make web-proving-key PK=<proving.key 路径>

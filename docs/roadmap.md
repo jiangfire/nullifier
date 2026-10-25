@@ -100,7 +100,7 @@
 
 | # | 能力 | v0.1.0 现状 | v0.2.0 完成定义（证据） | 里程碑 |
 |---|---|---|---|---|
-| A | 选票内容对服务端不可知 | ❌ 密文由服务端生成，服务端在签发凭证时就知道选了哪个 | 服务端代码里**不存在**接收明文选项的字段（grep 可验）；落库记录无法还原选项 | M2 · T16 |
+| A | 选票内容对服务端不可知 | ❌ 密文由服务端生成，服务端在签发凭证时就知道选了哪个 | 服务端代码里**不存在**接收明文选项的字段（已从人工 grep 升级为持续门禁 `tests/architecture/`）；落库记录无法还原选项 | M2 · T16 |
 | B | 选票可验证 | ❌ 无真实电路；`vk_path` 为空时任何非空 proof 都通过 | 真实 Groth16 电路 + 密钥生成流程；篡改任一公开输入 → 验证失败 | M2 · T13 |
 | C | proof 与票绑定 | ❌ proof 可跨提案复用（服务端只读 `public_witness`） | 公开输入含 `(proposal_id, nullifier, 计票公钥, 密文点, 选项数)`；A 提案的 proof 投 B 提案 → 400 | M2 · T15 |
 | D | 客户端能投票 | ❌ 门户在生产模式下 100% 无法完成投票（没有 prover） | 浏览器内生成 proof 与密文，e2e 跑通「选票 → 加密 → 证明 → 提交」 | M2 · T14 |
@@ -249,7 +249,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| A 选票内容对服务端不可知 | ✅ **已达成（release 模式）** | **选票密文在客户端生成**：CLI（`ballot-encrypt`）+ 浏览器（门户的「在浏览器本地生成选票」）。服务端只提供公开的计票公钥，接口 `GET /api/v1/proposals/:id/election-key`。落库记录里只有密文（e2e 用例断言）。**残留**：debug 模式的 `ballot-draft`（服务端代加密）在 release 模式是 404 —— 它是开发联调接口，不是生产能力 |
+| A 选票内容对服务端不可知 | ✅ **已达成（release 模式）** | **选票密文在客户端生成**：CLI（`ballot-encrypt`）+ 浏览器（门户的「在浏览器本地生成选票」）。服务端只提供公开的计票公钥，接口 `GET /api/v1/proposals/:id/election-key`。落库记录里只有密文（e2e 用例断言）。**残留**：debug 模式的 `ballot-draft`（服务端代加密）在 release 模式是 404 —— 它是开发联调接口，不是生产能力。**这条不变量现由持续门禁把守**：`tests/architecture/`（请求体字段 / usecase 入口 / 调用点 / 豁免项 release 模式 404 四条断言） |
 | B 选票可验证 | ✅ **已达成** | 真实 Groth16 电路 + `cmd/keygen` + 服务端真实验签；浏览器端 prover 已落地（`cmd/ballot-wasm` → WASM，门户 Worker 里跑），CLI 侧 `ballot-prove` 也已落地 |
 | C proof 与票绑定 | ✅ 已达成 | 公开输入由服务端按请求字段自拼，客户端无法自选；跨提案 / 跨 nullifier 复用均验签失败 |
 | D 客户端能投票 | ✅ **已达成（CLI 与门户两侧）** | CLI 用本地 proving key 出证明；门户在浏览器 Worker 里用 WASM prover 出证明并提交。两条路径都有端到端证据（`tests/e2e/client_prover_test.go` / `tests/e2e/wasm_prover_test.go`） |
@@ -335,7 +335,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 |---|---|---|
 | 1 | 能力 A–F 任一未完成 | ✅ **已过** —— A / B / D 已在 CLI 与门户两侧闭合（浏览器端 prover 走自建的 Go → js/wasm 路线）；C / E / F 已达成。**残留**：debug 模式的 `ballot-draft`（服务端代加密）是开发联调妥协，release 模式 404 |
 | 2 | 能力 G 的完成定义未达成 —— 领取凭证时不需要任何资格证明（T22），意味着服务端无法强制一人一票 | ❌ **未过** —— T22 未开工 |
-| 3 | 存在「服务端能拿到明文选项」的代码路径（grep 不到才过） | 🟡 **接近闭合** —— 客户端加密已可用（CLI + 门户），但 debug 模式的 `ballot-draft` 仍是那条路径（release 模式已 404）。**要 grep 干净需二选一**：删掉 `ballot-draft`，或接受它只在 debug 模式存在并在文档里写明 |
+| 3 | 存在「服务端能拿到明文选项」的代码路径（grep 不到才过） | 🟡 **接近闭合（口径已机器化）** —— 这条检查从人工 grep 变成持续门禁 `tests/architecture/plaintext_option_test.go`：HTTP 层请求体不得有明文选项 json tag、usecase 层不得出现第二个「接受明文选项」的入口、debug 链的调用点必须在允许文件里、**每一条豁免必须在 release 模式真的 404**（豁免表自证）。**残留**只有 debug 模式的 `ballot-draft` 一条（release 模式 404，已被守卫测试断言）。**待拍板**：删掉它，还是接受它只在 debug 模式存在 —— 两种决定都只落在改豁免表上（删 = 删豁免行 + 删端点；留 = 现状即合规） |
 | 4 | 存在「proof 可以跨提案复用」的路径 | ✅ **已过** —— 公开输入由服务端自拼，跨提案 / 跨 nullifier 复用均验签失败 |
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
 | 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.4% |
@@ -503,9 +503,9 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 问题 | **当前版本最大的匿名性缺口**：密文由服务端生成（`ballot-draft` 拿明文 `option` 去加密），服务端在生成凭据时就知道选了哪个。 |
 | 证据 | `internal/infrastructure/http/handler.go:432`（`EncryptVoteOption` —— 服务端拿明文选项加密）、`:405`（`Option string` 字段）、review C5 |
 | 改法 | ① 服务端只发**加密公钥 + 电路参数**，不再接受明文选项；② 浏览器端完成「选票 → 加密 → proof → 提交」全流程；③ 服务端接口改为接受 `{encrypted_vote, proof, nullifier, ...}`，**没有明文选项字段**；④ `ballot-draft` 端点随之删除（T1 已先把它关掉） |
-| **状态补充** | 加密栈已在本轮换到 **v3**（D2）：浏览器端要做的是 BN254 twisted Edwards 上的指数 ElGamal，加密的是**选项下标**。服务端计票侧已就绪（`BallotThresholdCrypto`），**T16 缺的是浏览器侧的加密实现**。另外：T1 已把 `ballot-draft` 在非 debug 模式关成 404，**服务端代加密这条路在 release 模式已经不可达** —— 但「服务端代码里不存在接收明文选项的字段」这条验收还没满足（`PrepareBallotDraft` 的请求体仍有 `option` 字段，debug 模式可达） |
-| 验收 | ① 服务端代码里**不存在**接收明文选项的字段（grep 验证）；② e2e：浏览器投票 → 服务端落库记录里没有可还原的选项 |
-| 落地核对 | ① ✅ **浏览器端选票加密**：`web/src/lib/ballot-cipher.ts` 实现 BN254 twisted Edwards 上的指数 ElGamal（加密选项下标），点编码与 Go 侧**逐字节一致**（互操作向量见 `internal/infrastructure/crypto/ballot/kat_interop_test.go` 与 `web/src/lib/ballot-cipher.test.ts`）；② ✅ **CLI 客户端加密**：`cmd/cli` 新增 `ballot-encrypt` 命令，客户端取公钥 → 本地加密 → 落盘选票文件（含 nullifier 秘密，只留本地）；③ ✅ **服务端公开计票公钥**：新接口 `GET /api/v1/proposals/:id/election-key`（未压缩形式，客户端不必实现点解压）；④ ✅ **e2e 证据**：`tests/e2e/client_side_encryption_test.go` —— 客户端本地加密 → 落库记录里只有密文 → 计票仍还原出客户端选的选项；⑤ ⚠️ **门户还没接上**（缺 prover，接了也投不出去），`ballot-draft` 这条服务端代加密路径在 debug 模式仍存在 —— **验收 ① 因此尚未完全达成** |
+| **状态补充** | 加密栈已在本轮换到 **v3**（D2）：浏览器端要做的是 BN254 twisted Edwards 上的指数 ElGamal，加密的是**选项下标**。服务端计票侧已就绪（`BallotThresholdCrypto`），**T16 缺的是浏览器侧的加密实现**。另外：T1 已把 `ballot-draft` 在非 debug 模式关成 404，**服务端代加密这条路在 release 模式已经不可达** —— 「服务端代码里不存在接收明文选项的字段」这条验收原先仍差着一处（`PrepareBallotDraft` 的请求体有 `option` 字段，debug 模式可达），现在它被**显式列为唯一一条豁免**，并由守卫测试证明「这条豁免在 release 模式是死的」 |
+| 验收 | ① 服务端代码里**不存在**接收明文选项的字段（原口径是人工 grep 验证，现为持续门禁 `tests/architecture/`；debug 模式的 `ballot-draft` 是**显式豁免**，守卫测试断言它在 release 模式必须 404）；② e2e：浏览器投票 → 服务端落库记录里没有可还原的选项 |
+| 落地核对 | ① ✅ **浏览器端选票加密**：`web/src/lib/ballot-cipher.ts` 实现 BN254 twisted Edwards 上的指数 ElGamal（加密选项下标），点编码与 Go 侧**逐字节一致**（互操作向量见 `internal/infrastructure/crypto/ballot/kat_interop_test.go` 与 `web/src/lib/ballot-cipher.test.ts`）；② ✅ **CLI 客户端加密**：`cmd/cli` 新增 `ballot-encrypt` 命令，客户端取公钥 → 本地加密 → 落盘选票文件（含 nullifier 秘密，只留本地）；③ ✅ **服务端公开计票公钥**：新接口 `GET /api/v1/proposals/:id/election-key`（未压缩形式，客户端不必实现点解压）；④ ✅ **e2e 证据**：`tests/e2e/client_side_encryption_test.go` —— 客户端本地加密 → 落库记录里只有密文 → 计票仍还原出客户端选的选项；⑤ ✅ **门户已接上**（2026-10-25 真实浏览器跑通）：浏览器端 prover 走自建的 Go → js/wasm 路线（`cmd/ballot-wasm`），`web/src/lib/wasm-prover.ts` 主线程编排 + `web/src/workers/ballot-prover.worker.ts` 在 Worker 里加载 WASM —— 实测 init 11.8–14.3 秒、prove 2.9 秒、proof 128 字节，浏览器生成的密文 / nullifier / proof 提交后服务端真验签通过；⑥ ✅ **验收 ① 从「人工 grep」升级为「持续门禁」**：新增 `tests/architecture/plaintext_option_test.go`（go/ast 扫描 `internal/`），四条断言 —— HTTP 层请求体结构体不得有明文选项 json tag、usecase 层不得出现第二个「接受明文选项」的入口、debug 链函数的调用点必须在允许文件里、**每一条豁免必须在 release 模式真的 404**（豁免表因此自证）；豁免表当前只有一条（debug 模式的 `ballot-draft`），无论最终删还是留，决定都只落在改这张表上 |
 | 预估 | 3–4 天 |
 | 依赖 | T13、T14、T15 |
 

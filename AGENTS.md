@@ -30,7 +30,7 @@
 - `internal/usecase` — 业务编排（Proposal / Register / Voting / Participation / Tally），`usecase/mocks` 为 gomock 生成物
 - `internal/infrastructure` — `http`（Gin 路由/中间件/错误映射）、`persistence`（GORM 仓储与自动迁移）、`crypto`（gnark / kyber / kryptology）
 - `internal/di` — Wire 依赖注入；`internal/config` — viper 配置加载与运行期校验
-- `tests/` — `integration`（testcontainers + PG）、`e2e`、`testutil`；**单元测试不在这里**，而是与实现同包的 `_test.go`（如 `internal/usecase/tally_test.go`）
+- `tests/` — `integration`（testcontainers + PG）、`e2e`、`architecture`（架构不变量守卫）、`testutil`；**单元测试不在这里**，而是与实现同包的 `_test.go`（如 `internal/usecase/tally_test.go`）
 - `web/` — Vue 3 + TypeScript + Rsbuild 单页门户（`src/App.vue` 只做外壳与引导编排，页面拆在 `src/components/panels/`，设计令牌在 `src/styles/`，后端错误文案映射在 `src/lib/error-messages.ts`）；**浏览器端 prover** 在 `src/lib/wasm-prover.ts`（主线程编排）+ `src/workers/ballot-prover.worker.ts`（Worker 里加载 WASM），静态资源目录 `web/public/`（wasm、胶水、proving key 都是构建产物，不入库）
 - `configs/` — `config.yaml`（开发）、`config.production.yaml`、`production.env.example`
 - `docs/` — `techspec.md`（当前实现口径，改接口/流程优先更新）、`project-map.md`（**分层项目地图 / 上下文索引**：子系统职责、关键文件、模式、陷阱、验证手册；改动前先读对应章节，不必通读全仓）、`deployment-checklist.md`（**生产部署清单**：上线前逐项核对配置、密钥、迁移、TLS、门户部署与投票运营流程）、`release-plan-v0.1.0.md`（**v0.1.0 发版计划与落地状态**，当前发版）、`roadmap.md`（**产品路线图**：v0.2.0 的能力清单与完成定义、里程碑 M1–M3、决策门 G1–G9、工程细项附录；T3–T12 与 T17 已落地）、`release-review-2026-10-20.md`（发版前整体 review：6 个 CRITICAL + 29 个 REQUIRED + 20 个 NIT 的完整证据与修复顺序）、`errata.md`（**勘误表**：已发布版本里的错误陈述；发现发布版本有问题时先查这里）
@@ -51,6 +51,7 @@
 - 改动涉及接口、密码学或持久化逻辑时**必须补回归测试**；合入前至少 `go test ./...` 且覆盖率脚本通过
 - `tests/e2e/wasm_prover_test.go` 会**编译 WASM 模块并用 node 驱动它**（缺 node 时跳过；CI 的 go job 装了 node，因此 CI 上会真跑）。改 `cmd/ballot-wasm` 或 `ballot.ProveBallot` 时这条用例要一起看
 - **跨语言的东西要双向锁死，字符串也算**：Go↔TS 的密码学除向量外，变体名 / 字段名 / 编码这些**字符串**也要两边各钉一条断言（如盲签名变体的线路名 `RSABSSA-SHA384-PSS-Deterministic`：`internal/infrastructure/crypto/blind_rsa_interop_test.go` 的 `TestKAT_BlindRsaVariantName` + `web/src/lib/credential.test.ts`）。两边各拿自己的常量自证是**测不出**这类问题的 —— 2026-10-25 的真实浏览器验收就是靠「真浏览器对真服务端」把它挖出来的
+- **「服务端不得拿到明文选项」有守卫测试**：能力 A 的验收 ① 由 `tests/architecture/plaintext_option_test.go` 把守（go/ast 扫 `internal/`：请求体字段 / usecase 入口 / 调用点 / **豁免项在 release 模式必须 404**）。改 HTTP 请求体结构或 usecase 入口前先跑 `go test ./tests/architecture/`；确实要保留的，在文件里的豁免表加一行并写清理由 —— **别把表改空来骗自己**
 - **门户的浏览器端路径没有自动化**：仓库里没有 Playwright，改完门户的密码学接线要用真浏览器人工点一遍（领凭证 → 本地生成选票 → 提交 → 计票），步骤见 `docs/deployment-checklist.md` §8
 - 覆盖率有两个口径，别混用：**门槛口径 80.4%**（`check-coverage.sh` 选中的 11 个包：usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server），**全仓口径 74.2%**（2026-10-21 实测）。门槛是**逐包分档**的（门槛值见 `scripts/coverage-thresholds.txt`），单个包回退会直接让 CI 变红；`internal/infrastructure/persistence`（63.3%）是当前最低的一档，抬门槛时它会先卡住
 - CI 实际执行：`go test ./...` + `bash ./scripts/check-coverage.sh 80 coverage.ci.out`，**另加** gofmt 检查、前端 lint / tsc / vitest（`.github/workflows/ci.yml`）

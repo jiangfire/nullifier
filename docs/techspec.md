@@ -862,6 +862,10 @@ make pg-test        # 起库 → 跑集成测试 → 关库
   客户端本地生成，服务端只提供公开的计票公钥（`GET .../election-key`），落库记录里
   只有密文。**残留的唯一路径是 debug 模式的 `ballot-draft`**（服务端代加密，release
   模式 404）—— 它是开发联调接口，不应被写成生产能力。
+  - **这条不变量由持续门禁把守**（不再是人工 grep）：`tests/architecture/plaintext_option_test.go`
+    用 go/ast 扫 `internal/`，断言 HTTP 层请求体结构体没有明文选项 json tag、usecase 层没有
+    第二个接受明文选项的入口、debug 链的调用点只在允许文件里，且**每一条豁免在 release 模式
+    必须真的 404**。`ballot-draft` 的请求体字段是当前唯一一条豁免。
 - **凭证签发已经是真两段式盲签名**（见 §6.9）：客户端本地盲化，服务端在签名阶段只见
   盲化消息，attest 阶段才拿到公钥并验签。能力 F 在**签名阶段**达成。
   - 口径要说清楚：**attest 阶段服务端仍然看得到 `user_id` 与 `user_pub_key`** —— 验签
