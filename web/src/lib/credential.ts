@@ -26,8 +26,21 @@ import {
 } from './blind-rsa';
 import { sha256 } from './sha256';
 
-/** 当前支持的盲签名变体。服务端换变体时这里要跟着改。 */
-export const supportedBlindSignatureVariant = 'SHA384PSSDeterministic';
+/**
+ * 当前支持的盲签名变体 —— **线路上的名字**。
+ *
+ * 服务端把签发方公钥连同变体名一起发给客户端（claim 响应里的 `variant`），
+ * 客户端据此确认自己实现的变体与服务端一致：变体不同，盲化结果就不同，
+ * 而且**不会报错**，只是最后验签失败。
+ *
+ * 注意这个名字是 CIRCL `blindsign/blindrsa` 的线路名
+ * （`blindrsa.SHA384PSSDeterministic.String()`），**不是** Go 侧的枚举标识符
+ * `SHA384PSSDeterministic`。服务端发到线路上的是前者，两边必须一模一样。
+ *
+ * 跨语言锁定：`internal/infrastructure/crypto/blind_rsa_interop_test.go`
+ * 的 `TestKAT_BlindRsaVariantName` 断言的是同一个字符串。
+ */
+export const supportedBlindSignatureVariant = 'RSABSSA-SHA384-PSS-Deterministic';
 
 /** 签发方公钥与密钥版本。 */
 export interface IssuerKey {

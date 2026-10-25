@@ -166,7 +166,8 @@ function reservationPayload(attempt = 1) {
     proposal_id: 'p1',
     user_id: attempt === 1 ? 'pseudonym-from-pool' : 'pseudonym-from-pool-2',
     issuer_key_version: 1,
-    variant: 'SHA384PSSDeterministic',
+    // 服务端线路上的变体名，与 `supportedBlindSignatureVariant` 一致。
+    variant: 'RSABSSA-SHA384-PSS-Deterministic',
     modulus: bytesToBase64(hexToBytes(issuerModulusHex)),
     exponent: 65537,
   };

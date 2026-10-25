@@ -89,6 +89,15 @@ function reservationPayload() {
 }
 
 describe('parseIssuerKey', () => {
+  it('变体名与服务端线路上的名字一致', () => {
+    // 服务端发的是 CIRCL `blindrsa.SHA384PSSDeterministic.String()` 的线路名，
+    // 不是 Go 侧的枚举标识符。写错时客户端会直接拒签，浏览器端表现为
+    // 「领取失败：签发方公钥不可用」。
+    // 跨语言锁定：`internal/infrastructure/crypto/blind_rsa_interop_test.go`
+    // 的 `TestKAT_BlindRsaVariantName` 断言同一个字符串。
+    expect(supportedBlindSignatureVariant).toBe('RSABSSA-SHA384-PSS-Deterministic');
+  });
+
   it('解析出公钥与版本', () => {
     const key = parseIssuerKey(reservationPayload());
     expect(key.version).toBe(1);

@@ -123,3 +123,21 @@ func TestKAT_BlindRsaClientSide(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, katSignature, hex.EncodeToString(signature))
 }
+
+// TestKAT_BlindRsaVariantName 锁死盲签名变体在**线路上的名字**。
+//
+// 服务端把签发方公钥连同变体名一起发给客户端（claim 响应的 `variant` 字段），
+// 客户端据此确认自己实现的变体与服务端一致：变体不同，盲化结果就不同，
+// 而且不会当场报错，只是最后验签失败。
+//
+// 线路名是 CIRCL `blindsign/blindrsa` 的 `Variant.String()`，
+// **不是** Go 侧的枚举标识符 `SHA384PSSDeterministic` —— 写错时门户的
+// 匿名领取与管理端签发都会直接失败。
+//
+// 跨语言锁定：浏览器端断言的是同一个字符串
+// （`web/src/lib/credential.test.ts` 的 `变体名与服务端线路上的名字一致`）。
+func TestKAT_BlindRsaVariantName(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "RSABSSA-SHA384-PSS-Deterministic", blindrsa.SHA384PSSDeterministic.String())
+}
