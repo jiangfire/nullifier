@@ -15,7 +15,7 @@
 | 版本 | 定位 | 状态 | 规模 |
 |---|---|---|---|
 | **v0.1.0** | 已发布的内测版。接口、存储、加密、门限解密、审计的骨架都在，但**零知识证明链尚未实现**，不要用于真实投票 | ✅ 已发布（2026-10-20） | — |
-| **v0.2.0** | **路线图目标** —— 有真实零知识证明链的实验版。匿名性在密码学上**成立**，而不是被声称；但接口仍会变，**不承诺稳定** | M2/M3 未开工 | **27–39 人天 ≈ 6–8 周** |
+| **v0.2.0** | **路线图目标** —— 有真实零知识证明链的实验版。匿名性在密码学上**成立**，而不是被声称；但接口仍会变，**不承诺稳定** | M2 已完成 · M3 进行中（T22 已落地） | **27–39 人天 ≈ 6–8 周** |
 
 **预期** —— 推演，**未承诺**，随 M2 进展重估（详见 [§1.2](#12-v020-之后还有几个-0x0)）：
 
@@ -106,7 +106,7 @@
 | D | 客户端能投票 | ❌ 门户在生产模式下 100% 无法完成投票（没有 prover） | 浏览器内生成 proof 与密文，e2e 跑通「选票 → 加密 → 证明 → 提交」 | M2 · T14 |
 | E | 凭证不可伪造 | ❌ 投票路径**从不**验凭证签名 | 落库前 `VerifyCredential`；伪造签名的投票 → 401 | M2 · T18 |
 | F | 签发方看不到被签内容 | ❌ 盲化在服务端进程内完成，等同普通签名 | 两段式盲签名：服务端在**签名阶段**只见盲化消息；交叉攻击（A 的盲签名 finalize 出 B）→ 失败 | M2 · T17 |
-| G | 凭证分发不泄露身份 | ✅ **v0.1.0 已达成**（T9）：凭证池 + 投票人匿名随机领取，运营方不再掌握「谁领了哪张」 | 保持「池里只存未签发槽位、领取时用领取者自带的一次性公钥当场签发、领取端点不落可关联日志」；补**资格证明**把一人一票补回来 | M3 · T22 |
+| G | 凭证分发不泄露身份 | ✅ **v0.1.0 已达成**（T9）：凭证池 + 投票人匿名随机领取，运营方不再掌握「谁领了哪张」 | 保持「池里只存未签发槽位、领取时用领取者自带的一次性公钥当场签发、领取端点不落可关联日志」；补**资格证明**把一人一票补回来 | M3 · T22 ✅ **已达成**（见 §4.1 的 M3 进展表） |
 | H | 生产可运维 | 🟡 **`CONFIG_FILE` 显式路径已支持**（生产配置模板仍不会被自动加载，但有了确定的加载方式，缺文件直接启动失败，启动日志打印实际配置文件路径）；CORS 真实源与部署清单仍靠人工核对 | 显式 `CONFIG_FILE` 支持 + 生产部署清单逐项可勾 | M3 · T19 |
 | I | 端到端验收 | ❌ 三个盲区从未验证（见 §4.3） | PG 集成测试 / 浏览器真实渲染 / 并发投票与容量，各有**可复现脚本 + 输出** | M3 · T20 |
 
@@ -134,7 +134,7 @@
 
 > 这四项的去向见 [§1.2](#12-v020-之后还有几个-0x0) 的 **v0.3.0 / v0.4.0 / 1.0.0 三档**推演（移动端原生客户端与密码学方案替换落在 1.0.0 那一档，且都是可选项）—— 排在「不做」里不等于永远不做。
 
-### 2.3 能力 G 引入的新问题：一人一票没了
+### 2.3 能力 G 引入的新问题：一人一票没了 ✅ 已补回（T22，2026-10-25）
 
 T9 把凭证改成**匿名随机领取**后（能力 G），服务端**无法强制一人一票**。
 
@@ -148,9 +148,13 @@ T9 把凭证改成**匿名随机领取**后（能力 G），服务端**无法强
 但证明本身不暴露身份（零知识证明「我符合资格」而不透露是谁）。这条路依赖
 M2 的证明链能力，因此它属于 M3 而不是 M2。
 
-> 任务：**T22 · 资格证明**（见附录 A.3）。
-> 另一个配套小项：CLI 缺 `credential-claim` 命令（门户已有按钮、HTTP 接口已有），
-> 脚本化领取用不了 —— 一并归到 T22。
+> ✅ **T22 · 资格证明已落地（2026-10-25）**：权威名单 → 离线工具生成 Merkle 承诺 →
+> **服务端只拿到 root** → 成员用零知识证明「我在名单里」→ 服务端按
+> `(proposal_id, qualification_id)` 去重。**服务端能验证「这个资格在树里」，却无法把资格
+> 对应到任何成员。** 设计与落地的口径见
+> [`docs/t22-eligibility-design.md`](./t22-eligibility-design.md)（状态：已实现）。
+>
+> 配套小项也已落地：CLI 的 `credential-claim` 命令（公开端点、不需要 admin token）。
 
 ---
 
@@ -195,14 +199,18 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 
 **预估**：周级。这是 v0.2.0 的主体，也是唯一的硬骨头。
 
-### M3 · 生产化 ⬜ 未开工
+### M3 · 生产化 🟡 进行中
 
 **目标**：能力 G 的资格证明（T22）、H 的生产配置（T19）、I 的端到端验收（T20），以及发版本身。
 
 **出口标准**：能力 G 的完成定义拿出证据（资格证明跑通、重复领取被拒）；生产部署清单全勾；
 三项盲区都有可复现输出；`VERSION` 与 tag 一致。
 
-**依赖**：M2 全部完成（资格证明要用 M2 的证明链能力）。
+**状态**：**进行中**（2026-10-25 起）。已完成 T22（资格证明 —— 能力 G 的完成定义已达成）；
+T19 已完成其可自动化的部分（CORS 的真实源仍是部署项）；T20 三项盲区各补了一部分，
+**没有一项完全闭合**（见 §4.3）。T21（发版）未开始。
+
+**依赖**：M2 全部完成（资格证明要用 M2 的证明链能力）。✅ M2 已全部完成。
 
 ---
 
@@ -245,7 +253,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | T14 | 客户端 prover | ✅ **已落地（CLI + 浏览器两侧）** —— CLI 是 `ballot-prove`；浏览器侧是**自建的 Go → js/wasm 路线**：`cmd/ballot-wasm` 编译成 WASM，门户在 Worker 里加载（`web/src/lib/wasm-prover.ts` + `web/src/workers/ballot-prover.worker.ts`）。加密、nullifier 派生、公开输入拼装与 Groth16 证明全部在 Go 侧完成，客户端与服务端共用同一套代码。**实测**：初始化 7.6 秒、出证明 2.25 秒、证明 128 字节（`tests/e2e/wasm_prover_test.go` 用 node 驱动同一个 WASM 模块端到端验收） |
 | T17 | 盲签名改真两段式 | ✅ **已落地**（2026-10-21）—— 真两段式协议（预留 → 本地盲化 → 盲签名 → 本地解盲 → attest）+ 门户 / CLI 接线 + 管理端同样走两段式；验收 ①（签名阶段只见盲化消息）与验收 ②（交叉攻击失败）均有 e2e 用例 |
 
-**能力 A–F 的当前状态**：
+**能力 A–G 的当前状态**：
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
@@ -255,6 +263,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | D 客户端能投票 | ✅ **已达成（CLI 与门户两侧）** | CLI 用本地 proving key 出证明；门户在浏览器 Worker 里用 WASM prover 出证明并提交。两条路径都有端到端证据（`tests/e2e/client_prover_test.go` / `tests/e2e/wasm_prover_test.go`） |
 | E 凭证不可伪造 | ✅ 已达成 | 落库前 `VerifyCredential`，伪造签名 → 401 |
 | F 签发方看不到被签内容 | ✅ 已达成 | 真两段式盲签名：客户端本地盲化，服务端在**签名阶段**只见盲化消息；交叉攻击（A 的盲签名签 B）→ 验签失败。**口径**：attest 阶段服务端仍看得到 `user_id` / `user_pub_key`（验签必须重算凭证消息） |
+| G 凭证分发不泄露身份 | ✅ **已达成（T22，2026-10-25）** | **服务端只见 root，不见成员包** —— 它能验证「这个资格在树里」，却无法把资格对应到任何成员。领取请求体里**不含任何真人身份字段**（e2e 断言）；投票提交的材料**不含** `qualification_id`（去重只在领取时做一次）。一人一票由 `eligibility_uses` 的唯一索引 `(proposal_id, qualification_id)` 强制。**未闭合**：门户的资格领取路径仍需真浏览器人工点一遍（仓库无 Playwright） |
 
 **本轮的两个协议变更**（都要写进 CHANGELOG，详见 §6 决策 D2）：
 
@@ -263,12 +272,87 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
   旧的加密选票无法解密。
 - **投票请求体不再接受 `public_witness`** —— 公开输入改由服务端自行拼装。
 
+#### M3 进行中（2026-10-25 起，本轮）
+
+| 任务 | 内容 | 状态 |
+|---|---|---|
+| T22 | 资格证明（一人一票） | ✅ **已落地** —— 见下面的「T22 落地核对」 |
+| T19 | 生产配置落地 | 🟡 **部分落地** —— `CONFIG_FILE` 显式路径、缺文件启动失败、启动日志打印实际路径都已完成；CORS 的真实源仍是部署项 |
+| T20 | 端到端验收（三个盲区） | 🟡 **三盲区各补了一部分，没有一项完全闭合** —— 见 §4.3 |
+| T21 | 发版（v0.2.0） | ⬜ 未开始 |
+
+**T22 落地核对**（一人一票）—— 落地了什么：
+
+- **权威名单 → 离线工具 → 服务端只拿到 root**：`cmd/eligibility-list -members <名单文件> -out <目录>`
+  生成 `root.json`（给服务端）与每成员一份 `eligibility-<member_id>.json`（0600，成员本人保管）。
+  服务端**只拿到 root**：它能验证「这个资格在树里」，却无法把资格对应到任何成员。
+- **资格电路**：Groth16 / BN254 / MiMC，**实测 6860 条约束**，公开输入**定长 5 个**
+  （Root / ProposalID / Challenge / QualificationID / SessionBinding），叶子、Merkle 路径、位置**全私有**。
+  `TreeDepth = 10` 是**编译期常量** → 单份名单上限 1024 人。
+- **去重键** `QualificationID = MiMC(Leaf, ProposalID)`：同一成员同一提案稳定（第二次领撞唯一索引 → 409
+  `ELIGIBILITY_ALREADY_USED`），跨提案不同（跨提案不可关联）。
+- **协议三步**：`POST /api/v1/proposals/:id/credentials/eligibility-challenge` →
+  `POST /api/v1/proposals/:id/credentials/claim`（请求体多了
+  `{eligibility_proof, qualification_id, challenge}`，三件要么都给要么都不给）→
+  `blind-sign` / `attest` **完全不变**。**资格不过不消耗池槽位。**
+- **新错误码**：`ELIGIBILITY_REQUIRED`(400) / `INVALID_ELIGIBILITY_PROOF`(403) /
+  `ELIGIBILITY_ALREADY_USED`(409) / `ELIGIBILITY_NOT_ENABLED`(409)。
+- **数据库**：新表 `eligibility_uses`（`proposal_id` + `qualification_id` + `used_at`），
+  唯一索引 `(proposal_id, qualification_id)` —— 这就是一人一票的强制点。
+  **只存去重键**，不存叶子 / 秘密 / 成员 ID。
+- **运行期要求**：`crypto.eligibility_root` + `crypto.eligibility_vk_path`
+  （环境变量 `CRYPTO_ELIGIBILITY_ROOT` / `CRYPTO_ELIGIBILITY_VK_PATH`）**必须成对出现**；
+  **release 模式必须配这两个，否则服务启动失败**。`GET /healthz` 多了 `eligibility` 布尔字段，
+  启动日志的 `effective configuration` 多了 `eligibility_enforced` 字段。
+- **命令行**：`cmd/eligibility-list`（离线名单工具）；`cmd/keygen -circuit ballot|eligibility`
+  （两套电路的密钥互不相通，默认文件名 `verifying.key`/`proving.key` 与
+  `eligibility-verifying.key`/`eligibility-proving.key`）；
+  `cmd/cli credential-claim -eligibility <成员包.json> -proving-key <资格 proving key>`。
+- **浏览器端**：`cmd/ballot-wasm` 暴露**四个 API**：`init` / `prove` / `initEligibility` /
+  `proveEligibility`（**同一个模块**）；静态资源新增 `web/public/eligibility-proving.key`
+  （`make web-eligibility-key PK=<路径>`）；门户「身份」面板：导入资格文件 → 领凭证时本地出证明，
+  资格包**只留内存**，不写 localStorage、不上传。
+
+**T22 的验收 ①–⑤ 各自的证据位置**：
+
+| # | 验收 | 证据 |
+|---|---|---|
+| ① | 无资格证明 → 拒绝（4xx），**池槽位不被消耗** | `tests/e2e/eligibility_test.go` 的 `TestAPI_EligibilityRequiredForClaim_E2E` |
+| ② | 有效资格证明 → 领取成功 | `tests/e2e/eligibility_test.go` 的 `TestAPI_EligibilityClaimSucceeds_E2E` |
+| ③ | 同一份资格第二次领取 → 拒绝 | `tests/e2e/eligibility_test.go` 的 `TestAPI_EligibilityCannotBeReused_E2E` |
+| ④ | 资格证明跨提案不可复用 | `tests/e2e/eligibility_test.go` 的 `TestAPI_EligibilityNotReusableAcrossProposals_E2E` |
+| ⑤ | 领取请求体里不含任何真人身份字段 | `tests/e2e/eligibility_test.go` 的 `TestAPI_EligibilityClaimBodyHasNoIdentityFields_E2E` |
+
+**浏览器路径的跨语言证据**：`tests/e2e/wasm_eligibility_test.go` 的
+`TestAPI_WASMEligibilityProver_E2E` —— 用 node 驱动**真的 WASM 模块**出资格证明，
+服务端用**真的资格验证密钥**验过，去重键与 Go 侧自算的一致。
+
+**另有单测**：usecase（`internal/usecase/registration_eligibility_test.go`）、
+persistence（`internal/infrastructure/persistence/eligibility_use_repository_test.go`）、
+http（`internal/infrastructure/http/eligibility_endpoints_test.go`）、
+crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligibility_claim_test.go`）、
+前端 composable（`web/src/composables/useVotePortal.test.ts`）。
+
+**跨语言线路的守卫**（`tests/architecture/eligibility_wire_test.go`）：门户这一侧只做 JSON 解析与
+转发，**最容易出错的不是数学而是字符串** —— 成员包字段名、出证明请求的字段名、WASM API 名、
+静态资源名，两边各钉一条断言（Go 侧读 struct tag / `api.Set` 的键，TS 侧读接口字段 / 调用名）。
+
+**T22 仍然没有闭合的**：
+
+- **浏览器端没有自动化**：仓库里没有 Playwright，门户的资格领取路径**仍需真浏览器人工点一遍**
+  （步骤见 `docs/deployment-checklist.md`）。自动化证据只到 node 驱动的 WASM 模块。
+- **PG 集成测试本机无 Docker**（与 T22 无关，但整体验收仍缺）。
+- **`cmd/loadtest` 不支持资格证明**：它只在**未开启资格校验**的服务上可用。
+- **资格包丢失无法找回**（成员包是秘密材料，发放靠安全渠道）。
+- **真实名单的内容与成员标识形式仍需运营方提供**。
+
 ### 4.2 v0.1.0 的边界（v0.1.0 发布时的快照）
 
-> 以下是 **v0.1.0 发布时**的边界，属历史快照。**当前实现见 §4.1 的 M2 进展表**
+> 以下是 **v0.1.0 发布时**的边界，属历史快照。**当前实现见 §4.1 的 M2 / M3 进展表**
 > —— 其中「没有真实电路」已改变；「`ballot-draft` 生产可达」这条**已彻底消失**：
 > 该端点连同服务端的代加密链一起删掉了（2026-10-25），现在服务端没有任何
-> 接收明文选项的入口。
+> 接收明文选项的入口；「服务端无法强制一人一票」这条也**已改变** ——
+> T22 的资格证明已落地（2026-10-25，见 §2.3 与 §4.1 的 M3 进展表）。
 
 **能**：
 
@@ -313,6 +397,10 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
      写成了 Go 的枚举标识符，服务端发的是 CIRCL 的线路名 —— 领取流程会停在 claim 之后
      （blind-sign 从未发出）。已修（`fix(web): use the CIRCL wire name for the blind
      signature variant`），并加了 Go/TS 两侧的跨语言锁定。
+   - ⚠️ **T22 的资格领取路径也在这条盲区里**：门户的「导入资格文件 → 领凭证」没有浏览器
+     自动化。自动化证据只到 node 驱动的 WASM 模块
+     （`tests/e2e/wasm_eligibility_test.go`）—— **真浏览器里人工点一遍仍然要做**
+     （步骤见 `docs/deployment-checklist.md`）。
 3. **并发投票下的防重投与性能容量** —— 唯一索引兜底，但没测过
    - 🟡 **防重投这一半已补**（本轮落地）：`tests/e2e/concurrent_nullifier_test.go` ——
      8 个请求**同时**用同一个 nullifier、各自带不同凭证提交，断言恰好 1 张票入库、
@@ -336,7 +424,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | # | 检查项 | 当前状态 |
 |---|---|---|
 | 1 | 能力 A–F 任一未完成 | ✅ **已过** —— A / B / D 已在 CLI 与门户两侧闭合（浏览器端 prover 走自建的 Go → js/wasm 路线）；C / E / F 已达成。能力 A 不再有残留：服务端的代加密链（`ballot-draft`）已删除 |
-| 2 | 能力 G 的完成定义未达成 —— 领取凭证时不需要任何资格证明（T22），意味着服务端无法强制一人一票 | ❌ **未过** —— T22 未开工（**设计稿已出**：`docs/t22-eligibility-design.md`，待拍板后实现） |
+| 2 | 能力 G 的完成定义未达成 —— 领取凭证时不需要任何资格证明（T22），意味着服务端无法强制一人一票 | ✅ **已过** —— **T22 已落地（2026-10-25）**：领取凭证必须先过零知识资格证明（`eligibility-challenge` → `claim` 带 `{eligibility_proof, qualification_id, challenge}`），**服务端只见 root**、无法把资格对应到任何成员；同一份资格第二次领取撞 `eligibility_uses` 的唯一索引 → 409 `ELIGIBILITY_ALREADY_USED`；跨提案不可复用。验收 ①–⑤ 各有 e2e 证据（`tests/e2e/eligibility_test.go`），浏览器路径的跨语言证据见 `tests/e2e/wasm_eligibility_test.go`。**部署侧的硬要求**：release 模式必须配 `crypto.eligibility_root` + `crypto.eligibility_vk_path`，否则服务启动失败 |
 | 3 | 存在「服务端能拿到明文选项」的代码路径（grep 不到才过） | ✅ **已过** —— 这条检查从人工 grep 变成持续门禁 `tests/architecture/plaintext_option_test.go`，而且**不设豁免机制**：HTTP 层请求体不得有明文选项 json tag、usecase 层不得有接受明文选项的入口、服务端代加密那条链的符号不许复活、`ballot-draft` 端点不许复活（POST 它必须 404）。**残留为零** |
 | 4 | 存在「proof 可以跨提案复用」的路径 | ✅ **已过** —— 公开输入由服务端自拼，跨提案 / 跨 nullifier 复用均验签失败 |
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
@@ -367,7 +455,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | **G5** | 版本号 | ✅ 当前发版 `0.1.0`；路线图目标用 **`0.2.0`**，**不用 `1.0.0`**（1.0.0 意味着 API 稳定 + 生产可用，届时做不到；见 §1.1） |
 | **G7** | 电路形状与曲线 | ✅ **Groth16/BN254**（T13 已落地）—— 沿用 verifier 原本硬编码的 `ecc.BN254` |
 | **G8** | 投票人领凭证的形态 | ✅ **凭证池 + 投票人匿名随机领取**（T9）—— 不再用一次性领票码。核心理由：admin 逐个分发就等于 admin 知道哪个票是谁的，直接破坏不可关联性。**代价已记下**：一人一票要靠资格证明补回（T22） |
-| **范围** | 这轮做哪些 | ✅ **T3–T12 这 10 项**已全部落地；T1（`ballot-draft`）与 T2（门户隐藏按钮）后来也落地了，并进一步升级为「端点与按钮整个删除」 |
+| **范围** | 这轮做哪些 | ✅ **T3–T12 这 10 项**已全部落地；T1（`ballot-draft`）与 T2（门户隐藏按钮）后来也落地了，并进一步升级为「端点与按钮整个删除」；M2 的 T13–T18 已落地；M3 的 **T22 已落地**（2026-10-25），T19 / T20 部分落地，T21 未开始 |
 
 **本轮新增的决策（2026-10-21）**
 
@@ -381,6 +469,21 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | **D3** | 依赖顺序：**T15 提前到 T14 之前** | ✅ 服务端自拼公开输入并验签，不依赖客户端 prover。**收益**：客户端 prover 接上来时对接的是已定死的公开输入格式，不返工。T18 一并提前（凭证验签与选票加密在不在客户端无关） |
 | **D4** | T17 盲签名的走向 | ✅ **走真两段式**（不是「改文档」退化路径）。**理由**：v0.2.0 的核心承诺就是匿名性，能力 F 不做等于这个版本名不副实。**代价**：改动面大，且**排在 T14 之后**（需要客户端承载 crypto） |
 | **D5** | nullifier 的编码要求 | ✅ 必须是 **32 字节规范域元素**（固定 64 位小写 hex），非规范编码直接拒绝。**理由**：`fr.Element.SetBytes` 是**按模归约**而不是拒绝，同一个值能有多种字节表示 —— 防重投的唯一索引会漏判。同理，**不用**乘性构造（`nullifier = sk·H`）：那会让服务端能反推出 `sk`。**本轮补修**：`votes.nullifier` 的唯一索引建在**字符串**上，所以光有「解码后的字节唯一」不够 —— 客户端用大写或带空白的形式提交同一个 nullifier，原样落库就能占掉多行、绕开唯一索引。落库前统一归一成 64 位小写 hex（`usecase/voting.go` 的 `decodeNullifier`） |
+
+**T22 的决策点（2026-10-25，已全部拍板并落地）**
+
+> T22 的六条决策点（范围、名单来源、哈希原语、提交端点、树深度、名单复用）**记在设计稿里** ——
+> [`docs/t22-eligibility-design.md`](./t22-eligibility-design.md) §6「决策点（✅ 已拍板）」，
+> 每条都有「拍板结论 + 落地口径」两列。口径摘要：
+
+| # | 决策 | 落地口径 |
+|---|---|---|
+| **T22-D1** | 方案 B 还是方案 A | **方案 B**（完整方案，已落地）—— 方案 A 未实现 |
+| **T22-D2** | 名单来源与保管 | 离线工具生成，**root 与成员包分开保管**；成员标识的具体形式仍由运营方决定 |
+| **T22-D3** | 哈希原语 | **MiMC**（零新依赖） |
+| **T22-D4** | 提交端点 | **claim 之前**（新增 `eligibility-challenge` 端点 + claim 请求体加三件材料） |
+| **T22-D5** | 树深度与规模 | **depth=10，且是编译期常量**（不是配置项）→ 单份名单上限 1024 人 |
+| **T22-D6** | 名单能否跨提案复用 | **能**（去重键按提案派生 → 跨提案不可关联） |
 
 **待拍板**
 
@@ -416,7 +519,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | **D2 密文 v2 → v3 使 v0.1.0 的选票永久不可解** | 旧数据丢失 | v0.2.0 尚未发版，本地/内测数据可弃；CHANGELOG 必须写明「与 v0.1.0 不兼容」；发版前清库 |
 | ~~**debug 模式下服务端仍能拿到明文选项**~~ | 能力 A 未达成 | ✅ **已解除**（2026-10-25）：服务端代加密的端点与代码链**整个删除**，不再依赖 `server.mode` 的取值。能力 A 现在与运行模式无关 |
 | T16 把加密移到客户端后，前端成为新的攻击面 | 密钥泄露 | proving key 只在前端，**不入服务端**；前端构建产物做完整性校验 |
-| 匿名随机领取牺牲了一人一票 | 可重复投票 | M3 用资格证明补回（T22，见 §2.3） |
+| 匿名随机领取牺牲了一人一票 | 可重复投票 | ✅ **已解除** —— M3 用资格证明补回（T22，2026-10-25 已落地，见 §2.3 与 §4.1 的 M3 进展表）。**剩余风险**：真实名单的内容与成员标识形式仍需运营方提供；门户的资格领取路径仍需真浏览器人工点一遍（仓库无 Playwright） |
 | M1 拖太久，M2 无时间 | 路线图整体延期 | M1 与 M2 **可并行**（除 T1/T2 依赖 M2 的字段） |
 
 ---
@@ -426,7 +529,8 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 路线图的判断以正文 §2–§4 为准；这里保留问题描述、证据与改法，供实现时直接取用。
 **已落地的任务卡保留原始的问题与改法，并附「落地核对」行** —— 逐条说明实际怎么做的、
 与原设想有什么偏差、哪些验收项没达成。当前已落地：**T1、T2、T13、T15、T18**（2026-10-21）
-与 **T9**（见 A.4）。**其余任务卡尚未落地**（A.3 里的 T22 是 T9 留下的缺口）。
+与 **T9**（见 A.4）、**T16 / T14 / T17**（M2 批次）、**T22**（2026-10-25，见 A.3）。
+**其余任务卡尚未落地**（A.3 里的 T19 / T20 是部分落地，T21 未开始）。
 
 ### A.1 挂在 M1 但等决策的
 
@@ -572,18 +676,21 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 预估 | 半天 |
 | 依赖 | M1、M2、M3 全部完成 |
 
-#### T22 · 资格证明：把一人一票补回来（T9 留下的缺口）
+#### T22 · 资格证明：把一人一票补回来（T9 留下的缺口）✅ 已落地
 
 | 项 | 内容 |
 |---|---|
 | 问题 | T9 把凭证改成匿名随机领取后，**服务端无法强制一人一票**。缺口的确切来源：池里槽位带的是随机假名 `user_id`，而服务端唯一能做「一人一票」约束的字段正是 `user_id`（`vote_participations` 存 `hash(user_id)`）—— 既然 `user_id` 是假名，服务端看不出同一个人领了几次、投了几次。**这等于用「可重复投票」换来了「不可关联性」。** |
 | 证据 | `internal/usecase/registration.go:140`（`FillCredentialPool` 生成随机假名 `user_id`）、`:197`（`ClaimCredential` 用领取者自带公钥签发）、`internal/domain/entity/credential_claim.go` |
 | 改法 | ① 定义**资格证明**：投票人在领取凭证时额外提交一份「我有资格投这一票」的零知识证明，证明内容不暴露身份（如基于一次性设备密钥的可验证资格 / 资格名单的 Merkle 承诺）；② 领取端点校验该证明，**不通过就不给凭证**（而不是给凭证后在投票时拒 —— 那时已经浪费了一个池槽位）；③ 电路的公开输入要绑定 `proposal_id` 与资格承诺，防跨提案复用；④ 服务端对「同一资格」只能领取一次（一次性资格标识，落库只存哈希）；⑤ ✅ **CLI `credential-claim` 命令已补**（本轮落地：公开端点、不需要 admin token、请求体只有本地生成的公钥） |
-| **设计方案** | 📄 **已出设计稿**（2026-10-25）：[`docs/t22-eligibility-design.md`](./t22-eligibility-design.md)。核心推论：**服务端只能对它能识别的标识去重** —— 标识若由客户端自由生成，「一人一票」就只是「一设备一票」；而权威方一旦知道「谁领了哪个资格」，就可能把它与票关联。解法是「权威分配资格 + 零知识地出示资格」：**离线名单（服务端只见 root）+ Merkle 承诺 + 零知识成员资格证明**，复用现有 MiMC / Groth16 / WASM prover 栈，不引入新密码学依赖。设计稿列了 6 条待拍板的决策点（范围、名单来源、哈希原语、提交端点、树深度、名单复用） |
-| 验收 | ① 无资格证明的领取请求 → 拒绝（4xx），池槽位不被消耗；② 有效资格证明 → 领取成功；③ 同一份资格证明第二次领取 → 拒绝；④ 资格证明在不同提案间不可复用；⑤ 领取请求体里不含任何真人身份字段（grep 可验） |
+| **设计方案** | 📄 **已实现**（2026-10-25）：[`docs/t22-eligibility-design.md`](./t22-eligibility-design.md)（状态：已实现，含 §8「实现与设计稿的偏离」）。核心推论：**服务端只能对它能识别的标识去重** —— 标识若由客户端自由生成，「一人一票」就只是「一设备一票」；而权威方一旦知道「谁领了哪个资格」，就可能把它与票关联。解法是「权威分配资格 + 零知识地出示资格」：**离线名单（服务端只见 root）+ Merkle 承诺 + 零知识成员资格证明**，复用现有 MiMC / Groth16 / WASM prover 栈，不引入新密码学依赖。设计稿的 6 条决策点已全部拍板（见该文 §6） |
+| **落地核对** | ① ✅ **离线名单工具** `cmd/eligibility-list -members <名单文件> -out <目录>` → `root.json`（服务端用）+ 每成员一份 `eligibility-<member_id>.json`（0600，成员本人保管）；名单按成员 ID 排序，同一份名单两次生成的树根一致；② ✅ **资格电路** `internal/infrastructure/crypto/eligibility/`：Groth16 / BN254 / MiMC，**实测 6860 条约束**，公开输入**定长 5 个**（Root / ProposalID / Challenge / QualificationID / SessionBinding），**叶子、Merkle 路径、位置全私有**；`TreeDepth = 10` 是**编译期常量** → 单份名单上限 1024 人；③ ✅ **服务端**：`POST /api/v1/proposals/:id/credentials/eligibility-challenge`（公开、**无状态**，服务端不记账）→ `claim` 请求体新增 `{eligibility_proof, qualification_id, challenge}`（三件要么都给要么都不给）；**资格校验在取槽位之前**，资格不过**不消耗池槽位**；`blind-sign` / `attest` **完全不变**；④ ✅ **去重表** `eligibility_uses`（`proposal_id` + `qualification_id` + `used_at`），唯一索引 `(proposal_id, qualification_id)` —— 一人一票的强制点；**只存去重键**，不存叶子 / 秘密 / 成员 ID；⑤ ✅ **新错误码**：`ELIGIBILITY_REQUIRED`(400) / `INVALID_ELIGIBILITY_PROOF`(403) / `ELIGIBILITY_ALREADY_USED`(409) / `ELIGIBILITY_NOT_ENABLED`(409)；⑥ ✅ **运行期配置** `crypto.eligibility_root` + `crypto.eligibility_vk_path`（环境变量 `CRYPTO_ELIGIBILITY_ROOT` / `CRYPTO_ELIGIBILITY_VK_PATH`），**必须成对出现**；**release 模式缺一即启动失败**；`GET /healthz` 新增 `eligibility` 布尔字段；⑦ ✅ **CLI**：`cmd/keygen -circuit ballot\|eligibility`（两套密钥互不相通，默认文件名 `verifying.key`/`proving.key` 与 `eligibility-verifying.key`/`eligibility-proving.key`）；`cmd/cli credential-claim -eligibility <成员包.json> -proving-key <资格 proving key>`；⑧ ✅ **浏览器端**：`cmd/ballot-wasm` 暴露**四个 API** `init` / `prove` / `initEligibility` / `proveEligibility`（**同一个模块**）；静态资源只新增 `web/public/eligibility-proving.key`（`make web-eligibility-key PK=<路径>`）；门户「身份」面板「导入资格文件 → 领凭证时本地出证明」，资格包**只留内存**，不写 localStorage、不上传 |
+| **偏差** | ⚠️ 与设计稿原文有 5 处偏离，逐条列在 [`docs/t22-eligibility-design.md`](./t22-eligibility-design.md) §8：**① 浏览器端是同一个 WASM 模块四个 API，不是两个模块**（静态资源只多一个 key）；**② `qualification_id` 存 64 位 hex 的 TEXT，不是 BLOB(32)**（与 `votes.nullifier` 的口径一致）；**③ 公开输入 5 个，不是 7 个** —— 叶子 / 路径 / 位置全私有，多出来的 `SessionBinding` 由服务端自算；**④ 挑战无状态**（与设计稿一致）；**⑤ D1–D6 已全部拍板**，其中 D5 的 depth=10 是**编译期常量而非配置项** |
+| 验收 | ① 无资格证明的领取请求 → 拒绝（4xx），池槽位不被消耗 —— ✅ `tests/e2e/eligibility_test.go` 的 `TestAPI_EligibilityRequiredForClaim_E2E`；② 有效资格证明 → 领取成功 —— ✅ `TestAPI_EligibilityClaimSucceeds_E2E`；③ 同一份资格证明第二次领取 → 拒绝 —— ✅ `TestAPI_EligibilityCannotBeReused_E2E`；④ 资格证明在不同提案间不可复用 —— ✅ `TestAPI_EligibilityNotReusableAcrossProposals_E2E`；⑤ 领取请求体里不含任何真人身份字段 —— ✅ `TestAPI_EligibilityClaimBodyHasNoIdentityFields_E2E`。**浏览器路径的跨语言证据**：`tests/e2e/wasm_eligibility_test.go` 的 `TestAPI_WASMEligibilityProver_E2E`（node 驱动**真的 WASM 模块**出证明，服务端用**真的资格验证密钥**验过，去重键与 Go 侧自算一致） |
+| **未达成** | ⚠️ **门户的浏览器端路径没有自动化**（仓库无 Playwright）—— 资格领取这条路仍需真浏览器人工点一遍（步骤见 `docs/deployment-checklist.md`）；⚠️ `cmd/loadtest` **不支持**资格证明（只在未开启资格校验的服务上可用）；⚠️ 资格包丢失**无法找回**（成员包是秘密材料，发放靠安全渠道）；⚠️ **真实名单的内容与成员标识形式仍需运营方提供**；⚠️ 单份名单上限 1024 人（`TreeDepth` 是编译期常量） |
 | 预估 | 5–7 天（依赖 M2 的电路与 prover） |
-| 依赖 | T13、T14（资格证明要用真实电路与客户端 prover） |
-| 备注 | **这是能力 G 的完成定义的最后一环**（§2.1）。不做的话，v0.2.0 就必须继续在 README 里写明「无法保证一人一票」—— 那与「有真实证明链的实验版」这个定位不符 |
+| 依赖 | T13、T14（资格证明要用真实电路与客户端 prover）✅ 均已落地 |
+| 备注 | **这是能力 G 的完成定义的最后一环**（§2.1）—— ✅ 已闭合。不做的话，v0.2.0 就必须继续在 README 里写明「无法保证一人一票」 |
 
 ### A.4 T9 · 凭证池 + 投票人匿名随机领取（✅ 已落地）
 
@@ -601,7 +708,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 决策门 | G8 ✅ 已拍板（§6） |
 
 **它留下的缺口**：能力 G 达成的同时丢掉了「一人一票」，且 CLI 领取路径缺失 ——
-两项都归到 **T22**。
+两项都归到 **T22**。✅ **T22 已于 2026-10-25 落地**（见 A.3），两项缺口都已闭合。
 
 ---
 
@@ -630,6 +737,16 @@ feat(cli): add the credential-claim command
 
 **未做的三条（`feat(prover)` / `feat(vote)` / `fix(credential)`）分别是 T14 / T16 / T17** ——
 它们是 M2 剩下的全部，也是 v0.2.0 能不能发的关键（能力 A / D / F 都在这三条上）。
+**这三条后来也落地了**（T16 / T14 / T17）。
+
+**T22（2026-10-25）实际涉及的提交**：
+
+```
+feat(crypto): enforce one-person-one-vote with a zero-knowledge eligibility proof
+feat(cli,web): let the CLI and the portal prove eligibility before claiming
+```
+
+第一条是资格电路 + 服务端 + 去重表 + 配置，第二条是 CLI 与门户两条客户端路径的接线。
 
 ---
 

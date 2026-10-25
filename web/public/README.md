@@ -7,6 +7,7 @@
 | `ballot-prover.wasm` | `make web-wasm`（编译 `cmd/ballot-wasm`） | ❌ 构建产物 |
 | `wasm_exec.js` | `make web-wasm`（从 `$(go env GOROOT)/lib/wasm/` 拷贝） | ❌ 第三方胶水，跟着工具链走 |
 | `proving.key` | `make web-proving-key PK=<路径>`（运营方从 `cmd/keygen` 拿到） | ❌ **绝不能进仓库** |
+| `eligibility-proving.key` | `make web-eligibility-key PK=<路径>`（运营方从 `cmd/keygen -circuit eligibility` 拿到） | ❌ **绝不能进仓库** |
 
 ## 为什么 proving key 放在门户的静态目录
 
@@ -20,3 +21,14 @@
 
 对应地，**verifying key 必须在服务端**（`crypto.vk_path` 或 `CRYPTO_VK_PATH`），
 两边必须是同一对密钥 —— 用 `cmd/keygen` 一次生成、一次分发。
+
+## 两把 proving key 不是同一把
+
+门户要出两种证明，各需要各自的 proving key：
+
+| 电路 | 客户端 proving key | 服务端 verifying key |
+|---|---|---|
+| 选票 | `proving.key` | `verifying.key`（`crypto.vk_path`） |
+| 资格（一人一票） | `eligibility-proving.key` | `eligibility-verifying.key`（`crypto.eligibility_vk_path`） |
+
+Groth16 的 setup 是 **per-circuit** 的，两把密钥互不相通、不能互相替代。

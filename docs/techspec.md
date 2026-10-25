@@ -7,7 +7,9 @@
 ```text
 cmd/
 ├── cli/                    # 命令行客户端，复用 HTTP API
-├── keygen/                 # 生成选票电路的 Groth16 密钥（vk / pk）
+├── keygen/                 # 生成 Groth16 密钥（vk / pk）：选票与资格两套电路
+├── ballot-wasm/            # 浏览器端 prover 的 WASM 模块（选票 + 资格两套电路）
+├── eligibility-list/       # 离线名单工具：成员名单 → Merkle 根 + 每人的资格包
 └── server/                 # 服务启动入口
 
 internal/
@@ -19,7 +21,9 @@ internal/
 │   └── repository/         # 仓储接口与领域错误
 ├── infrastructure/
 │   ├── crypto/             # gnark proof verifier、kryptology credential issuer、Merkle root builder
-│   │   └── ballot/         # 选票密码学栈：曲线运算、v3 密文、Groth16 电路与证明器
+│   │   ├── ballot/         # 选票密码学栈：曲线运算、v3 密文、Groth16 电路与证明器
+│   │   ├── eligibility/    # 资格密码学栈：名单 Merkle 承诺、资格电路与证明器
+│   │   └── mimc/           # 选票电路与资格电路共用的 MiMC 实现
 │   ├── http/               # Gin handler / server / middleware
 │   └── persistence/        # GORM 仓储、迁移、DB 配置
 └── usecase/                # 业务编排
@@ -52,6 +56,10 @@ web/                        # Vue 3 前端门户
   - `crypto/ballot`：选票密码学栈 —— BN254 twisted Edwards 群运算、v3 选票密文、
     Fr 上的 Shamir 门限份额、Groth16 选票电路与证明/验证器。选票密文与电路
     跑在同一条曲线上，密文关系才能进电路。
+  - `crypto/eligibility`：资格密码学栈 —— 资格名单的 Merkle 承诺、Groth16 资格
+    电路与证明/验证器。服务端只持有名单根与资格验证密钥。
+  - `crypto/mimc`：选票电路与资格电路**共用**的 MiMC 实现 —— 两处必须同一份，
+    差一位客户端就出不了证明（且不会报错，只是验签失败）。
 - `di`
   - 通过 provider 和 Wire 组装依赖。
 
@@ -107,6 +115,24 @@ web/                        # Vue 3 前端门户
 - `audit_anchors`
   - 单独记录可导出的审计锚点
 
+### 3.5 资格（一人一票）
+
+- 资格是**权威名单分配**的：名单离线生成 Merkle 承诺，服务端只拿到**树根**，
+  成员各自拿到「资格秘密 + 叶子 + Merkle 路径」的**资格包**。
+- 成员领凭证时在本地出一份零知识**资格证明**，证明「我的叶子在这棵树里」。
+  服务端据此强制「一人一票」，却**不知道**这份资格属于谁。
+- 去重键 `QualificationID = MiMC(Leaf, ProposalID)`：
+  - 同一成员在同一提案里稳定 → 第二次领取撞唯一索引
+  - 跨提案不同 → 跨提案不可关联
+- `eligibility_uses` 表只存**去重键**：
+  - `id`
+  - `proposal_id`
+  - `qualification_id`（TEXT，64 位十六进制）
+  - `used_at`
+  - 唯一索引 `(proposal_id, qualification_id)` —— **这就是「一人一票」的强制点**
+- **不存**叶子、资格秘密、成员 ID；也**不与凭证、票据关联** —— 一旦能把资格连到
+  票，「分发不泄露身份」这条底线就破了。
+
 ## 4. 数据库与迁移
 
 ### 4.1 环境策略
@@ -136,6 +162,8 @@ web/                        # Vue 3 前端门户
   - `crypto.vk_path`
   - `crypto.issuer_key_path`
   - `crypto.issuer_rotate_days`
+  - `crypto.eligibility_root`（资格名单的 Merkle 树根，64 位十六进制的域元素）
+  - `crypto.eligibility_vk_path`（资格电路的 verifying key 路径）
   - `db.driver`
   - `db.path`
   - `db.host`
@@ -144,11 +172,19 @@ web/                        # Vue 3 前端门户
   - `db.user`
   - `db.password`
   - `db.sslmode`
+- 资格校验的两个配置项有环境变量：`CRYPTO_ELIGIBILITY_ROOT` /
+  `CRYPTO_ELIGIBILITY_VK_PATH`（优先级与其它 `crypto.*` 一致：环境变量高于配置文件）。
 
 ### 4.3 运行期校验
 
 - 当 `server.mode` 为 `release/prod/production` 时：
   - `crypto.vk_path` 必填
+  - **`crypto.eligibility_root` 与 `crypto.eligibility_vk_path` 必须同时必填** ——
+    没有名单根与资格验证密钥，服务端就无法强制「同一个人只能领一张票」，
+    那时它只是个能发凭证的服务器。这条与 `crypto.vk_path` 是同级的硬要求。
+- `crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对出现**
+  （任何模式都校验）：只配根等于「不校验」，只配密钥则无从校验 ——
+  两者只配一个时服务**启动失败**，不静默降级。
 - `server.admin_bearer_token` 若为空，会在启动期自动生成并写回内存配置
 - 自动生成的 token 会通过启动日志打印到控制台，仅对当前进程实例有效
 - 启动日志会打印**实际加载的配置文件路径**（`config_file`）—— 「以为加载了生产
@@ -159,7 +195,8 @@ web/                        # Vue 3 前端门户
 ### 4.4 迁移
 
 - **迁移是独立步骤**：`nullifier-server -migrate` 跑完迁移即退出。
-  迁移只需要数据库连接，不要求 `crypto.vk_path` 与 `server.admin_bearer_token`。
+  迁移只需要数据库连接，不要求 `crypto.vk_path`、`server.admin_bearer_token`
+  与资格校验的两个配置。
 - 服务启动时是否自动迁移由 `server.auto_migrate` 决定：
   - 非 `release/prod/production` 模式默认 `true`（开发期省事）
   - `release/prod/production` 模式默认 `false` —— 多副本同时启动会争 DDL 锁，
@@ -171,6 +208,8 @@ web/                        # Vue 3 前端门户
   - `Vote`
   - `Proposal`
   - `Credential`
+  - `CredentialClaim`
+  - `EligibilityUse`（资格使用记录 —— 「一人一票」的强制点，见 §3.5）
   - `VoteParticipation`
   - `DecryptionSession`
   - `TallyResult`
@@ -199,6 +238,7 @@ web/                        # Vue 3 前端门户
 - `POST /api/v1/votes`
 - `POST /api/v1/proposals/:proposal_id/vote-status`
 - `GET /api/v1/proposals/:proposal_id/election-key`（计票公钥，公开值）
+- `POST /api/v1/proposals/:proposal_id/credentials/eligibility-challenge`（领取挑战，公开）
 - `POST /api/v1/proposals/:proposal_id/credentials/claim`
 - `POST /api/v1/proposals/:proposal_id/credentials/blind-sign`
 - `POST /api/v1/proposals/:proposal_id/credentials/attest`
@@ -220,10 +260,13 @@ web/                        # Vue 3 前端门户
 ### 5.3 关键约束
 
 - `GET /healthz`
-  - 响应体是 `{"status":"ok","debug":<bool>}`。
+  - 响应体是 `{"status":"ok","debug":<bool>,"eligibility":<bool>}`。
   - `debug` 由 `server.mode` 推导（`debug` / `dev` / `development` 为 true）。
     门户据此决定要不要显示开发联调入口；该字段不是敏感信息，服务端是否处于
     调试模式本来就是公开事实。
+  - `eligibility` 报出服务端**是否在强制一人一票**（`crypto.eligibility_root`
+    是否已配置）。没开的话任何人都能反复领票 —— 这是运营必须能一眼看到的
+    运行状态，同样不是敏感信息。
 - `POST /api/v1/votes`
   - 要求 `proposal_id`、`encrypted_vote`、`proof`、`nullifier`、`user_id`、`user_pub_key`、`credential_signature`，全部必填（HTTP 层与 usecase 层都强制，不存在匿名免凭证投票的路径）
   - **请求体不再有 `public_witness`**：公开输入由服务端按请求字段、提案与计票会话
@@ -245,10 +288,31 @@ web/                        # Vue 3 前端门户
     “选票是加密的”这个属性）；门户与 CLI 均已移除该字段
 - `POST /api/v1/proposals/:proposal_id/vote-status`
   - 必须带当前凭证材料，不接受裸 `user_id` 枚举
+- `POST /api/v1/proposals/:proposal_id/credentials/eligibility-challenge`（领取挑战，公开）
+  - 成功 200，响应体是 `{"proposal_id","root","depth","challenge"}`：
+    `root` 是服务端配置的名单树根（64 位十六进制的域元素）、`depth` 是名单树深
+    （当前恒为 10）、`challenge` 是本次会话的一次性挑战（同样 64 位十六进制）。
+  - **服务端不记账**：挑战无状态，重放由去重键的唯一索引挡住（见 §3.5）。
+  - 409 `ELIGIBILITY_NOT_ENABLED`：服务端没开启资格校验。
+  - 404 `NOT_FOUND`：提案不存在。
 - `POST /api/v1/proposals/:proposal_id/credentials/claim`（预留签发权，公开）
-  - 请求体是空的 —— **不接受 `user_pub_key`**。服务端一旦知道公钥就能算出凭证消息
+  - 请求体**仍然不接受 `user_pub_key`**。服务端一旦知道公钥就能算出凭证消息
     的原文，盲化当场失效（它手上有私钥，根本不需要解盲）。旧版本这个端点收
     `user_pub_key`，现在一律忽略。
+  - **请求体从「空」变成「可选的三件资格材料」**：
+    `{"eligibility_proof": "<base64>", "qualification_id": "<64 位 hex>",
+    "challenge": "<64 位 hex>"}`。
+    - 三件**要么都给、要么都不给**；只给一半 → 400 `INVALID_REQUEST`。
+    - 开了资格校验却没给材料 → 400 `ELIGIBILITY_REQUIRED`。
+    - 给了材料但服务端没开资格校验 → 409 `ELIGIBILITY_NOT_ENABLED`
+      （不能让它「看起来被验过」）。
+    - 证明验不过（伪造、名单不对、提案不对、挑战不对）→ 403
+      `INVALID_ELIGIBILITY_PROOF`。
+    - 同一份资格第二次领 → 409 `ELIGIBILITY_ALREADY_USED`。
+  - **资格不过不消耗池槽位**：顺序是「验资格 → 取槽位（不占位）→ 记资格使用」。
+    唯一约束冲突时槽位还没被标记领取，不会被白白消耗。
+  - 请求体里**不许出现真人身份字段**（工号、姓名、证件号……）：资格材料里只有
+    零知识证明与两个公开输入，服务端从头到尾不知道领票的是谁。
   - 响应：`proposal_id`、`user_id`（池槽位的假名）、`issuer_key_version`、`variant`、
     `modulus`（base64）、`exponent`。
   - **预留不占位**：服务端取槽位时不改状态，所以并发领取会抢到同一个槽位。撞车的
@@ -273,6 +337,9 @@ web/                        # Vue 3 前端门户
   - 请求体：`proposal_id`、`user_id`。同样**不收公钥**。
   - 与公开端的区别：可以指定任意 `user_id`，且该 user_id 不必在池里（池槽位是
     「匿名领取」的机制，管理端签发不需要它）。
+  - **管理端签发不校验资格证明**（请求体里没有资格材料的位置）：运营方可以为指定
+    `user_id` 签发凭证。因此「一人一票」只在**公开领取端点**上被强制 —— 运营方自己
+    签发的那条路不在其内。
 - `POST /api/v1/credentials/blind-sign`（管理端盲签名）
   - 请求体：`proposal_id`、`user_id`、`blinded_message`（base64）、
     `issuer_key_version`。
@@ -469,12 +536,17 @@ web/                        # Vue 3 前端门户
 ### 6.10 浏览器端 prover（WASM）
 
 - **模块**：`cmd/ballot-wasm`，用 `GOOS=js GOARCH=wasm` 构建。它在全局对象上注册
-  `nullifierProver`，暴露两个函数（入参出参都是 JSON 字符串 / JS 对象）：
+  `nullifierProver`，暴露四个函数（入参出参都是 JSON 字符串 / JS 对象）：
 
   | 函数 | 入参 | 出参 |
   |---|---|---|
   | `init` | `{"proving_key": "<base64>"}` | `{"ok":true,"init_ms":7608}` |
   | `prove` | `{"proposal_id","election_public_key","option_index","num_options"}` | `{"ok":true,"ciphertext","nullifier","proof","prove_ms":2254}` |
+  | `initEligibility` | `{"proving_key": "<base64>"}` | `{"ok":true,"init_ms":5120}` |
+  | `proveEligibility` | `{"proposal_id","challenge","root","member_package"}` | `{"ok":true,"proof","qualification_id","prove_ms":...}` |
+
+  - **两套电路在同一个 WASM 模块里**（选票 + 资格），各自一把 proving key：
+    `proving.key` 与 `eligibility-proving.key`。两把密钥互不相通。
 
 - **出票在 Go 侧一次做完**：`ballot.Prover.ProveBallot`（`internal/infrastructure/crypto/ballot/client.go`）
   依次做四件事 —— 压缩计票公钥 → 加密选项下标 → 随机 nullifier 秘密并派生 nullifier →
@@ -493,8 +565,9 @@ web/                        # Vue 3 前端门户
   2 秒，放在主线程会把界面卡死。
 - **依赖的静态资源**（门户静态目录，见 `web/public/README.md`）：
   `wasm_exec.js`（Go 官方胶水，BSD 许可）、`ballot-prover.wasm`（约 11.9 MB，gzip 后约
-  2.8 MB）、`proving.key`（约 1.2 MB）。由 `make web-wasm` 与
-  `make web-proving-key PK=<路径>` 准备，**都不进仓库**。
+  2.8 MB）、`proving.key`（约 1.2 MB）、`eligibility-proving.key`（资格电路的 proving
+  key）。由 `make web-wasm`、`make web-proving-key PK=<路径>` 与
+  `make web-eligibility-key PK=<路径>` 准备，**都不进仓库**。
 - **proving key 只在客户端**：服务端只拿 verifying key（`crypto.vk_path`）。发布到门户
   静态目录是给**投票人**下载用的，不进服务端镜像、不进数据库。
 - **实测**（node 驱动同一个 WASM 模块，见 `tests/e2e/wasm_prover_test.go`）：
@@ -564,10 +637,88 @@ web/                        # Vue 3 前端门户
 - **槽位竞争的解法在客户端**：预留不占位 → 并发领取会抢同一个槽位 → attest 返回
   409 `CREDENTIAL_EXISTS` → 客户端换一个槽位重来（最多 5 次）。409 还有另一种语义
   `CREDENTIAL_POOL_EMPTY`（池领完了），那个**不重试**。
-- **还没做的**：浏览器端 prover 已落地（见 §6.10），门户因此能在 release 模式下投出
-  加密票；剩下的是「一人一票」的资格证明（路线图 T22）。
+- **「一人一票」已落地**（见 §6.11）：资格证明把「服务端能去重」与「服务端不知道是谁」
+  同时成立，门户与 CLI 两侧都能出资格证明。
 
 > 补齐上述链路的顺序与工作量评估见 [`docs/roadmap.md`](./roadmap.md)（产品路线图）。
+
+### 6.11 资格证明（一人一票，T22）
+
+- **要解决的问题**：凭证是匿名随机领取的，同一个人领两次就能投两票。要强制
+  「一人一票」，服务端就必须能对某个标识去重；而只要这个标识与真人的对应关系
+  是服务端可见的，去重就等于给了服务端关联票与人的能力。
+- **做法**：资格由**权威名单**分配，成员以**零知识**的方式出示资格。
+  服务端只拿到名单的**树根**，能验证「这个人的叶子在树里」，却无法把叶子对应到
+  任何成员。
+- **包**：`internal/infrastructure/crypto/eligibility`
+
+  | 文件 | 内容 |
+  |---|---|
+  | `merkle.go` | 名单树与两种产物：`MemberPackage`（成员本人保管的秘密材料）与 `ListPackage`（给服务端的根）；`BuildTree` / `DeriveLeaf` / `DeriveQualificationID` / `DecodeField`（拒绝非规范编码） |
+  | `circuit.go` | 资格电路 `eligibilityCircuit` 与 `TreeDepth` |
+  | `statement.go` | 公开输入 `Statement`（**定长 5 个**）与 `BuildStatement` |
+  | `prover.go` | Groth16 的 `Prover` / `Verifier` / `GenerateKeys` / `Constraints` |
+  | `client.go` | 客户端一站式出证明：`Prover.ProveEligibility`（重算叶子并与包比对、由叶子推出去重键、用**服务端的** root 出证明） |
+
+- **电路形状**：Groth16 / BN254，哈希用 MiMC。**实测 6860 条约束**
+  （`eligibility.Constraints()`，护栏测试断言 < 12000）。
+- **公开输入（定长 5 个，服务端自拼，客户端无从篡改）**：
+
+  | 字段 | 含义 |
+  |---|---|
+  | `Root` | 资格名单的 Merkle 树根 |
+  | `ProposalID` | 提案 ID 经 SHA-256 映射到 Fr（`ballot.DeriveProposalField`） |
+  | `Challenge` | 本次领取会话的一次性挑战 |
+  | `QualificationID` | 去重键 |
+  | `SessionBinding` | `MiMC(QualificationID, Challenge)`，把挑战钉在这份证明上 |
+
+- **私有见证**：`Secret`（资格秘密）、`Index`（叶子位置）、`Path`（10 个兄弟节点）。
+  **叶子、路径、位置全是私有的** —— 服务端因此不需要知道树的结构，公开输入的
+  个数也不随树深变化。
+- **电路断言四件事**：
+  1. `Leaf = MiMC(Secret)` —— 叶子由秘密单向决定；
+  2. `QualificationID = MiMC(Leaf, ProposalID)` —— 去重键绑定本提案；
+  3. `SessionBinding = MiMC(QualificationID, Challenge)` —— 截获的证明挪不到别的挑战上用；
+  4. `Index` 按 `TreeDepth` 位分解并能复原，沿 `Path` 上溯得到 `Root`。
+- **去重键**：`QualificationID = MiMC(Leaf, ProposalID)` —— 同一成员同一提案稳定
+  （第二次领取撞唯一索引），跨提案不同（跨提案不可关联）。
+- **`TreeDepth = 10` 是编译期常量**（电路里 `ToBinary` 的宽度必须是常量）：
+  名单上限 **1024 人**；要更大得改常量、重编电路与 WASM、重生成密钥。
+- **名单工具**：`cmd/eligibility-list -members <名单文件> -out <目录>` —— 离线运行，
+  不联网、不连服务端。输入每行一个成员 ID（空行与 `#` 开头行忽略，重复行去重，
+  成员按 ID 排序后建树，因此同一份名单的**成员位置**是确定的；但每次运行都会
+  重新随机生成资格秘密，所以**两次运行的树根不一样**）。输出：
+  - `root.json` —— 名单根（`root` / `depth` / `count`），给服务端配置
+    `crypto.eligibility_root`；
+  - `eligibility-<member_id>.json` —— 每成员一份资格包（`member_id` / `secret` /
+    `leaf` / `index` / `path` / `root` / `depth`），权限 **0600**，走安全渠道发给本人。
+  - **两份产物必须分开保管**：服务端只该拿到 root。
+- **两套密钥，互不相通**：`cmd/keygen -circuit ballot|eligibility`
+  - 选票：`verifying.key`（服务端，`crypto.vk_path`）/ `proving.key`（客户端）
+  - 资格：`eligibility-verifying.key`（服务端，`crypto.eligibility_vk_path`）/
+    `eligibility-proving.key`（客户端）
+  - Groth16 的 setup 是 **per-circuit** 的，两套密钥不能互换。
+- **共享 MiMC**：`internal/infrastructure/crypto/mimc` —— 选票电路的 nullifier 约束
+  与资格电路的 Merkle 承诺**共用同一份** MiMC 实现（`mimc.Hash`），并另导出
+  `mimc.Constants()` 供跨语言 KAT 钉住轮常量。两处必须同一份：差一位，客户端就
+  出不了证明（而且不会报错，只是验签失败）。
+- **领域适配层**：`internal/infrastructure/crypto/eligibility_service.go` ——
+  `Enabled` / `Root` / `NewChallenge` / `Verify`。
+  **没有「跳过验签」的降级模式**：选票证明有（`vk_path` 为空时只查 proof 非空），
+  资格证明没有 —— 验签密钥缺失等于服务端无法履行一人一票的承诺，那要在启动时
+  失败，而不是悄悄放行。
+- **与原设计稿 `docs/t22-eligibility-design.md` 的偏离**（该设计稿的 §8 也如实列了同一张表；
+  实现口径以本文为准）：
+  1. 设计稿原文说浏览器要**两个** WASM 模块；实现是**一个**模块四个 API
+     （`init` / `prove` / `initEligibility` / `proveEligibility`），静态资源只新增
+     `eligibility-proving.key`；
+  2. 设计稿原文说 `qualification_id` 存 `BLOB(32)`；实现存 64 位十六进制的 **TEXT**；
+  3. 设计稿原文的公开输入列了 7 个（含 Leaf / Path / Index）；实现是 **5 个**，
+     路径与叶子全私有；
+  4. 挑战**无状态**（服务端不记账）—— 这一条与设计稿一致；
+  5. 设计稿的 D1–D6 六个决策点**已全部拍板并落地**（D1 完整方案 B / D2 离线工具生成、
+     root 与成员包分开保管 / D3 MiMC / D4 claim 之前先取挑战 / D5 `depth=10` 且是编译期
+     常量 / D6 名单可跨提案复用）。
 
 ## 7. 前端与 CLI
 
@@ -597,12 +748,19 @@ web/                        # Vue 3 前端门户
   出票只有「在浏览器本地生成选票」这一条路。
 - 门户与 CLI 都不再发送 `public_witness`；公开输入由服务端自拼。
 - **凭证领取走真两段式盲签名**（`web/src/lib/credential.ts` + `web/src/lib/blind-rsa.ts`）：
-  预留 → 本地盲化 → 盲签名 → 本地解盲 → attest。预留阶段请求体是空的 —— 公钥只在
-  attest 那一步才交给服务端。槽位被抢走时门户换一个槽位重来（最多 5 次）。
+  预留 → 本地盲化 → 盲签名 → 本地解盲 → attest。预留阶段的请求体里**没有公钥**
+  （开启资格校验时只有那三件资格材料）—— 公钥只在 attest 那一步才交给服务端。
+  槽位被抢走时门户换一个槽位重来（最多 5 次）。
 - **浏览器端 prover 已落地**（`web/src/lib/wasm-prover.ts` + `web/src/workers/ballot-prover.worker.ts`）：
   门户在本地生成密文、nullifier 与证明再提交，服务端拿不到明文选项（见 §6.10）。
   前提是门户静态目录里备好 `wasm_exec.js`、`ballot-prover.wasm`、`proving.key` 三个文件
   （`make web-wasm` / `make web-proving-key`）。
+- **「一人一票」在门户里多一步**（见 §6.11）：「我的身份」面板多一个「导入资格文件」
+  （`eligibility-<member_id>.json`）。领凭证时门户先向服务端要一次领取挑战，再把
+  成员包与挑战交给浏览器端 prover（`web/src/lib/eligibility-prover.ts`，密码学全在
+  WASM 里）出证明，最后带着证明去领凭证。
+  - **资格包只留在内存**：不写 `localStorage`、不上传，刷新页面就要重新导入。
+  - 前提是静态目录里还备好 `eligibility-proving.key`（`make web-eligibility-key PK=<路径>`）。
 - **nullifier 现在由 prover 派生**：出票时由 `ballot.ProveBallot` 在本地随机一个秘密
   `s` 并派生 `nullifier = MiMC(s, proposal_id)`，秘密不出本地。门户表单里的 nullifier
   字段仍可手工编辑（低频工具），但正式出票走 prover 这条路。
@@ -632,8 +790,10 @@ web/                        # Vue 3 前端门户
 
 - 后端 `ErrorHandler` 统一返回 `{ error, code }`：`code` 是稳定枚举
   （`INVALID_REQUEST` / `NOT_FOUND` / `UNAUTHORIZED` / `DOUBLE_VOTING` /
-  `CREDENTIAL_EXISTS` / `USER_ALREADY_VOTED` / `INVALID_CREDENTIAL` /
-  `DECRYPTION_SESSION_EXISTS` / `RESULT_ALREADY_PUBLISHED` / `INTERNAL_ERROR`），
+  `CREDENTIAL_EXISTS` / `CREDENTIAL_POOL_EMPTY` / `USER_ALREADY_VOTED` /
+  `INVALID_CREDENTIAL` / `DECRYPTION_SESSION_EXISTS` / `RESULT_ALREADY_PUBLISHED` /
+  `ELIGIBILITY_REQUIRED` / `INVALID_ELIGIBILITY_PROOF` / `ELIGIBILITY_ALREADY_USED` /
+  `ELIGIBILITY_NOT_ENABLED` / `INTERNAL_ERROR`），
   `error` 是面向开发者的英文或原始 Go error 细节。
 - 前端不再直接透传 `error`：`src/lib/api.ts` 把 `code` 一并带出，
   `src/lib/error-messages.ts` 的 `describeApiError(message, code, fallback)` 负责翻译，
@@ -665,6 +825,10 @@ web/                        # Vue 3 前端门户
   本地解盲 → attest），**不需要 admin token**（领取端点是公开的），服务端随机给出一个
   池槽位的凭证。服务端因此无法把凭证与投票人对应起来。槽位被抢走时客户端换一个槽位
   重来（最多 5 次）。
+  - **带资格领取**：`-eligibility <成员包.json> -proving-key <资格 proving key>`。
+    客户端先向服务端要一次领取挑战，再用成员包与资格 proving key 在本地出零知识证明，
+    最后带证明去领。**缺 `-proving-key` 直接报错**，不静默降级成「不带资格领取」——
+    那会让服务端把「没带资格」当成「没开资格校验」。
 - `credential-issue` 管理端签发：同样走真两段式，只是走管理端端点、可以指定
   `user_id`。
 - **份额文件的形状**：`decrypt-setup -out` 落盘的是**整个会话对象**
@@ -690,6 +854,25 @@ web/                        # Vue 3 前端门户
   - `result-get`
   - `anchors-list`
 
+### 7.5 离线工具：密钥生成与资格名单
+
+- `cmd/keygen` 生成 Groth16 密钥，两套电路各一把：
+  - `-circuit ballot`（默认）：`verifying.key`（0644，服务端 `crypto.vk_path`）/
+    `proving.key`（0600，客户端）
+  - `-circuit eligibility`：`eligibility-verifying.key`（服务端
+    `crypto.eligibility_vk_path`）/ `eligibility-proving.key`（客户端）
+  - 两套密钥**互不相通**（Groth16 的 setup 是 per-circuit 的）。
+- `cmd/eligibility-list -members <名单文件> -out <目录>` —— 离线名单工具，
+  不联网、不连服务端：
+  - 输入：每行一个成员 ID（空行与 `#` 开头行忽略，重复行去重，成员按 ID 排序后建树）
+  - 输出：`root.json`（给服务端配置）+ 每成员一份 `eligibility-<member_id>.json`
+    （0600，成员本人保管）
+  - **两份产物必须分开保管** —— 服务端只该拿到 root
+  - **每次运行都会重新生成资格秘密**，因此树根每次都不同：名单与资格包必须**成套**
+    保存，不能只留 root
+- Makefile 目标：`make eligibility-list`（构建名单工具）、
+  `make web-eligibility-key PK=<路径>`（把资格 proving key 放进门户静态目录）。
+
 ## 8. 测试策略
 
 - 后端统一使用 `go test ./...`
@@ -701,6 +884,29 @@ web/                        # Vue 3 前端门户
   - `internal/infrastructure/crypto/ballot` 单元测试（密文往返、证明往返、篡改任一公开输入
     验证失败、选项越界无法出证、错 nullifier 秘密无法出证、份额拆分与恢复、未压缩点与
     客户端加密入口）
+  - **资格密码学栈**：`internal/infrastructure/crypto/eligibility/eligibility_test.go`
+    —— 名单树与路径、证明往返、篡改公开输入验证失败、约束数护栏（< 12000）；
+    `internal/infrastructure/crypto/mimc/mimc_test.go` —— 共用 MiMC 的轮常量与哈希；
+    `internal/infrastructure/crypto/eligibility_service_test.go` —— 领域适配层
+    （根与验证密钥成对、挑战生成、验签）
+  - **资格相关的 usecase 单元测试**：`internal/usecase/registration_eligibility_test.go`
+    —— 挑战签发、未开启资格校验、带证明领取、资格使用记录、资格已被用过
+  - **资格端点的请求校验分支测试**：`internal/infrastructure/http/eligibility_endpoints_test.go`
+    —— 只给一半资格材料 → 400、非法 base64 → 400、未开启资格校验 → 409
+    `ELIGIBILITY_NOT_ENABLED`、空请求体仍然合法（没开启资格校验时）
+  - **资格使用记录的仓储测试**：`internal/infrastructure/persistence/eligibility_use_repository_test.go`
+    —— 唯一索引 `(proposal_id, qualification_id)` 挡住第二次使用
+  - **配置校验**：`internal/config/config_test.go` —— release 模式必须配资格根与
+    资格验证密钥、两者必须成对出现
+  - **资格证明的端到端测试**：`tests/e2e/eligibility_test.go` —— 路线图 T22 的验收 ①–⑤：
+    没带资格证明被拒且**池槽位不被消耗**、有效资格证明能领到凭证、同一份资格第二次
+    领取撞 409、跨提案复用被拒、领取请求体里**不许出现真人身份字段**
+  - **浏览器端资格 prover 的端到端测试**：`tests/e2e/wasm_eligibility_test.go` ——
+    node 驱动门户将要加载的那个 WASM 模块（`initEligibility` → `proveEligibility`），
+    服务端用**真的资格验证密钥**验这份证明，并断言去重键与 Go 侧算出来的一致。
+    缺 node 时跳过
+  - **CLI 带资格领取的测试**：`cmd/cli/eligibility_claim_test.go` —— 带 `-eligibility`
+    时先取挑战再出证明；缺 `-proving-key` 直接报错，不静默降级
   - **跨语言一致性测试**：`internal/infrastructure/crypto/ballot/kat_interop_test.go` 与
     `web/src/lib/ballot-cipher.test.ts` 共用一组已知答案向量 —— 浏览器端生成的密文
     必须能被 Go 侧解回同一个选项下标
@@ -743,6 +949,9 @@ web/                        # Vue 3 前端门户
   - `pnpm --dir web exec tsc --noEmit`
   - `pnpm --dir web run lint`
   - `pnpm --dir web run test`
+- **门户侧的资格编排测试**：`web/src/composables/useVotePortal.test.ts` ——
+  导入了资格包时「先取挑战 → 再把成员包与挑战交给 prover → 再把证明带进领取请求」，
+  领取请求体里只有那三样资格材料；资格证明失败时**不发起领取**。
 
 ### 8.1 并发投票压测工具（`cmd/loadtest`）
 
@@ -775,6 +984,8 @@ web/                        # Vue 3 前端门户
 - **只能在 debug 模式跑。** 客户端还没有 prover，release 模式下所有投票请求都会因验签失败被拒
   （工具发的是 `ZGV2LXByb29m`，即 `"dev-proof"` 的 base64）。release 模式下报告的状态分布会
   如实反映这一点（全 400），那不是服务端的真实容量。
+- **工具不支持资格证明**：它不会去取领取挑战、也不会出资格证明，因此在开启了
+  资格校验的服务端上，领取环节会被 400 `ELIGIBILITY_REQUIRED` 拒绝。
 - **压测数字反映的是存储层，不是投票逻辑。** SQLite 的单写者模型会把并发写串行化；按路线图
   §2.2，真正的**容量规划**（阈值、限流、PostgreSQL 基准）属 v0.3.0，这个工具提供的是
   **可复现脚本 + 一份实测输出**。
@@ -844,7 +1055,8 @@ make pg-test        # 起库 → 跑集成测试 → 关库
   证据见 `tests/e2e/client_prover_test.go`；**浏览器侧**也能（`cmd/ballot-wasm` 编译成
   WASM，门户在 Worker 里跑，见 §6.10），端到端证据见 `tests/e2e/wasm_prover_test.go`。
   前提：门户静态目录里备好 `wasm_exec.js` / `ballot-prover.wasm` / `proving.key`
-  三个文件，否则门户会报「下载 WASM 模块失败」。
+  三个文件，否则门户会报「下载 WASM 模块失败」；要用「一人一票」还需
+  `eligibility-proving.key`。
 - **明文选项对服务端不可知：CLI 与门户两侧都已闭合。** 密文、nullifier 与证明全部在
   客户端本地生成，服务端只提供公开的计票公钥（`GET .../election-key`），落库记录里
   只有密文。**服务端没有任何接收明文选项的入口** —— `ballot-draft`（服务端代加密）已删除。
@@ -865,6 +1077,23 @@ make pg-test        # 起库 → 跑集成测试 → 关库
   MiMC），秘密不出本地。门户表单里的 nullifier 字段仍可手工编辑（低频工具）。
 - 服务端的 `BallotNullifierGenerator` 仍在（供测试与工具用），但服务端不参与出票 ——
   正式出票的 nullifier 由 `ballot.ProveBallot` 在本地派生，不需要电路认可的 nullifier。
+- **「一人一票」已落地，但它的边界要说清楚**（见 §6.11）：
+  - **服务端强制的是「同一个资格只能领一次票」**，不是「同一个真人只能领一次票」。
+    资格由权威名单分配，名单本身的真实性由运营方负责。
+  - **「一人一票」只在公开领取端点上强制**：管理端签发（`POST /api/v1/credentials`）
+    不校验资格证明，运营方可以为指定 `user_id` 签发凭证。
+  - **资格包丢了就领不了了，没有找回路径**：资格秘密只存在于
+    `eligibility-<member_id>.json` 里，服务端不存秘密、也不存叶子。补发只能由
+    名单工具重新生成（那会换一套树根，等于换了一份名单）。
+  - **名单上限 1024 人**：`eligibility.TreeDepth = 10` 是编译期常量，改它要重编
+    电路与 WASM、重生成两套密钥，并让所有成员换新的资格包。
+  - **服务端在未开启资格校验时不强制一人一票**（`GET /healthz` 的 `eligibility`
+    字段会报出来）；release 模式强制开启，开发模式默认关闭。
+  - **门户的浏览器端资格路径仍需人工在真浏览器里点一遍**：仓库里没有 Playwright，
+    自动化只到 node 驱动 WASM（`tests/e2e/wasm_eligibility_test.go`）。
+  - **`cmd/loadtest` 不支持资格证明**（见 §8.1）：它不会取挑战、也不会出资格证明。
+  - **资格表不许与凭证、票据关联**：`eligibility_uses` 只存去重键。一旦能把资格
+    连到票，「分发不泄露身份」这条底线就破了。
 - **服务端没有「替用户选票」的联调接口**：`ballot-draft` 已删除，不要把它写成生产能力。
 - **压测工具只能在 debug 模式跑，且数字不是容量规划。** `cmd/loadtest` 提供的是
   「可复现脚本 + 实测输出」（见 §8.1）；SQLite 的单写者会把并发写串行化。真正的容量

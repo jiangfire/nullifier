@@ -9,7 +9,7 @@
   <a href="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml"><img src="https://github.com/jiangfire/nullifier/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-yellow.svg" alt="License: AGPL-3.0" /></a>
   <img src="https://img.shields.io/badge/go-1.25.4-00ADD8?logo=go&logoColor=white" alt="Go 1.25.4" />
-  <img src="https://img.shields.io/badge/coverage-74.1%25%20(repo)-yellow.svg" alt="Coverage 74.1% (repo-wide)" />
+  <img src="https://img.shields.io/badge/coverage-72.7%25%20(repo)-yellow.svg" alt="Coverage 72.7% (repo-wide)" />
 </p>
 
 ---
@@ -40,8 +40,13 @@ nullifier 把这两个动作拆开:
 > - **选票密文在客户端生成，CLI 与门户两侧都已接上。** 浏览器端与 CLI 都能在本地加密选票，
 >   服务端只提供公开的计票公钥；**门户现在有「在浏览器本地生成选票」入口**。
 >   服务端**没有任何**接收明文选项的入口（`ballot-draft` 已删除，守卫测试持续盯着）。
-> - **只适合内测与开发**，不要用于真实投票。仍未闭合的是「一人一票」的资格证明与
->   生产化验收，见 [`docs/roadmap.md`](./docs/roadmap.md) 的 v0.2.0 里程碑。
+> - **一人一票已落地：领凭证要过一次零知识「资格证明」。** 运营方用离线工具把权威成员名单
+>   做成一份 Merkle 承诺，**服务端只拿到名单的根** —— 它能验证「你有资格」，却**无法把你
+>   对应到任何成员**。同一份资格在同一个提案里只能领一次（跨提案互不关联）。
+>   ⚠️ **这是 release 模式的硬要求**：生产部署必须配好名单根与资格验证密钥，
+>   否则服务**启动失败** —— 详见下面的「配置」。
+> - **只适合内测与开发**，不要用于真实投票。仍未闭合的是**生产化验收**与门户的
+>   **浏览器自动化回归**，见 [`docs/roadmap.md`](./docs/roadmap.md) 的 v0.2.0 里程碑。
 
 ## 特性
 
@@ -55,6 +60,7 @@ nullifier 把这两个动作拆开:
 | 防重放 | 每票一个 `nullifier`,重复投票直接拒绝;nullifier 落库前归一成规范形式,变体写法绕不过唯一索引;nullifier 由秘密单向派生(浏览器端已能算出与电路一致的值) |
 | 并发防重投 | 8 个请求同时用**同一个 nullifier** 提交时,数据库唯一索引兜底 —— 恰好一张票入库,其余 409(有回归测试) |
 | 防冒充 | `proposal_id + user_id + user_pub_key + credential_signature` 四元组校验,并**验签凭证签名**(失败 401) |
+| 一人一票 | 领凭证要过一次**零知识资格证明**:运营方的权威名单做成 Merkle 承诺,**服务端只见名单的根** —— 它能验证「你有资格」,却无法把你对应到任何成员。同一份资格在同一个提案里只能领一次(跨提案互不关联)。**CLI** 用 `credential-claim -eligibility` 走这条路,**门户**在「身份」面板导入资格文件后本地出证明 |
 | 选择性披露 | 只能回答"你投过票吗",不能回答"你投了什么" |
 
 **计票与审计**
@@ -71,8 +77,8 @@ nullifier 把这两个动作拆开:
 
 | 形态 | 说明 |
 |---|---|
-| HTTP API | 15 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
-| CLI | 17 个命令,复用同一套 HTTP API,不绕过服务端校验（`ballot-prove` 除外 —— 它纯本地出证明） |
+| HTTP API | 18 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
+| CLI | 16 个命令,复用同一套 HTTP API,不绕过服务端校验（`ballot-prove` 除外 —— 它纯本地出证明） |
 | Web 门户 | Vue 3 单页应用,覆盖投票端与运营端全流程 |
 
 ## 快速开始
@@ -107,6 +113,8 @@ go run ./cmd/cli -admin-token dev-admin-token credential-issue \
   -proposal <proposal_id> -user u-1001 -out cred.json
 #    b) 匿名领取(公开端点,不需要 admin token;服务端随机给一张池里的凭证)
 #       —— 运营方不知道谁领了哪张,匿名性更好
+#       服务端开了资格校验(生产模式必开)时还要带上资格证明:
+#         -eligibility <资格文件> -proving-key <资格 proving key>
 go run ./cmd/cli credential-claim -proposal <proposal_id> -out cred.json
 
 # 4. 在本地加密选票、出证明并投票
@@ -146,6 +154,8 @@ pnpm --dir web install
 # 浏览器端 prover 的静态资源(先备齐,否则门户点「在浏览器本地生成选票」会报错)
 make web-wasm                          # -> web/public/ballot-prover.wasm + wasm_exec.js
 make web-proving-key PK=keys/proving.key   # -> web/public/proving.key(只给浏览器,不给服务端)
+make web-eligibility-key PK=keys/eligibility-proving.key   # -> web/public/eligibility-proving.key
+                                       #    (只在服务端开了资格校验时才需要)
 
 pnpm --dir web run dev
 ```
@@ -197,6 +207,8 @@ internal/di         Wire 装配          internal/config   viper 配置 + 运行
 | `DB_MAX_IDLE_CONNS` | `db.max_idle_conns` | `5` | 连接池闲置连接数 |
 | `DB_CONN_MAX_LIFETIME_SECONDS` | `db.conn_max_lifetime_seconds` | `3600` | 连接最大存活时间(秒) |
 | `CRYPTO_VK_PATH` | `crypto.vk_path` | 空 | **生产模式必填** |
+| `CRYPTO_ELIGIBILITY_ROOT` | `crypto.eligibility_root` | 空 | 资格名单的 Merkle 根(十六进制)。**与 `CRYPTO_ELIGIBILITY_VK_PATH` 必须成对出现**;**生产模式必填** |
+| `CRYPTO_ELIGIBILITY_VK_PATH` | `crypto.eligibility_vk_path` | 空 | 资格电路的验签密钥。**与 `CRYPTO_ELIGIBILITY_ROOT` 必须成对出现**;**生产模式必填** |
 | `CRYPTO_ISSUER_KEY_PATH` | `crypto.issuer_key_path` | `issuer_keys.json` | 签发密钥持久化 |
 | `CRYPTO_ISSUER_ROTATE_DAYS` | `crypto.issuer_rotate_days` | `90` | 签发密钥轮换周期 |
 | `SERVER_ADMIN_BEARER_TOKEN` | `server.admin_bearer_token` | 空 | 为空则启动时生成临时 token 并打印日志 |
@@ -226,6 +238,36 @@ go run ./cmd/keygen -dir ./keys      # 生成 verifying.key(0644) + proving.key(
 `verifying.key` 放服务端(`CRYPTO_VK_PATH` 指向它);**`proving.key` 只留在客户端侧,不要入库**。
 默认不覆盖已有文件,要覆盖加 `-force`。
 
+### 一人一票:资格名单与资格密钥
+
+生产模式**必须**配好资格校验,否则服务启动失败。分三步:
+
+```bash
+# 1. 生成资格名单(离线工具,跑在运营方或独立登记处的机器上)
+go run ./cmd/eligibility-list -members members.txt -out ./eligibility-out
+#    -> eligibility-out/root.json                 部署到服务端(crypto.eligibility_root)
+#    -> eligibility-out/eligibility-<member>.json  逐个走安全渠道发给本人
+
+# 2. 生成资格电路的密钥(与选票电路的密钥互不相通)
+go run ./cmd/keygen -circuit eligibility -dir ./keys
+#    -> keys/eligibility-verifying.key  放服务端(crypto.eligibility_vk_path)
+#    -> keys/eligibility-proving.key    只留在客户端侧,不要入库
+
+# 3. 领凭证时带上资格文件
+go run ./cmd/cli credential-claim -proposal <proposal_id> \
+  -eligibility ./eligibility-out/eligibility-<member>.json \
+  -proving-key ./keys/eligibility-proving.key -out cred.json
+```
+
+**服务端只拿到名单的根**:它能验证「这个资格在名单里」,却无法把资格对应到任何成员。
+同一份资格在同一个提案里只能领一次(跨提案互不关联)。
+⚠️ 资格文件是**秘密材料** —— 拿到它就能领这一票,发放必须走安全渠道;**丢了找不回来**。
+名单规模上限 1024 人(树深是编译期常量)。
+
+**没开启资格校验的部署**(两项都不配)行为与从前完全一样,`claim` 的请求体仍然可以为空 ——
+但**生产模式不再允许这种配置**。`GET /healthz` 的 `eligibility` 字段、启动日志的
+`eligibility_enforced` 字段,都会告诉你服务端到底有没有在强制一人一票。
+
 ### 生产部署顺序:先迁移,再启动
 
 `release` 模式下服务**不会**在启动时改表 —— 多副本同时启动会争 DDL 锁,而且改表应该是一个
@@ -248,7 +290,7 @@ nullifier-server             # 再起服务
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/healthz` | 健康检查(响应含 `debug` 布尔字段) |
+| `GET` | `/healthz` | 健康检查(响应含 `debug` 与 `eligibility` 两个布尔字段) |
 | `GET` | `/api/v1/proposals` | 列出全部提案(按创建时间倒序,含已关闭/未开始) |
 | `GET` | `/api/v1/proposals/open` | 时间窗口内的开放提案 |
 | `POST` | `/api/v1/votes` | 提交匿名投票(7 个字段全部必填;公开输入由服务端自拼,不收 `public_witness`) |
@@ -256,7 +298,8 @@ nullifier-server             # 再起服务
 | `GET` | `/api/v1/proposals/:id/election-key` | 计票公钥(公开值,客户端本地加密用;未压缩形式 base64) |
 | `GET` | `/api/v1/proposals/:id/results` | 已发布的计票结果 |
 | `GET` | `/api/v1/proposals/:id/audit-anchors` | 导出审计锚点 |
-| `POST` | `/api/v1/proposals/:id/credentials/claim` | **预留**一个凭证池槽位(请求体为空,不收公钥) |
+| `POST` | `/api/v1/proposals/:id/credentials/eligibility-challenge` | 签发一次领取挑战(公开、无状态);返回 `{proposal_id, root, depth, challenge}` |
+| `POST` | `/api/v1/proposals/:id/credentials/claim` | **预留**一个凭证池槽位(不收公钥);开了资格校验时请求体带 `{eligibility_proof, qualification_id, challenge}`,资格不过不消耗槽位 |
 | `POST` | `/api/v1/proposals/:id/credentials/blind-sign` | 对**盲化消息**做盲签名(只覆盖池里还空着的槽位) |
 | `POST` | `/api/v1/proposals/:id/credentials/attest` | 交回解盲后的签名,服务端验签后落库 |
 
@@ -306,10 +349,10 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 | 口径 | 数值 | 覆盖范围 |
 |---|---|---|
-| 门槛口径 | **79.5%** | `scripts/check-coverage.sh` 选中的 11 个包:usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server(2026-10-21 实测) |
-| 全仓口径 | **74.1%** | `./...` 全部包(2026-10-20 实测) |
+| 门槛口径 | **80.8%** | `scripts/check-coverage.sh` 选中的 11 个包:usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server(2026-10-25 实测) |
+| 全仓口径 | **72.7%** | `./...` 全部包(2026-10-25 实测) |
 
-门槛是**逐包分档**的,每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`,单个包回退会直接让 CI 变红 —— 不再是"一个总和撑着,低覆盖率的包悄悄退化"。当前最低的一档是 `internal/infrastructure/persistence`(60.1%),抬门槛时它会先卡住。**新增代码请一并补测**。
+门槛是**逐包分档**的,每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`,单个包回退会直接让 CI 变红 —— 不再是"一个总和撑着,低覆盖率的包悄悄退化"。当前最低的一档是 `internal/infrastructure/persistence`(63.9%),抬门槛时它会先卡住。**新增代码请一并补测**。
 
 ## 项目状态与限制
 
@@ -317,13 +360,16 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 - **证明链:服务端、CLI、浏览器三侧都通了。** 真实 Groth16 电路(`internal/infrastructure/crypto/ballot/`)、`cmd/keygen` 密钥生成流程、服务端按请求字段自拼公开输入并真实验签都已落地 —— 篡改任一公开输入都会验签失败。**CLI 能本地生成 proof**(`ballot-prove`,用本地 proving key,证明不经过服务端);**浏览器也能**(`cmd/ballot-wasm` 编译成 WASM,门户在 Web Worker 里加载它出票)。`crypto.vk_path` 为空时验证器只要求 proof 非空(开发模式),本地「验证通过」不代表真的验过。
 - **选票密文在客户端生成,CLI 与门户两侧都已闭合。** 服务端只提供公开的计票公钥(`GET /api/v1/proposals/:id/election-key`),落库记录里只有密文。门户的出票入口是「在浏览器本地生成选票」;CLI 是 `ballot-encrypt` + `ballot-prove`。两边的点编码**逐字节一致**,由一组跨语言已知答案向量锁死。端到端证据:`tests/e2e/client_prover_test.go`(CLI)与 `tests/e2e/wasm_prover_test.go`(浏览器 WASM 模块,node 驱动)。**服务端没有任何接收明文选项的入口** —— `ballot-draft`(服务端代加密)已删除,`tests/architecture/` 持续盯着这条底线。
-- **浏览器端 prover 的三个静态资源要部署时备齐。** `wasm_exec.js`、`ballot-prover.wasm`(约 11.9 MB,gzip 后约 2.8 MB)、`proving.key`(约 1.2 MB):`make web-wasm` 与 `make web-proving-key PK=<路径>`。首次出票要下载它们并初始化证明器(浏览器实测约 12~14 秒,含编译电路),出证明约 3 秒。**proving key 只在客户端** —— 服务端只拿 verifying key。
+- **浏览器端 prover 的三个静态资源要部署时备齐。** `wasm_exec.js`、`ballot-prover.wasm`(约 11.9 MB,gzip 后约 2.8 MB)、`proving.key`(约 1.2 MB):`make web-wasm` 与 `make web-proving-key PK=<路径>`。首次出票要下载它们并初始化证明器(浏览器实测约 12~14 秒,含编译电路),出证明约 3 秒。**proving key 只在客户端** —— 服务端只拿 verifying key。服务端开了资格校验时还要多备一个 `eligibility-proving.key`(`make web-eligibility-key PK=<路径>`)—— **它与选票的 proving key 不是同一把**。
 - **门户的浏览器路径已在真实浏览器里跑过（2026-10-25）。** 端到端证据有两条：node 驱动同一个 WASM 模块的自动化用例（`tests/e2e/wasm_prover_test.go`），以及一次**真实浏览器**（Chromium / Electron）的人工验收 —— 静态资源三件套真实加载 → 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 服务端以真 verifying key 验签通过（201）→ 提案关闭后计票还原出所选选项。⚠️ 但**仓库里仍然没有浏览器自动化**（无 Playwright），门户的 UI 交互仍要人工核对；首次上线仍建议人工点一次出票流程 —— 这次验收正是靠它挖出了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而不是线路名，领取流程会停在 claim 之后）。
 - **凭证签名现在会被验证。** 投票落库前会调用签发方验签,伪造签名的请求返回 401。
 - **凭证签发是真两段式盲签名。** 客户端本地盲化(`sha256(user_id ‖ 0x00 ‖ user_pub_key)`),签发方在**签名阶段**只见盲化消息 —— 它没有、也不需要私钥以外的任何客户端秘密。⚠️ 口径:最后一次 attest 时服务端会看到公钥与 `user_id`,因为验签必须重算凭证消息;达成的是「签发方看不到被签内容」,不是「服务端全程不知道客户端是谁」。
-- **凭证不再由 admin 逐个分发。** 改为「凭证池 + 投票人匿名随机领取」：admin 往池里批量投放预签凭证，投票人自己随机领一张（`POST /api/v1/proposals/:id/credentials/claim`），运营方不再天然掌握「哪个凭证给了谁」。**代价：服务端无法强制一人一票** —— 随机领取意味着服务端看不出同一个人领了几次，资格证明是后续要补的。
+- **凭证不再由 admin 逐个分发。** 改为「凭证池 + 投票人匿名随机领取」：admin 往池里批量投放预签凭证，投票人自己随机领一张（`POST /api/v1/proposals/:id/credentials/claim`），运营方不再天然掌握「哪个凭证给了谁」。**一人一票由资格证明补回**（见下）。
+- **一人一票靠零知识资格证明强制。** 运营方的权威名单做成 Merkle 承诺，**服务端只拿到名单的根** —— 它能验证「这个资格在名单里」，却**无法把资格对应到任何成员**。去重键 `QualificationID = MiMC(Leaf, ProposalID)` 按提案派生，同一提案里同一资格只能领一次（跨提案互不关联），强制点是新表 `eligibility_uses` 的唯一索引。领凭证前先取一次挑战（`eligibility-challenge`），把资格证明带进 claim；**资格不过不消耗池槽位**。CLI 走 `credential-claim -eligibility`，门户在「身份」面板导入资格文件后本地出证明（资格包只留内存，不写 localStorage、不上传）。
+  - ⚠️ **release 模式必须配 `crypto.eligibility_root` + `crypto.eligibility_vk_path`，否则启动失败。** 两项必须成对出现 —— 缺了资格校验的服务端只是个能发凭证的服务器。生产部署的三步（生成名单 → 生成资格密钥 → 部署）见上面的「一人一票：资格名单与资格密钥」。
+  - ⚠️ **门户的资格领取路径没有浏览器自动化**（仓库无 Playwright）—— 自动化证据只到 node 驱动的 WASM 模块，真浏览器里人工点一遍仍要做。⚠️ `cmd/loadtest` 不支持资格证明（只在未开启资格校验的服务上可用）。⚠️ **资格包丢失找不回来**（它是秘密材料）。⚠️ **真实名单的内容与成员标识形式仍需运营方提供**；单份名单上限 1024 人。
 - **`decryption/setup` 拒绝"投票开放中"的提案**,运营上必须在 `starts_at` 之前完成初始化。
-- **生产部署必须显式设置** `SERVER_ADMIN_BEARER_TOKEN` 与 `SERVER_CORS_ALLOWED_ORIGINS`；`release` 模式下缺 admin token 会直接启动失败。`configs/config.production.yaml` **不会**被自动加载(viper 只找 `config.yaml`),用 `CONFIG_FILE=./configs/config.production.yaml` 启动即可 —— **显式指定的文件不存在时服务直接启动失败**,不会静默回退到开发配置;启动日志的 `config_file` 字段会打印实际加载的文件路径,上线先核一眼。详见该文件内的注释。
+- **生产部署必须显式设置** `SERVER_ADMIN_BEARER_TOKEN` 与 `SERVER_CORS_ALLOWED_ORIGINS`；`release` 模式下缺 admin token 会直接启动失败,**缺 `CRYPTO_ELIGIBILITY_ROOT` / `CRYPTO_ELIGIBILITY_VK_PATH` 也会直接启动失败**(一人一票是硬要求)。`configs/config.production.yaml` **不会**被自动加载(viper 只找 `config.yaml`),用 `CONFIG_FILE=./configs/config.production.yaml` 启动即可 —— **显式指定的文件不存在时服务直接启动失败**,不会静默回退到开发配置;启动日志的 `config_file` 字段会打印实际加载的文件路径,上线先核一眼。详见该文件内的注释。
 
 当前实现口径见 [`docs/techspec.md`](./docs/techspec.md),分层上下文索引见 [`docs/project-map.md`](./docs/project-map.md),产品路线图见 [`docs/roadmap.md`](./docs/roadmap.md)。**上线前请逐项核对** [`docs/deployment-checklist.md`](./docs/deployment-checklist.md)。
 

@@ -17,7 +17,8 @@
 ## 0. 一句话架构
 
 匿名投票系统：**发资格的人看不到选谁**（凭证与选票内容完全无关）→ **记选票的人看不到是谁**（votes 表无用户标识）→
-**验票真伪但不验身份**（零知识证明）。Go 后端（Gin + GORM + Wire）+ Vue 3 门户 + 复用同一套 HTTP API 的 CLI。
+**验票真伪但不验身份**（零知识证明）。**「一人一票」由零知识资格证明强制**（服务端能对去重键去重，
+却不知道这份资格属于谁）。Go 后端（Gin + GORM + Wire）+ Vue 3 门户 + 复用同一套 HTTP API 的 CLI。
 
 技术栈：Go 1.25.4 · Gin 1.12 · GORM 1.31 · Wire · gnark 0.7.1（BN254：Groth16 + twisted Edwards）· circl blindrsa（kryptology 1.8）· SQLite/PostgreSQL · Vue 3.5 + TypeScript 5.9 + Rsbuild
 
@@ -33,19 +34,21 @@
 | 位置 | 职责 |
 |---|---|
 | `cmd/server/main.go` | 服务入口。加载配置 → 生成/校验 admin token → 建 logger → `di.InitializeServer` → `server.Run()`；`-migrate` 只跑迁移后退出（`serve(migrateOnly)`） |
-| `cmd/keygen/main.go` | 生成选票电路的 Groth16 密钥：`verifying.key`（0644，服务端用）/ `proving.key`（0600，**只在客户端侧**）；打印 verifying key 的 sha256 指纹；默认不覆盖已有文件（`-force` 才覆盖） |
-| `cmd/cli/main.go` | 17 个子命令的 CLI 客户端，**只走 HTTP API**，不绕过服务端校验 |
-| `cmd/ballot-wasm/main.go` | **浏览器端 prover 的 WASM 模块**（`GOOS=js GOARCH=wasm` 构建，见 §1.10）。在全局对象上注册 `nullifierProver`（`init` / `prove`）；非 js/wasm 平台有同名 stub，让 `go build ./...` 照常通过 |
-| `internal/di/providers.go` | 全部 Wire provider 的实现体（logger/db/各仓储/各 usecase/handler）；密码学的装配点在这里：`NewProofVerifier` `NewEncrypter` `NewThresholdCrypto` `NewNullifierGenerator` `NewCredentialIssuer` |
+| `cmd/keygen/main.go` | 生成 Groth16 密钥，**两套电路各一把**：`-circuit ballot`（默认）出 `verifying.key`（0644，服务端用）/ `proving.key`（0600，**只在客户端侧**）；`-circuit eligibility` 出 `eligibility-verifying.key` / `eligibility-proving.key`；打印 verifying key 的 sha256 指纹；默认不覆盖已有文件（`-force` 才覆盖） |
+| `cmd/eligibility-list/main.go` | **离线名单工具**（不联网、不连服务端）：`-members <名单文件> -out <目录>` → `root.json`（给服务端配 `crypto.eligibility_root`）+ 每成员一份 `eligibility-<member_id>.json`（0600，成员本人保管）。两份产物必须分开保管 |
+| `cmd/cli/main.go` | 16 个子命令的 CLI 客户端，**只走 HTTP API**，不绕过服务端校验 |
+| `cmd/ballot-wasm/main.go` | **浏览器端 prover 的 WASM 模块**（`GOOS=js GOARCH=wasm` 构建，见 §1.10）。在全局对象上注册 `nullifierProver`（**四个** API：`init` / `prove` / `initEligibility` / `proveEligibility` —— 选票与资格两套电路在同一个模块里）；非 js/wasm 平台有同名 stub，让 `go build ./...` 照常通过 |
+| `internal/di/providers.go` | 全部 Wire provider 的实现体（logger/db/各仓储/各 usecase/handler）；密码学的装配点在这里：`NewProofVerifier` `NewEncrypter` `NewThresholdCrypto` `NewNullifierGenerator` `NewCredentialIssuer` `NewEligibilityService` `NewEligibilityUseRepository` |
 | `internal/di/wire.go` + `wire_gen.go` | Wire 声明与生成产物。**当前是手工同步的**（见陷阱） |
-| `internal/config/config.go` | viper 加载 + 运行期校验；`server.mode` 推导 `Config.DebugMode`（`isDebugMode`），release/prod/production 走 `IsReleaseMode`；`CONFIG_FILE` 显式指定配置文件路径 |
+| `internal/config/config.go` | viper 加载 + 运行期校验；`server.mode` 推导 `Config.DebugMode`（`isDebugMode`），release/prod/production 走 `IsReleaseMode`；`CONFIG_FILE` 显式指定配置文件路径；`crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对**，且在 release 模式下**两者都必填** |
 | `internal/config/admin_token.go` | admin bearer token 兜底生成（32 字节随机，base64url） |
 
 **模式**：usecase 构造函数是纯 DI 传参，无全局变量；logger 允许为 nil（自动降级 `zap.NewNop()`）。
 
 **陷阱**：
 - `cmd/server/main.go` 的 `serve()` —— **只有「临时生成」的 admin token 会进日志**（`generatedAdminToken` 分支的 Warn）；配置态的 token 不写日志。启动日志里有 `config_file`（实际加载的配置文件路径）、`proof_verification_enabled` 字段，以及 `crypto.vk_path is empty` 的告警。
-- `internal/config/config.go` 的 `load()` —— `server.mode` 默认 `release`；release/prod/production **强制要求** `crypto.vk_path` **和** `server.admin_bearer_token`（`IsReleaseMode`）。配置文件缺失时服务直接启动失败，这是有意的兜底。
+- `internal/config/config.go` 的 `load()` —— `server.mode` 默认 `release`；release/prod/production **强制要求** `crypto.vk_path` **和** `server.admin_bearer_token`（`IsReleaseMode`），**并且强制要求 `crypto.eligibility_root` 与 `crypto.eligibility_vk_path` 同时存在**（没有它们服务端无法强制一人一票）。配置文件缺失时服务直接启动失败，这是有意的兜底。
+- `internal/config/config.go` 的 `load()` —— `crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对出现**（任何模式）：只配一个 → 启动失败，不静默降级成「不校验」。
 - `internal/config/config.go` 的 `load()` —— 配置文件默认找名为 `config.*` 的文件（`SetConfigName("config")`）；**`CONFIG_FILE` 环境变量可以显式指定路径**（`ConfigFileEnvVar`），生产环境用它加载 `configs/config.production.yaml`。显式文件不存在 → 启动失败。
 - **`internal/di/wire_gen.go` 目前是手工同步的**：本仓库离线跑不了 wire 生成器（`go.sum` 里 `github.com/google/subcommands` 只有 `/go.mod` 哈希，缺模块内容哈希，`go run github.com/google/wire/cmd/wire` 需要联网补依赖）。改了 `internal/di/wire.go` 必须**手工**改 `wire_gen.go`，provider 的声明顺序与实参顺序要一起对齐。
 - `go.mod` 里还留着 `go.dedis.ch/kyber/v3`，但仓库里已经**没有任何 Go 文件引用它**（`kyber_elgamal.go` 已删）；`go mod tidy` 会把它摘掉。
@@ -56,15 +59,18 @@
 
 | 子包 | 内容 |
 |---|---|
-| `domain/entity/` | `Proposal` `Vote` `Credential` `CredentialClaim` `VoteParticipation` `DecryptionSession` `TallyResult` `AuditAnchor` `Proof` `BallotStatement` |
-| `domain/repository/` | 8 个仓储接口 + `errors.go`（`ErrNotFound` `ErrDuplicateVote` `ErrDuplicateParticipation`） |
-| `domain/crypto/` | 4 个接口：`ProofVerifier` `Encrypter` `CredentialIssuer` `NullifierGenerator` |
+| `domain/entity/` | `Proposal` `Vote` `Credential` `CredentialClaim` `VoteParticipation` `DecryptionSession` `TallyResult` `AuditAnchor` `Proof` `BallotStatement` `EligibilityUse` |
+| `domain/repository/` | 9 个仓储接口 + `errors.go`（`ErrNotFound` `ErrDuplicateVote` `ErrDuplicateParticipation` `ErrDuplicateEligibilityUse`） |
+| `domain/crypto/` | 5 个接口：`ProofVerifier` `Encrypter` `CredentialIssuer` `NullifierGenerator` `EligibilityService` |
 
 **本轮的关键类型变更**：
 - `domain/entity/proof.go` 的 `BallotStatement` 取代了旧的 `PublicInputs`：它是**服务端拼装**的公开输入声明（`ProposalID` `Nullifier` `ElectionPublicKey` `Ciphertext` `NumOptions`）。客户端不提交公开输入。
 - `domain/crypto/proof_verifier.go`：`Verify(proof *entity.Proof, statement entity.BallotStatement) error` —— 不再接受客户端自由提交的公开输入。
 - `domain/crypto/credential_issuer.go`：`CredentialIssuer` 增加 `VerifyCredential(userID, userPubKey, signature)`；投票路径落库前必须调用它。
 - `domain/crypto/nullifier.go`：`NullifierGenerator.GenerateNullifier() (string, error)` —— 要求 nullifier 的**编码规范唯一**（见 §3 陷阱 2）。
+- `domain/crypto/eligibility.go`：`EligibilityService`（`Enabled` / `Root` / `NewChallenge` / `Verify`）+ `EligibilityStatement`（`Root` / `ProposalID` / `Challenge` / `QualificationID`）—— 「一人一票」的服务端侧接口。
+- `domain/entity/eligibility_use.go`：`EligibilityUse`（`id` / `proposal_id` / `qualification_id` / `used_at`），`(proposal_id, qualification_id)` 复合 `uniqueIndex` —— **一人一票的强制点**。只存去重键，**不许与凭证、票据关联**。
+- `domain/repository/eligibility_use_repo.go`：`EligibilityUseRepository`（`RecordUse` / `CountUses`）；重复使用返回 `ErrDuplicateEligibilityUse`。
 
 **模式**：GORM tag 直接写在实体上（`entity.Vote` 的 `Nullifier` 是 `uniqueIndex`，`entity.VoteParticipation` 的 `(proposal_id, user_hash)` 是复合 `uniqueIndex:idx_vote_participation`）。数据库唯一约束是防重投的**最终防线**，不是 usecase 里的先查后写。
 
@@ -77,7 +83,7 @@
 | 用例 | 文件 | 负责 |
 |---|---|---|
 | `ProposalUseCase` | `proposal.go` | 创建/列表；创建时去重、去空、校验 ≥2 选项、`ends_at > starts_at`；新提案 `Status` 固定为 `open` |
-| `RegisterUseCase` | `registration.go` | 签发凭证；凭证池 + 投票人匿名领取 |
+| `RegisterUseCase` | `registration.go` | 签发凭证；凭证池 + 投票人匿名领取；**资格校验**（`IssueEligibilityChallenge` / `ReserveCredential` 带资格材料） |
 | `VotingUseCase` | `voting.go` | **核心**。见 §2.1 投票链路 |
 | `ParticipationUseCase` | `participation.go` | 「你投过票吗」；`HasVotedWithCredential` 必须带凭证材料 |
 | `TallyUseCase` | `tally.go` | 门限会话初始化、发布结果、审计锚点。见 §2.2 计票链路 |
@@ -89,6 +95,11 @@
 
 **计票链路的密码学口径变了**：`tally.go` 的 `ThresholdCrypto` 接口现在是 `Encrypt(publicKey []byte, optionIndex int)` / `Decrypt(privateKey, ciphertext []byte, numOptions int) (int, error)` —— 加密与解密的单位是**选项下标**，不是任意明文。
 
+**领取路径上的资格校验**（`registration.go`）：`NewRegisterUseCaseWithEligibility` 是生产形态的构造器 —— 它额外接入资格使用仓储与资格校验器。
+- `IssueEligibilityChallenge` 签发一次领取挑战，**服务端不记账**（挑战无状态，重放由去重键挡住）。
+- `ReserveCredential(ctx, proposalID, material)` 的顺序是「**验资格 → 取槽位（不占位）→ 记资格使用**」：资格不过不消耗池槽位；唯一约束冲突时槽位还没被标记领取。
+- 资格材料三件缺一不可（证明 + 去重键 + 挑战）；开了资格校验却没带材料 → `ErrEligibilityRequired`。
+
 **模式**：错误用 `fmt.Errorf("%w: ...", ErrXxx)` 包装 `internal/usecase/errors.go` 里的哨兵错误；HTTP 层靠 `errors.Is` 映射状态码。
 
 **陷阱**：`voting.go` 有**两条保存路径**——仓储实现了 `atomicVoteParticipationSaver` 就走事务（`SaveWithParticipation`），否则退化成先存票再存参与状态的非原子路径。目前 GORM 仓储实现了事务路径，mock 仓储没有。
@@ -97,7 +108,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `server.go` | 建 engine、挂 4 个中间件、注册公共组与 admin 组；`GET /healthz` 返回 `{"status":"ok","debug":<bool>}` |
+| `server.go` | 建 engine、挂 4 个中间件、注册公共组与 admin 组；`GET /healthz` 返回 `{"status":"ok","debug":<bool>,"eligibility":<bool>}`（`eligibility` = 服务端是否在强制一人一票） |
 | `handler.go` | 全部 handler；DTO 定义与绑定都在这里 |
 | `middleware/admin_auth.go` | Bearer Token 鉴权 |
 | `middleware/cors.go` | 白名单 Origin 精确匹配 |
@@ -114,7 +125,8 @@
 | GET | `/api/v1/proposals` | 无 |
 | GET | `/api/v1/proposals/open` | 无 |
 | POST | `/api/v1/proposals/:id/vote-status` | 无（需凭证材料） |
-| POST | `/api/v1/proposals/:id/credentials/claim` | 无（匿名领取凭证，**只预留**） |
+| POST | `/api/v1/proposals/:id/credentials/eligibility-challenge` | 无（领凭证前取一次挑战） |
+| POST | `/api/v1/proposals/:id/credentials/claim` | 无（匿名领取凭证，**只预留**；开启资格校验时带三件资格材料） |
 | POST | `/api/v1/proposals/:id/credentials/blind-sign` | 无（**只签池里还空着的槽位**） |
 | POST | `/api/v1/proposals/:id/credentials/attest` | 无（先验签再落库） |
 | GET | `/api/v1/proposals/:id/results` | 无 |
@@ -132,12 +144,13 @@
 **本轮的接口变更**：
 - `submitVotePayload` **没有 `public_witness` 字段** —— 旧的「客户端自由提交公开输入」入口彻底消失，公开输入由服务端拼装。
 - **`POST /proposals/:id/ballot-draft` 已删除**（服务端代加密的联调端点）—— 服务端不再有任何接收明文选项的入口，守卫测试 `tests/architecture/` 盯着这条底线。
+- **claim 请求体从「空」变成「可选的三件资格材料」**：`claimCredentialPayload` = `eligibility_proof`（base64）/ `qualification_id`（64 位 hex）/ `challenge`（64 位 hex）。三件要么都给、要么都不给（只给一半 → 400 `INVALID_REQUEST`）。**这里不许出现真人身份字段** —— 资格材料里只有零知识证明与两个公开输入。
 - `NewHandlerWithTally(..., logger)` 是 handler 的装配入口；handler **不感知运行模式** —— debug 模式只影响 `GET /healthz` 报出的 `debug` 字段。
 
 **陷阱**：
 - `middleware/admin_auth.go` 用 `!=` 做字符串比较，**不是常数时间比较**。
 - `middleware/error_handler.go` 的 `publicErrorMessage` —— `INVALID_REQUEST` 直接回 `err.Error()`，会把内部错误细节透出；其他 code 都做了归一化。改文案时注意前后端 `error-messages.ts` 的映射是按英文短语正则匹配的。
-- 错误码枚举是**前后端契约**：`INVALID_REQUEST` `NOT_FOUND` `UNAUTHORIZED` `DOUBLE_VOTING` `CREDENTIAL_EXISTS` `CREDENTIAL_POOL_EMPTY` `USER_ALREADY_VOTED` `INVALID_CREDENTIAL` `DECRYPTION_SESSION_EXISTS` `RESULT_ALREADY_PUBLISHED` `INTERNAL_ERROR`。
+- 错误码枚举是**前后端契约**：`INVALID_REQUEST` `NOT_FOUND` `UNAUTHORIZED` `DOUBLE_VOTING` `CREDENTIAL_EXISTS` `CREDENTIAL_POOL_EMPTY` `USER_ALREADY_VOTED` `INVALID_CREDENTIAL` `DECRYPTION_SESSION_EXISTS` `RESULT_ALREADY_PUBLISHED` `ELIGIBILITY_REQUIRED` `INVALID_ELIGIBILITY_PROOF` `ELIGIBILITY_ALREADY_USED` `ELIGIBILITY_NOT_ENABLED` `INTERNAL_ERROR`。
 
 ### 1.5 持久化层 —— `internal/infrastructure/persistence/`
 
@@ -147,14 +160,14 @@
 | `db_env.go` | 从环境变量读 DB 配置（`DB_DRIVER` 等，`GetDBConfigFromEnv`） |
 | `base.go` | 泛型仓储基类（`BaseRepository[T]`） |
 | `migration.go` | `AutoMigrate` + `SchemaReady` + 历史 schema 兼容迁移（`migrateLegacyCredentialSchema`） |
-| `*_repository.go` | 8 个仓储实现（vote / proposal / credential / credential_claim / participation / decryption_session / tally_result / audit_anchor） |
+| `*_repository.go` | 9 个仓储实现（vote / proposal / credential / credential_claim / participation / decryption_session / tally_result / audit_anchor / **eligibility_use**） |
 
 **模式**：仓储接口方法签名都带 `ctx`；`SaveWithParticipation` 用 `clause.OnConflict{DoNothing}` + `RowsAffected == 0` 检测重复参与，冲突时返回 `ErrDuplicateParticipation`。
 
 **陷阱**：
 - `db.go` 的 `applyPoolConfig` —— PostgreSQL 的**连接池参数**由 `db.max_open_conns` / `db.max_idle_conns` / `db.conn_max_lifetime_seconds` 配置（默认 25 / 5 / 3600 秒），为 0 表示不改动 `database/sql` 默认值。
 - `db.go` 的 `newSQLiteDB` —— SQLite 文件库**没开 WAL**，也没设 busy timeout。
-- `migration.go` 的 `AutoMigrate` —— 每次迁移都会回填 `options_json`（`WHERE options_json IS NULL OR = ''` → `'[]'`）。**release 模式启动不再自动迁移**，改表要走独立的 `nullifier-server -migrate` 步骤（`config.AutoMigrate` / `di.Migrate`）。
+- `migration.go` 的 `AutoMigrate` —— 每次迁移都会回填 `options_json`（`WHERE options_json IS NULL OR = ''` → `'[]'`）。**release 模式启动不再自动迁移**，改表要走独立的 `nullifier-server -migrate` 步骤（`config.AutoMigrate` / `di.Migrate`）。新表 `eligibility_uses`（`id` / `proposal_id` / `qualification_id` / `used_at`，唯一索引 `(proposal_id, qualification_id)`）也在迁移清单里，`SchemaReady` 会检查它。
 - `db_env.go` 的 `GetDBConfigFromEnv` —— `GO_ENV=test` 时 SQLite 强制切 `:memory:`。
 
 ### 1.6 密码学层 —— `internal/infrastructure/crypto/`
@@ -166,7 +179,7 @@
 | `ballot/group.go` | 曲线点与标量工具：`Point`（仿射坐标）、`parsePoint`（**在曲线上 + 在素数阶子群里**）、`scalarMul`、随机标量采样 |
 | `ballot/keys.go` | 计票密钥对（`GenerateKeyPair`）、**Fr 上的 Shamir 拆份额 / 恢复**（`SplitSecret` `RecoverSecret`）；份额编码 = **4 字节下标（大端 uint32）+ 32 字节取值** |
 | `ballot/cipher.go` | **v3 选票密文**：`EncryptBallot` / `DecryptBallotOption` / `ValidateBallotCiphertext` / `parseCiphertext` |
-| `ballot/nullifier.go` | `DeriveProposalField`（SHA-256 → Fr）、`DeriveNullifier`（**MiMC**）、`mimcHash`（与 gnark `std/hash/mimc` 逐位一致的镜像实现） |
+| `ballot/nullifier.go` | `DeriveProposalField`（SHA-256 → Fr）、`DeriveNullifier`（**MiMC**，走共享的 `crypto/mimc`） |
 | `ballot/encoding.go` | `EncodeScalarHex` / `ParseScalarHex`（**拒绝式**规范编码检查）/ `GenerateNullifierSecret` |
 | `ballot/circuit.go` | 真实 Groth16 选票电路 `ballotCircuit` + `assertLessThan`（8 位分解的范围检查） |
 | `ballot/statement.go` | `PublicInputs`（电路公开输入的域元素形式）与 `BuildPublicInputs(statement entity.BallotStatement)` |
@@ -178,6 +191,26 @@
 
 **电路形状**（`ballot/circuit.go`）：公开输入 **9 个**（提案 ID 域元素、nullifier、计票公钥 XY、密文 a 的 XY、密文 b 的 XY、选项数），私有见证 **3 个**（选项下标 `m`、随机数 `r`、nullifier 秘密）。约束三条：`a = r·G`、`b = m·G + r·Y`、`m < NumOptions`（8 位分解 + 最高位检查）、`nullifier = MiMC(secret, proposal_id)`。实测 **7917 条约束**，证明与验证都是毫秒量级（本机实测证明约 20ms、验证约 1–2ms）。
 
+**`crypto/eligibility/` —— 资格密码学栈（「一人一票」，T22）**
+
+| 文件 | 内容 |
+|---|---|
+| `eligibility/merkle.go` | 名单树与两种产物：`MemberPackage`（成员本人保管：秘密 + 叶子 + Merkle 路径）/ `ListPackage`（给服务端的根）；`BuildTree` / `DeriveLeaf` / `DeriveQualificationID` / `DecodeField`（**拒绝**非规范编码） |
+| `eligibility/circuit.go` | 资格电路 `eligibilityCircuit` + **`TreeDepth = 10`**（编译期常量，名单上限 1024 人） |
+| `eligibility/statement.go` | 公开输入 `Statement`（**定长 5 个**）与 `BuildStatement` / `DeriveSessionBinding` |
+| `eligibility/prover.go` | Groth16 `Prover` / `Verifier` / `GenerateKeys` / `Constraints` |
+| `eligibility/client.go` | 客户端一站式出证明：`Prover.ProveEligibility`（重算叶子并与包比对 → 由叶子推出去重键 → 用**服务端的** root 出证明） |
+
+**`crypto/mimc/`** —— 选票电路与资格电路**共用**的 MiMC 实现（`mimc.Hash`），另导出
+`mimc.Constants()` 供跨语言 KAT 钉住轮常量。
+
+**资格电路形状**：Groth16 / BN254，哈希用 MiMC，实测 **6860 条约束**（`eligibility.Constraints()`，护栏断言 < 12000）。
+公开输入 **5 个**（`Root` / `ProposalID` / `Challenge` / `QualificationID` / `SessionBinding`），
+私有见证 **3 组**（`Secret` / `Index` / `Path`）—— **叶子、路径、位置全是私有的**，服务端因此不需要知道树结构。
+约束四条：`Leaf = MiMC(Secret)`、`QualificationID = MiMC(Leaf, ProposalID)`、
+`SessionBinding = MiMC(QualificationID, Challenge)`、`Index` 位分解 + 沿 `Path` 上溯得到 `Root`。
+**去重键** `QualificationID = MiMC(Leaf, ProposalID)`：同成员同提案稳定、跨提案不同。
+
 **对外适配层**
 
 | 文件 | 内容 |
@@ -188,7 +221,9 @@
 | `crypto/kryptology_credential_issuer.go` | RFC9474 RSABSSA 签发（**`BlindSign` 对盲化消息签名**）、**`IssuerPublicKey` 出口公钥**、**`VerifyCredential` 验签**、密钥版本轮换、落盘 |
 | `crypto/credential_client.go` | **盲签名的客户端侧**（`CredentialBlindClient.Blind` / `Finalize`）：CLI 与端到端测试共用，只需签发方公钥 |
 | `crypto/merkle_root.go` | Merkle root（`GnarkMerkleRootBuilder`） |
-| `cmd/keygen/main.go` | 选票电路密钥生成（见 §1.1） |
+| `crypto/eligibility_service.go` | **`EligibilityService`**（领域适配层）：`Enabled` / `Root` / `NewChallenge` / `Verify`。**没有「跳过验签」的降级模式**（选票证明有，资格证明没有） |
+| `cmd/keygen/main.go` | 两套电路的密钥生成（见 §1.1） |
+| `cmd/eligibility-list/main.go` | 离线名单工具（见 §1.1） |
 
 **模式**：密钥材料统一 `append([]byte(nil), ...)` 拷贝后返回，不外泄内部 slice；issuer 落盘权限 `0o600`。
 
@@ -196,7 +231,9 @@
 - `gnark_proof_verifier.go` 的 `NewGnarkProofVerifier` —— **`vk_path` 为空时 `Verify` 直接 `return nil`**，任何非空 proof 都通过。release 模式强制要求 `crypto.vk_path`，这条分支只在开发模式生效。
 - `ballot/group.go` 的 `parsePoint` —— **子群检查不能省**：BN254 twisted Edwards 的余因子是 8，小阶点会让解密方泄漏私钥低位比特。所有外部点（密文里的两个点、计票公钥）都要过 `isInSubGroup`。
 - `ballot/circuit.go` —— **公开输入里绝不能有选项下标**（见 §3 陷阱 1）。
-- `ballot/nullifier.go` 的 `mimcHash` —— 必须与 gnark `std/hash/mimc` 逐位一致（见 §3 陷阱 4）。
+- `ballot/nullifier.go` —— MiMC 走共享实现 `crypto/mimc`（见 §3 陷阱 4）。
+- `crypto/eligibility_service.go` 的 `NewEligibilityService` —— **根与验证密钥必须成对**：只给一个直接报错；两个都不给表示**未开启**资格校验（开发模式的降级形态）。**没有「跳过验签」模式**：验签密钥缺失必须在启动时失败，不能悄悄放行。
+- `crypto/eligibility/circuit.go` 的 `TreeDepth` —— **编译期常量**（电路里 `ToBinary` 的宽度必须是常量）：名单上限 1024 人；改它要重编电路与 WASM、重生成两套密钥，并让所有成员换新的资格包。
 - `ballot/encoding.go` 的 `ParseScalarHex` —— 与 `fr.Element.SetBytes` 的区别就在这里：后者按模归约，前者拒绝非规范编码（见 §3 陷阱 2）。
 - **密文格式 v2 → v3 与 v0.1.0 不兼容**：v2 是 ed25519 上的 DH 混合封装（HKDF-SHA256 派生），v3 是 BN254 twisted Edwards 上的指数 ElGamal。旧密文解不开，也不该再用于真实投票。`kyber_elgamal.go` 已删除。
 - `kryptology_credential_issuer.go` —— **没有 `Issue` 了**：一次性签发已删除。签发方现在只做两件事：给出公钥（`IssuerPublicKey`）与对**盲化消息**签名（`BlindSign`）。轮换挂在 `IssuerPublicKey` 上（客户端每次预留槽位都要拿公钥，轮换时机跟着它）。
@@ -213,9 +250,9 @@
 | `src/components/` | `AppSidebar` `AppTopbar` `GuideOverlay` `JourneyBar` `NoticeStack` |
 | `src/components/ui/` | `EmptyState` `NoticeBanner` `StatTile` |
 | `src/composables/useVotePortal.ts` | **全部状态与 API 编排**（单文件约 1800 行，是前端的事实核心） |
-| `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `blind-rsa.ts` `credential.ts` `datetime.ts` `error-messages.ts` `field.ts` `focus-trap.ts` `keccak.ts` `mimc.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` `sha256.ts` `sha384.ts` `wasm-prover.ts` `wasm-prover-protocol.ts` —— 除 `api.ts` 外都有单测 |
+| `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `blind-rsa.ts` `credential.ts` `datetime.ts` `eligibility-prover.ts` `error-messages.ts` `field.ts` `focus-trap.ts` `keccak.ts` `mimc.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` `sha256.ts` `sha384.ts` `wasm-prover.ts` `wasm-prover-protocol.ts` —— 多数都有单测；`eligibility-prover.ts` 没有独立单测，它由 `composables/useVotePortal.test.ts` 间接覆盖（那边把它 mock 掉，测的是门户的编排） |
 | `src/workers/ballot-prover.worker.ts` | **浏览器端 prover 的 Worker**：加载 Go 官方胶水 + WASM 模块，跑一次出票 |
-| `public/` | 门户静态资源目录：`wasm_exec.js` / `ballot-prover.wasm` / `proving.key`（构建产物，不入库，见 `web/public/README.md`） |
+| `public/` | 门户静态资源目录：`wasm_exec.js` / `ballot-prover.wasm` / `proving.key` / `eligibility-proving.key`（构建产物，不入库，见 `web/public/README.md`） |
 | `src/styles/` | `tokens.css` `base.css` `components.css` `shell.css` |
 | `src/types/` | `portal.ts` `portal-api.ts` |
 | `vitest.config.ts` | 测试配置 + **自写的 `.vue` 编译插件**（见下） |
@@ -255,6 +292,8 @@
 - `web/src/lib/credential.ts` —— **浏览器端凭证盲签名的客户端侧**：`credentialMessage`（`sha256(user_id ‖ 0x00 ‖ user_pub_key)`）、`parseIssuerKey`、`blindCredentialMessage`、`finalizeCredentialSignature`。与 Go 侧 `crypto.CredentialMessage` 同口径，由跨语言向量钉死。
 - `web/src/lib/{field,sha256,keccak,mimc}.ts` —— **浏览器端 nullifier 派生的底座**：域运算与标量规范编码、SHA-256、legacy Keccak-256（MiMC 轮常量由它派生）、Fr 上的 MiMC。全部是纯 TS 实现，不依赖任何外部密码学包（离线环境下装不了），也不依赖 WebCrypto（`crypto.subtle` 要求安全上下文，内网 http 部署会失效）。
 - `web/src/lib/wasm-prover.ts` + `web/src/workers/ballot-prover.worker.ts` —— **浏览器端 prover**：主线程发「资源地址 + 选项下标」，Worker 里加载 `wasm_exec.js` 与 `ballot-prover.wasm`，用 `cmd/ballot-wasm` 的 `nullifierProver` API 出票。密码学全在 Go 侧（WASM），门户只做编排。
+- `web/src/lib/eligibility-prover.ts` —— **浏览器端资格 prover**（主线程封装）：把成员包 + 挑战 + root 交给同一个 WASM 模块的 `initEligibility` / `proveEligibility`，拿回「证明 + 去重键」。门户这一侧**不做任何密码学**。
+- 门户「身份」面板（`src/components/panels/IdentityPanel.vue`）多一步：**导入资格文件** → 领凭证时先取挑战 → 本地出证明 → 带证明领取。**资格包只留在内存**（不写 `localStorage`、不上传），刷新页面要重新导入。
 
 **陷阱**：
 - `lib/api.ts` 是唯一的 HTTP 出口，返回 `{ok, status, data, error, code, rawText}`；错误文案统一走 `lib/error-messages.ts` 的 `describeApiError(message, code, fallback)`，优先级 **业务短语 > 错误码 > 调用方兜底**。
@@ -263,6 +302,7 @@
 - **门户的出票只有「在浏览器本地生成」这一条路**（`generateBallotLocally`）。三个静态资源
   （`wasm_exec.js` / `ballot-prover.wasm` / `proving.key`）没备齐时，门户会报
   「下载 WASM 模块失败」—— 部署时要先跑 `make web-wasm` 与 `make web-proving-key PK=<路径>`。
+  用「一人一票」还要多备 `eligibility-proving.key`（`make web-eligibility-key PK=<路径>`）。
 - **门户的匿名性文案与服务端能力已对齐**：出票入口的说明写的是「在浏览器本地生成」，
   服务端确实拿不到明文选项（`ballot-draft` 已删除，见 §3 陷阱 9）。
 - `.vue` 面板**有渲染测试，但不是浏览器渲染**（见 §1.7 的「面板渲染测试」）。没有 CSS、没有事件绑定、没有客户端挂载 —— 改界面的视觉与交互仍要靠人工核对。
@@ -285,6 +325,11 @@
 不经过服务端 —— proving key 只在客户端，服务端只拿 verifying key。公开输入走服务端
 同一套拼装入口（`ballot.BuildPublicInputs`），客户端与服务端算出同一份才验得过。
 
+**CLI 也能出资格证明**：`credential-claim -eligibility <成员包.json> -proving-key <资格 proving key>`
+—— 先向服务端要一次领取挑战，再用成员包与资格 proving key 在本地出零知识证明，
+最后带证明去领（`buildEligibilityMaterial`）。**缺 `-proving-key` 直接报错**，
+不静默降级成「不带资格领取」。
+
 **陷阱**：
 - CLI 输出是纯文本命令结果，**不做中文本地化**（与前端相反，是有意为之）。
 - **CLI 的 `postJSON` 返回 `*httpError`**（带 HTTP 状态码）：领取凭证时「槽位被别人
@@ -303,6 +348,7 @@
   `result-publish -shares-file` 直接吃这个文件（也接受 JSON 数组、纯文本行）。形状对不上时
   服务端会把整份 JSON 当一个份额，回 400 `share does not belong to session`。
 - **`ballot-draft` 命令已删除**：CLI 没有「让服务端代加密」的入口，出票只有 `ballot-encrypt` + `ballot-prove` 这条本地路。
+- **`credential-claim` 带 `-eligibility` 时必须同时给 `-proving-key`**：缺 proving key 直接报错退出，不静默降级成「不带资格领取」（那会让服务端把「没带资格」当成「没开资格校验」）。
 
 ### 1.9 压测工具 —— `cmd/loadtest/main.go`
 
@@ -326,6 +372,8 @@
 - **SQLite 并发写会撞 `database is locked`**：服务端要用带 `_busy_timeout` 的 DSN
   （如 `anonvote.db?_busy_timeout=10000&_journal_mode=WAL`），否则压测结果里全是 500 ——
   那是存储层的问题，不是投票逻辑的问题。
+- **工具不支持资格证明**：它不会去取领取挑战、也不会出资格证明，因此在开启了资格
+  校验的服务端上，领取环节会被 400 `ELIGIBILITY_REQUIRED` 拒绝。
 - **吞吐按墙钟算，不按延迟求和** —— 并发请求的延迟总和不是总耗时。
 
 ### 1.10 浏览器端 prover —— `cmd/ballot-wasm/main.go`
@@ -337,20 +385,25 @@
 （`internal/infrastructure/crypto/ballot`），直接编成 WASM 就能用，还顺带保证
 「客户端与服务端拼出的公开输入逐字段相同」。
 
-**接口**：在全局对象上注册 `nullifierProver`。
+**接口**：在全局对象上注册 `nullifierProver`，**四个函数**（选票与资格两套电路在同一个模块里，密钥互不相通）：
 
 | 函数 | 入参 | 出参 |
 |---|---|---|
 | `init` | `{"proving_key": "<base64>"}` | `{"ok":true,"init_ms":7608}` |
 | `prove` | `{"proposal_id","election_public_key","option_index","num_options"}` | `{"ok":true,"ciphertext","nullifier","proof","prove_ms":2254}` |
+| `initEligibility` | `{"proving_key": "<base64>"}` | `{"ok":true,"init_ms":5120}` |
+| `proveEligibility` | `{"proposal_id","challenge","root","member_package"}` | `{"ok":true,"proof","qualification_id","prove_ms":...}` |
 
 **出票逻辑在 Go 侧一次做完**：`ballot.Prover.ProveBallot`（`ballot/client.go`）—— 压缩
 计票公钥 → 加密选项下标 → 随机 nullifier 秘密并派生 nullifier → 拼公开输入 → 出证明。
 nonce 与 nullifier 秘密**只在这一次调用里出现**。
 
+**资格证明同理**：`eligibility.Prover.ProveEligibility`（`eligibility/client.go`）——
+重算叶子并与成员包比对 → 由叶子推出去重键 → 用**服务端的** root 出证明。
+
 **构建**：`make web-wasm` → `web/public/ballot-prover.wasm`（约 11.9 MB，gzip 后约
-2.8 MB）+ `web/public/wasm_exec.js`（Go 官方胶水）。proving key 由运营方用
-`make web-proving-key PK=<路径>` 放进同一个目录。
+2.8 MB）+ `web/public/wasm_exec.js`（Go 官方胶水）。两把 proving key 由运营方用
+`make web-proving-key PK=<路径>` 与 `make web-eligibility-key PK=<路径>` 放进同一个目录。
 
 **陷阱**：
 - **必须先 `logger.Disable()`**：js/wasm 往 stdout / stderr 写日志是「发请求给 JS 侧、
@@ -419,6 +472,31 @@ publish        → 提案必须已关闭（isProposalClosed）
 - 覆盖会导致已投选票无法解密，所以这是硬约束。
 - 份额明文只在 setup 响应里出现一次，库里只有哈希。
 
+### 2.4 资格领取链路（「一人一票」，T22）
+
+```
+（离线，运营方）  cmd/eligibility-list -members members.txt -out ./elig-out
+                  → root.json（部署给服务端）+ 每成员一份 eligibility-<id>.json（0600）
+
+（客户端）        POST /api/v1/proposals/:id/credentials/eligibility-challenge
+                  → {"proposal_id","root","depth","challenge"}    ← 服务端不记账
+                  → 本地出资格证明：eligibility.Prover.ProveEligibility（成员包 + 挑战 + 服务端的 root）
+                  → 得到「证明 + 去重键 qualification_id」
+
+（服务端）        POST /api/v1/proposals/:id/credentials/claim
+                  → 验资格（三件材料缺一不可；root 用服务端自己配置的那个）
+                  → 取池槽位（不占位）
+                  → 记资格使用（唯一索引 (proposal_id, qualification_id)）← 一人一票的强制点
+                  → 409 ELIGIBILITY_ALREADY_USED（同一份资格第二次来领）
+                  → 之后才是真两段式盲签名：blind-sign → attest
+```
+
+**顺序是刻意的**：资格校验在取槽位**之前**，资格使用记录在取槽位**之后** —— 资格不过
+不消耗池槽位，唯一约束冲突时槽位还没被标记领取。
+
+**服务端全程不知道领票的是谁**：它只拿到「证明 + 去重键 + 挑战」三样。名单根是它自己
+配置的；成员包、资格秘密、成员 ID 它都拿不到。`eligibility_uses` 表只存去重键。
+
 ---
 
 ## 3. 已知陷阱（改动时优先检查）
@@ -429,18 +507,18 @@ publish        → 提案必须已关闭（isProposalClosed）
 1. **公开输入里绝不能有选项下标。** `ballot/circuit.go` 的 `ballotCircuit` 把 `OptionIndex` 放在**私有见证**里，用 `assertLessThan`（8 位分解 + 最高位检查）做范围检查。公开输入一旦带上选项下标，服务端就等于拿到明文选项 —— 这与「选票内容对服务端不可知」直接冲突。
 2. **`fr.Element.SetBytes` 是按模归约，不是拒绝。** 超范围输入会被折回域内，于是同一个域元素有多种字节表示。`ballot/encoding.go` 的 `ParseScalarHex` / `isCanonicalScalar` 才是拒绝式检查，`ballot/statement.go` 的 `BuildPublicInputs` 会再查一次规范编码。**漏查的后果**：票表 `votes.nullifier` 上的唯一索引存的是**字符串**，同一个 nullifier 的两种写法会绕开唯一索引 → 重投拦不住。**本轮已修**：`usecase/voting.go` 的 `decodeNullifier` 除了 hex 与长度，还返回**规范形式**（64 位小写 hex），`Submit` 用规范形式查重与落库 —— 客户端提交大写或带空白的变体也会归一到同一串，唯一索引因此拦得住。仍需注意：规范**字节**检查（值 < 模数）只在 `vk_path` 加载时由验证器执行（见陷阱 3）。
 3. **`vk_path` 为空 = 关闭证明验证。** `NewGnarkProofVerifier("")` → `skipVerify=true`，只要求 proof 非空。本地「验证通过」不代表真的验过。开发配置 `configs/config.yaml` 就是 `vk_path: ""`；release 模式强制要求 `crypto.vk_path`（`config.requiresVerifyingKey`）。
-4. **Go 侧的 MiMC 必须与 gnark `std/hash/mimc` 逐位一致。** `ballot/nullifier.go` 的 `mimcHash` 是电路 `hash.Write(c.NullifierSecret, c.ProposalID)` 的镜像（轮函数 `x = (x + h + c)^5`，外层 Miyaguchi–Preneel）。常量或轮次差一点，电路里的 nullifier 约束就永远不成立。
+4. **Go 侧的 MiMC 必须与 gnark `std/hash/mimc` 逐位一致。** 实现已抽到共享包 `internal/infrastructure/crypto/mimc`（`mimc.Hash`）—— **选票电路的 nullifier 约束与资格电路的 Merkle 承诺共用同一份**（轮函数 `x = (x + h + c)^5`，外层 Miyaguchi–Preneel）。常量或轮次差一点，电路里的 nullifier 约束就永远不成立，资格电路的叶子与去重键也会两边算出不同的值。`mimc.Constants()` 供跨语言 KAT 钉住轮常量。
 5. **密文格式 v2 → v3 与 v0.1.0 不兼容。** v3 是 BN254 twisted Edwards 上的指数 ElGamal（`0x03` + 两个压缩点 = 65 字节），v2 是 ed25519 上的 DH 混合封装（HKDF-SHA256 派生）。旧密文既解不开，也不该再用于真实投票。
 6. **加密的是选项下标，不是选项文本。** 下标是电路里可做范围检查的小整数（上限 `ballot.MaxOptions` = 256），选项文本可能很长且不唯一。解密方 `DecryptBallotOption` 拿 `numOptions` 在选项集合里逐个比对。
 7. **曲线点的子群检查不能省。** BN254 twisted Edwards 的余因子是 8，小阶点会让解密方泄漏私钥低位比特。`ballot/group.go` 的 `parsePoint` 对每个外部点都做 `isInSubGroup`（用子群阶乘点看是否回到单位元）。
 8. **`internal/di/wire_gen.go` 是手工同步的。** wire 生成器在本仓库离线不可用（`go.sum` 里 `github.com/google/subcommands` 只有 `/go.mod` 哈希，缺模块内容哈希）。改 `internal/di/wire.go` 必须手工同步 `wire_gen.go`。
 9. **服务端曾经有一条「代用户选票」的妥协路径，现在没有了。** 它是 `ballot-draft`（服务端拿明文选项去加密）—— 已连同 `usecase/tally.go` 的 `EncryptVoteOption` / `PrepareBallotDraft` / `proposalOptionIndex` 一起删除。**没有例外、没有豁免机制**：`tests/architecture/` 盯着「请求体不得有明文选项字段」「usecase 不得有接受明文选项的入口」「这条链不许复活」「ballot-draft 端点不许复活」。真要恢复它，先想清楚是不是该改的是客户端。
 10. **只比对签名是不够的。** 拿一张合法凭证换个 `user_id` 重放，逐字节比对签名会通过。`usecase/voting.go` 因此在落库前调 `issuer.VerifyCredential`，失败 → 401。
-11. **两段式盲签名的服务端只做两件事。** `kryptology_credential_issuer.go` 没有 `Issue` 了：签发方只给公钥（`IssuerPublicKey`）与对**盲化消息**签名（`BlindSign`）。**服务端在 attest 之前绝不能拿到 `user_pub_key`** —— 它一旦知道公钥就能算出凭证消息原文，盲化当场失效（它手上有私钥，根本不需要解盲）。因此 `credentials/claim` 的请求体是空的，旧版本收 `user_pub_key` 的字段一律忽略。
+11. **两段式盲签名的服务端只做两件事。** `kryptology_credential_issuer.go` 没有 `Issue` 了：签发方只给公钥（`IssuerPublicKey`）与对**盲化消息**签名（`BlindSign`）。**服务端在 attest 之前绝不能拿到 `user_pub_key`** —— 它一旦知道公钥就能算出凭证消息原文，盲化当场失效（它手上有私钥，根本不需要解盲）。因此 `credentials/claim` 的请求体里**没有 `user_pub_key`**（旧版本收它的字段一律忽略），只有可选的三件资格材料（`eligibility_proof` / `qualification_id` / `challenge`，见陷阱 30）。
 12. **公开的盲签名端点必须绑定池槽位。** `credentials/blind-sign` 只为该提案里**还空着的** `user_id` 签名，否则签发方就是「任意消息」的签名预言机。管理端可以覆盖任意 `user_id`，走的是另一个路径 `/api/v1/credentials/blind-sign`（gin 的路由树不允许同一路径挂两套中间件）。
 13. **预留不占位 → 并发领取会抢同一个槽位。** 服务端取槽位时不改状态，所以两个客户端可能拿到同一个 `user_id`，后到 attest 的那个会撞 409 `CREDENTIAL_EXISTS`。**重试必须在客户端**（新协议下重试要重新盲化，服务端代劳不了）：换槽位重来，最多 5 次，只在 409 `CREDENTIAL_EXISTS` 时重试 —— 409 还有 `CREDENTIAL_POOL_EMPTY`（池领完了），那个不重试。
     - 为什么不改成「预留即占位」：那会让「只预留不 attest」的客户端永久消耗池槽位，变成一个 DoS。
-14. **凭证改为匿名随机领取后，服务端无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。路线图 T22 用资格证明补回（见 [`docs/roadmap.md`](./roadmap.md) §2.3）。
+14. **凭证改为匿名随机领取后，服务端单靠凭证无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。**这一条已由 T22 的资格证明补回**（见 §2.4）：服务端对**去重键**去重，而不是对凭证去重；去重键由成员零知识地出示，服务端不知道它属于谁。
 15. **`configs/config.production.yaml` 不会被自动加载** —— viper 默认只找 `config.*`。**已给出一条明确路径**：`CONFIG_FILE=./configs/config.production.yaml` 启动即可（`internal/config/config.go` 的 `ConfigFileEnvVar`）。显式指定的文件不存在时**直接启动失败**，不会静默回退到开发配置。启动日志的 `config_file` 字段会打印实际加载的文件路径。
 16. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项 —— release 模式下留空会打一条启动告警（同源部署留空是合法的，所以不阻止启动）。
 17. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（**11 个受控包**：usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server），合计门槛见表内 `total` 行（77）。单个包回退会直接让 CI 变红。门槛本身还比各包当前水位低约 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。最低的一档是 `internal/infrastructure/persistence`（门槛 58）。
@@ -455,9 +533,15 @@ publish        → 提案必须已关闭（isProposalClosed）
     - 改任一侧的 PSS 编码 / MGF1 / 哈希 / 盐长度，都要重新生成并同步这两处。
 25. **凭证消息的两端实现必须逐字节一致。** 凭证消息是 `sha256(user_id ‖ 0x00 ‖ user_pub_key)`：Go 侧 `crypto.CredentialMessage`、TS 侧 `web/src/lib/credential.ts` 的 `credentialMessage`。服务端验签时重算的是同一条消息，对不上就是验签失败 —— **而且不会报错**，只是凭证被判无效。防线是 `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧断言向量）与 `web/src/lib/credential.test.ts`（TS 侧断言同一组值）。**分隔符 `0x00` 不能省**：没有它，`(a, b)` 与 `(a‖0x00, b)` 会撞。
 26. **盲签名变体名要用线路名，不是 Go 的枚举名。** 服务端在 `issuer_key` 响应里回的 `variant` 是 CIRCL 的线路名 `RSABSSA-SHA384-PSS-Deterministic`；Go 侧的枚举标识符是 `SHA384PSSDeterministic`，两者**不是同一个字符串**。门户把后者写进 `supportedBlindSignatureVariant` 时，领取流程会停在第 ① 步之后（服务端只看到 claim，blind-sign 从未发出），界面上表现为「领取失败：签发方公钥不可用」—— 匿名领取与管理端签发两条路都断。**这类跨语言字符串不会自己暴露**：单测里两边都拿同一个常量自证，只有真浏览器 / 真服务端对跑才会露馅。防线：Go 侧 `TestKAT_BlindRsaVariantName` + TS 侧 `credential.test.ts` 的「变体名与服务端线路上的名字一致」。
-27. **`web/public/` 放的是构建产物，不是源码。** `wasm_exec.js`（来自 GOROOT）、`ballot-prover.wasm`（`make web-wasm` 生成）、`proving.key`（`make web-proving-key` 拷入）三个文件都不入库，eslint 也整目录忽略（否则 `make check` 会被 Go 官方胶水里的 lint 报错卡住）。构建顺序固定是 `web-wasm` → `web-proving-key` → `web-build`。
+27. **`web/public/` 放的是构建产物，不是源码。** `wasm_exec.js`（来自 GOROOT）、`ballot-prover.wasm`（`make web-wasm` 生成）、`proving.key`（`make web-proving-key` 拷入）、`eligibility-proving.key`（`make web-eligibility-key` 拷入）四个文件都不入库，eslint 也整目录忽略（否则 `make check` 会被 Go 官方胶水里的 lint 报错卡住）。构建顺序固定是 `web-wasm` → `web-proving-key` → `web-eligibility-key` → `web-build`。
 28. **并发写要测试请用文件库 + WAL，不要用共享缓存的内存库。** SQLite 的共享缓存（`cache=shared`）用**表级锁**，`busy_timeout` 对它无效，并发写直接抛 `database table is locked` —— 表现为「两个并发请求双双失败」，而不是「恰好一个成功」。正确姿势：文件库 + `?_busy_timeout=10000&_journal_mode=WAL&_txlock=immediate`（见 `tests/e2e/concurrent_nullifier_test.go`），并记得 `t.Cleanup` 关掉句柄 —— 否则 Windows 上临时目录清不掉。
 29. **「服务端不得拿到明文选项」由守卫测试把守，改请求体时先看它。** `tests/architecture/plaintext_option_test.go` 用 go/ast 扫 `internal/`，四条断言：HTTP 层请求体结构体不得有明文选项 json tag（`option` / `selected_option` / `option_index` / `choice` / `selected_choice` / `vote_option` / `ballot_option`，刻意**不含**复数 `options` —— 那是提案的候选项列表）；usecase 层不得出现接受明文选项（形参名 `option` / `candidate`）的入口；**服务端代加密那条链的符号不许复活**（`PrepareBallotDraft` / `EncryptVoteOption` / `BallotDraft` / `proposalOptionIndex` / `proposalAllowsOption`）；**ballot-draft 端点不许复活**（POST 它必须 404）。**不设豁免机制** —— 加豁免就得改这个测试文件，让它在 diff 里显眼。扫描**只覆盖 `internal/`**：`cmd/` 里的明文选项字段是客户端在说话，不是服务端在收。
+30. **资格材料只许出现在领取请求体里，不许出现在投票提交体里。** `POST /api/v1/votes` 的请求体结构体 `submitVotePayload` **不得**新增资格相关字段（`eligibility_proof` / `qualification_id` / `challenge`）：资格是**领票**的门槛，不是**投票**的凭据。投票路径已经由凭证 + nullifier 兜住，把资格塞进投票体等于把「谁能领票」和「谁投了票」重新连起来。
+31. **资格证明不许复用选票电路的密钥。** Groth16 的 setup 是 **per-circuit** 的：选票用 `verifying.key` / `proving.key`，资格用 `eligibility-verifying.key` / `eligibility-proving.key`（`cmd/keygen -circuit ballot|eligibility`）。两把密钥的公开输入与见证形状完全不同，互换的结果是验签恒失败。服务端的 `crypto.vk_path` 与 `crypto.eligibility_vk_path` 必须各自指向自己那把。
+32. **资格表不许与凭证、票据关联。** `eligibility_uses` 只存去重键 `(proposal_id, qualification_id)` —— 不存叶子、不存资格秘密、不存成员 ID，也**不许**加指向 `credentials` / `votes` 的外键或冗余列。一旦能把资格连到票，「分发不泄露身份」这条底线就破了；去重只需要在领取时做一次。
+33. **资格包丢了就领不了了，没有找回路径。** 资格秘密只存在于 `eligibility-<member_id>.json` 里；服务端不存秘密、也不存叶子。补发只能由 `cmd/eligibility-list` 重新生成 —— 但它每次运行都会**重新随机生成秘密**，树根随之改变，等于换了一份名单，所有成员都要换新的资格包。名单与资格包必须**成套**保存。
+34. **`eligibility.TreeDepth = 10` 是编译期常量。** 名单上限 1024 人。改它要重编电路与 WASM、重生成两套密钥，并让所有成员换新的资格包 —— 不是改个配置项那么简单。
+35. **「一人一票」只在公开领取端点上强制。** 管理端签发（`POST /api/v1/credentials`，CLI 的 `credential-issue`）**不校验资格证明** —— 运营方可以为指定 `user_id` 签发凭证。运营流程若允许管理端补发凭证，这条路径会绕过资格去重。
 
 ---
 
@@ -510,10 +594,47 @@ go test ./cmd/keygen/ -v
 # 架构不变量守卫：服务端不得拿到明文选项（能力 A 的验收 ①）
 go test ./tests/architecture/ -v   # 请求体字段 / usecase 入口 / 调用点 / 豁免项 release 模式 404
 
+# 资格证明（一人一票，T22）：电路往返 / 端到端验收 ①–⑤ / 浏览器端 WASM 出资格证明
+go test ./internal/infrastructure/crypto/eligibility/ -v   # 名单树、证明往返、篡改公开输入、约束数护栏
+go test ./internal/infrastructure/crypto/mimc/ -v            # 共用 MiMC（改了轮常量就会红）
+go test ./internal/infrastructure/crypto/ -run TestEligibility -v
+go test ./internal/usecase/ -run TestRegisterUseCase_ -v     # 挑战签发、资格不过不消耗槽位、资格已用过
+go test ./internal/infrastructure/http/ -run TestReserveCredential -v   # 资格材料的请求校验分支
+go test ./internal/infrastructure/persistence/ -run TestEligibilityUse -v   # 唯一索引挡住第二次使用
+go test ./tests/e2e/ -run TestAPI_Eligibility -v             # 验收 ①–⑤
+go test ./tests/e2e/ -run TestAPI_WASMEligibilityProver -v  # node 驱动门户将要加载的那个 WASM 模块
+go test ./cmd/cli/ -run TestRun_CredentialClaim -v          # CLI 带资格领取
+go test ./internal/config/ -run TestLoad_RequiresEligibility -v   # release 模式硬要求 + 成对校验
+
+# 本地跑通「一人一票」（命令行；门户路径见下一节）：
+#   1) 生成资格名单（离线）：root.json 给服务端，每人的资格包走安全渠道发给本人
+go run ./cmd/eligibility-list -members ./members.txt -out ./eligibility-out
+#      members.txt 每行一个成员 ID；root.json 里的 root 填到 crypto.eligibility_root
+#   2) 生成两套密钥（互不相通）
+go run ./cmd/keygen -circuit ballot      -dir ./keys
+go run ./cmd/keygen -circuit eligibility -dir ./keys
+#   3) 起服务端（release 模式：这两个配置是硬要求，缺了就启动失败）
+#      CRYPTO_VK_PATH=./keys/verifying.key
+#      CRYPTO_ELIGIBILITY_ROOT=<root.json 里的 root>
+#      CRYPTO_ELIGIBILITY_VK_PATH=./keys/eligibility-verifying.key
+#      SERVER_ADMIN_BEARER_TOKEN=<token>
+#   4) 建提案（CLI）+ 备池（CLI 没有备池命令，走管理端 HTTP 接口）
+go run ./cmd/cli -admin-token <token> proposal-create -title "T22" -options "A,B" -start <起> -end <止>
+curl -X POST -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"count":10}' <base-url>/api/v1/proposals/<id>/credentials/pool
+#   5) 带资格领取凭证（成员包 + 资格 proving key）
+go run ./cmd/cli credential-claim -proposal <id> \
+  -eligibility ./eligibility-out/eligibility-<member_id>.json \
+  -proving-key ./keys/eligibility-proving.key -out ./cred.json
+#   6) 同一个成员再领一次 → 409 ELIGIBILITY_ALREADY_USED（一人一票生效）
+
 # 浏览器里的真实出票验收（真浏览器 + 真服务端，人工跑一次）：
 #   1) make web-wasm && make web-proving-key PK=<proving.key 路径>
-#   2) release 模式起服务端（CRYPTO_VK_PATH 指向配对的 verifying.key）
-#   3) 门户「连接配置」填后端地址 → 投票大厅选提案 → 我的身份「匿名领取」
+#      && make web-eligibility-key PK=<eligibility-proving.key 路径>
+#   2) release 模式起服务端（CRYPTO_VK_PATH 指向配对的 verifying.key，
+#      另需 CRYPTO_ELIGIBILITY_ROOT / CRYPTO_ELIGIBILITY_VK_PATH）
+#   3) 门户「连接配置」填后端地址 → 投票大厅选提案 → 我的身份「导入资格文件」
+#      →「匿名领取」（门户会先取挑战、在本地出资格证明、再带证明领取）
 #   4) 参与投票 → 选选项 →「在浏览器本地生成选票」（首次约 12~14 秒）→ 提交
 #   5) 服务端日志出现 vote submitted 201；提案关闭后 result-publish → result-get
 #      应当看到所选选项的票数
@@ -562,12 +683,14 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
   verifying key 验签通过（201），计票还原出浏览器端选的那个选项。
   但**门户面板仍没有浏览器自动化回归**（仓库无 Playwright，见 §1.7）—— 盲区 2 闭合的是
   「WASM 路径在真实浏览器里可用」，不是「门户有端到端 UI 回归」。
-- **「一人一票」还缺资格证明（T22）。** 凭证是匿名随机领取的，服务端无法强制一人一票；
-  补回这一条要靠零知识资格证明，依赖已落地的证明链能力。
-  **设计稿已出**（2026-10-25）：[`docs/t22-eligibility-design.md`](./t22-eligibility-design.md) ——
-  核心结论：服务端只能对它能识别的标识去重，所以「一人一票」=「权威分配资格 + 零知识地出示资格」；
-  推荐路线是「离线名单（服务端只见 root）+ Merkle 承诺 + ZK 成员资格证明」，复用现有 MiMC /
-  Groth16 / WASM prover 栈，不引入新密码学依赖。实现前需拍板 6 条决策点。
+- **「一人一票」的资格证明已落地（T22）**，但还有三处边界没闭合：
+  - **门户的浏览器端资格路径还没有在真浏览器里人工点过一遍**：自动化只到 node 驱动
+    WASM（`tests/e2e/wasm_eligibility_test.go`）。仓库无 Playwright，这条仍靠人工。
+  - **`cmd/loadtest` 不支持资格证明**（它不会取挑战、也不会出资格证明），因此压测仍然
+    只能在 debug 模式跑。
+  - **资格包丢了无法恢复**（服务端不存秘密与叶子），补发要重新生成整份名单。
+  实现口径与设计稿的偏离见 `docs/techspec.md` §6.11；设计稿原文见
+  [`docs/t22-eligibility-design.md`](./t22-eligibility-design.md)。
 - **明文选项的彻底消除：已达成。** 客户端本地加密与本地出证明都已落地（CLI 与门户两侧），
   服务端只提供公开的计票公钥；服务端代加密的 `ballot-draft` 已删除，**服务端没有任何
   接收明文选项的入口**，由 `tests/architecture/` 持续守卫。
@@ -577,7 +700,8 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
   消息，attest 阶段才拿到公钥并验签。**口径**：attest 阶段服务端仍然看得到 `user_id`
   与 `user_pub_key`（验签必须重算凭证消息）—— 这是「签发方不知道被签内容」，不是
   「服务端全程不知道客户端是谁」。
-- **一人一票没有强制手段**（T22）：凭证匿名随机领取，同一个人可以领两张票投两次。
+- **一人一票已由资格证明强制**（T22）：服务端对去重键去重，而不是对凭证去重；
+  成员零知识地出示资格，服务端不知道它属于谁。详见 §2.4 与 §3 陷阱 30–34。
 - **门户与 CLI 的匿名性文案与实现仍有落差**（见 §1.7 陷阱）。
 - **容量数字只有 SQLite 一份，且不是规划。** `cmd/loadtest` 能跑出可复现的吞吐与防重投结论，
   但 SQLite 的单写者模型会把并发写串行化，数字反映的是存储层；客户端 prover 还没做，

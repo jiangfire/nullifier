@@ -44,6 +44,68 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 
 ### 新增
 
+- **一人一票：资格证明（能力 G 的完成定义已闭合）**。此前凭证是「池里随机领一张」，
+  服务端看不出同一个人领了几次 —— **可重复投票**。现在领凭证必须先证明「我在资格名单里」。
+  - **权威名单 → 离线工具 → 服务端只拿到 root**：新命令 `cmd/eligibility-list -members <名单文件>
+    -out <目录>` 由权威成员名单生成两份**必须分开保管**的产物 —— `root.json`（给服务端）
+    与每成员一份 `eligibility-<member_id>.json`（0600，成员本人保管）。
+    **服务端只拿到 root**：它能验证「这个资格在树里」，却**无法把资格对应到任何成员**
+    （它没有名单，也没有成员包）。
+  - **零知识成员资格证明**：新电路 `internal/infrastructure/crypto/eligibility/`（Groth16 / BN254 /
+    MiMC，**实测 6860 条约束**）。公开输入**定长 5 个**（Root / ProposalID / Challenge /
+    QualificationID / SessionBinding），**叶子、Merkle 路径、位置全私有** —— 公开输入的个数
+    不随树深变化，服务端不需要知道树的结构。`TreeDepth = 10` 是**编译期常量**，
+    单份名单上限 1024 人。
+  - **去重键** `QualificationID = MiMC(Leaf, ProposalID)`：同一成员同一提案稳定（第二次领撞
+    唯一索引 → 409），跨提案不同（**跨提案不可关联**）。落库在新表 `eligibility_uses`
+    （`proposal_id` + `qualification_id` + `used_at`，唯一索引 `(proposal_id, qualification_id)`）——
+    这就是一人一票的强制点。**只存去重键**，不存叶子 / 秘密 / 成员 ID。
+  - **新协议**（三步，blind-sign / attest 两步**完全不变**）：
+    ① `POST /api/v1/proposals/:id/credentials/eligibility-challenge`（公开，**无状态** ——
+    服务端不记账，重放由去重键挡住）→ `{proposal_id, root, depth, challenge}`；
+    ② `POST /api/v1/proposals/:id/credentials/claim` 的请求体多了三件
+    `{eligibility_proof, qualification_id, challenge}`（**三件要么都给要么都不给**）；
+    ③ `blind-sign` / `attest` 不变。**资格不过不消耗池槽位** —— 校验在取槽位之前。
+  - **新错误码**：`ELIGIBILITY_REQUIRED`(400) / `INVALID_ELIGIBILITY_PROOF`(403) /
+    `ELIGIBILITY_ALREADY_USED`(409) / `ELIGIBILITY_NOT_ENABLED`(409)。
+  - **命令行**：`cmd/keygen -circuit ballot|eligibility` —— 两套电路的密钥**互不相通**
+    （默认文件名 `verifying.key`/`proving.key` 与 `eligibility-verifying.key`/
+    `eligibility-proving.key`）；`cmd/cli credential-claim -eligibility <成员包.json>
+    -proving-key <资格 proving key>` 走完整的资格领取路径。
+  - **浏览器端**：`cmd/ballot-wasm` 在同一个模块上暴露四个 API —— `init` / `prove` /
+    `initEligibility` / `proveEligibility`（静态资源只新增
+    `web/public/eligibility-proving.key`，`make web-eligibility-key PK=<路径>`）。
+    门户「身份」面板新增「导入资格文件 → 领凭证时本地出证明」；**资格包只留内存**，
+    不写 localStorage、不上传，刷新页面就要重新导入。
+  - **端到端证据**：`tests/e2e/eligibility_test.go` —— 无资格被拒且不消耗槽位 / 有效资格可领 /
+    重复资格被拒 / 跨提案不可复用 / 请求体无真人身份字段，五条验收逐条有例；
+    `tests/e2e/wasm_eligibility_test.go` —— 用 node 驱动**真的 WASM 模块**出资格证明，
+    服务端用**真的资格验证密钥**验过，去重键与 Go 侧自算一致（浏览器路径的跨语言证据）。
+  - **跨语言线路有守卫**（新文件 `tests/architecture/eligibility_wire_test.go`）：门户这一侧只做
+    JSON 解析与转发，**最容易出错的不是数学而是字符串** —— 成员包字段名、出证明请求的字段名、
+    WASM API 名、静态资源名，两边各钉一条断言（Go 侧读 struct tag 与 `api.Set` 的键，
+    TS 侧读接口字段与调用名）。改了一边不改另一边，这里就会红。
+  - **没有降级放行的口子**：资格验证密钥缺失一律**启动失败**；开了资格校验但**去重仓储缺失**
+    也**报错**，不悄悄放行 —— 那等于把一人一票悄悄关掉。
+  - ⚠️ **部署侧是破坏性调整**：**release 模式现在必须配 `crypto.eligibility_root` +
+    `crypto.eligibility_vk_path`（环境变量 `CRYPTO_ELIGIBILITY_ROOT` /
+    `CRYPTO_ELIGIBILITY_VK_PATH`），否则服务启动失败**。两项必须**成对出现** ——
+    只配一个等于「不校验」。**部署动作**：① 用 `cmd/eligibility-list` 生成 `root.json`
+    （把里面的 `root` 填给 `crypto.eligibility_root`）与每成员一份
+    `eligibility-<member_id>.json`（走安全渠道发给本人）；② 用
+    `cmd/keygen -circuit eligibility` 生成资格电路的密钥，`eligibility-verifying.key`
+    放服务端（`crypto.eligibility_vk_path`），`eligibility-proving.key` 只留在客户端侧；
+    ③ 迁移照旧（`nullifier-server -migrate`，新增表 `eligibility_uses`）。
+    **没开资格校验的部署不受影响**：两项都不配时行为与从前完全一样 —— `claim` 的请求体
+    仍然可以为空，旧的 claim 请求体继续可用；**但这种配置在 release 模式下不再被允许**。
+    `GET /healthz` 新增 `eligibility` 布尔字段，运营能一眼看到服务端到底有没有在强制一人一票。
+  - ⚠️ **还没闭合的**：门户的资格领取路径**仍需在真浏览器里人工点一遍**（仓库里没有
+    Playwright，自动化证据只到 node 驱动的 WASM 模块）；`cmd/loadtest` **不支持**资格证明
+    （只在未开启资格校验的服务上可用）；**资格包丢失无法找回**（成员包是秘密材料，发放靠安全
+    渠道）；**真实名单的内容与成员标识形式仍需运营方提供**。
+  - 设计与落地的口径见 [`docs/t22-eligibility-design.md`](./docs/t22-eligibility-design.md)
+    （含「实现与设计稿的偏离」一节）。
+
 - **真实的选票零知识电路**（新包 `internal/infrastructure/crypto/ballot/`）：Groth16 / BN254，
   twisted Edwards 曲线。**公开输入 9 个**（提案 ID 域元素、nullifier、计票公钥、密文的两个点、
   选项数），**私有见证 3 个**（选项下标、nonce、nullifier 秘密）。约束 `a=r·G`、`b=m·G+r·Y`、
@@ -196,6 +258,10 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 
 ### 变更
 
+- **启动日志的 `effective configuration` 多了 `eligibility_enforced` 字段**，与
+  `proof_verification_enabled` 并排 —— 运营一眼就能看到「一人一票到底开没开」。
+- **HTTP 端点新增 1 个公开端点**：`POST /api/v1/proposals/:id/credentials/eligibility-challenge`
+  （签发一次领取挑战，无状态）。
 - **release 模式下 `cors_allowed_origins` 为空会打启动告警。** 门户与后端不同源时
   浏览器会拦掉所有跨域请求,这类事故在启动日志里看不出来。**不阻止启动** ——
   同源部署留空是合法的。
@@ -270,9 +336,9 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   整体删除，CLI 的 `ballot-draft` 命令与门户的「按选项生成凭据」入口一并移除。**守卫测试
   不设豁免机制** —— 能力 A 的底线没有例外。
 
-> **本轮还没有做到的事**（别把 v0.2.0 当成已完成的版本）：**一人一票还没有强制手段**
-> （T22 未开工 —— 凭证匿名随机领取，同一个人可以领两张票投两次）；
-> 门户面板仍**没有浏览器自动化回归**（仓库无 Playwright，交互靠人工核对）；
+> **本轮还没有做到的事**（别把 v0.2.0 当成已完成的版本）：**一人一票已经落地**（T22，
+> 资格证明），但它的**浏览器端路径没有自动化** —— 仓库里没有 Playwright，门户的资格领取
+> 仍需真浏览器人工点一遍；门户面板整体也仍**没有浏览器自动化回归**（交互靠人工核对）；
 > PostgreSQL 集成测试在本机（无 Docker）仍未实跑。凭证签发的两段式盲签名**已闭合**，
 > 明文选项对服务端不可知这条**已彻底闭合**（无残留、无豁免）。
 > 详见 [`docs/roadmap.md`](./docs/roadmap.md) §4.1 的能力状态表。
