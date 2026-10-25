@@ -32,3 +32,6 @@ issuer_keys.json
 web/.pnpm-store/
 .codex/
 *.db
+
+# 浏览器验收脚本的本地工作目录（密钥、名单、数据库、日志）
+.acceptance/

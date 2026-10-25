@@ -630,14 +630,16 @@ go run ./cmd/cli credential-claim -proposal <id> \
 #   6) 同一个成员再领一次 → 409 ELIGIBILITY_ALREADY_USED（一人一票生效）
 
 # 浏览器里的真实出票验收（真浏览器 + 真服务端，人工跑一次）：
-#   1) make web-wasm && make web-proving-key PK=<proving.key 路径>
-#      && make web-eligibility-key PK=<eligibility-proving.key 路径>
-#   2) release 模式起服务端（CRYPTO_VK_PATH 指向配对的 verifying.key，
-#      另需 CRYPTO_ELIGIBILITY_ROOT / CRYPTO_ELIGIBILITY_VK_PATH）
-#   3) 门户「连接配置」填后端地址 → 投票大厅选提案 → 我的身份「导入资格文件」
+#   仓库里没有浏览器自动化 —— 这一步只能人工点。脚本已经把前后的活都干了：
+bash ./scripts/browser-acceptance.sh setup    # 备好环境（密钥/名单/提案/凭证池/门户）并打印人工步骤
+bash ./scripts/browser-acceptance.sh verify   # 人工点完之后核对服务端日志与计票结果
+bash ./scripts/browser-acceptance.sh stop     # 停掉后台进程
+#   人工步骤（setup 会逐条打印）：
+#   1) 门户「连接配置」填后端地址 → 投票大厅选提案 → 我的身份「导入资格文件」
 #      →「匿名领取」（门户会先取挑战、在本地出资格证明、再带证明领取）
-#   4) 参与投票 → 选选项 →「在浏览器本地生成选票」（首次约 12~14 秒）→ 提交
-#   5) 服务端日志出现 vote submitted 201；提案关闭后 result-publish → result-get
+#   2) 再领一次 → 409 ELIGIBILITY_ALREADY_USED（一人一票生效）
+#   3) 参与投票 → 选选项 →「在浏览器本地生成选票」（首次约 12~14 秒）→ 提交
+#   4) 服务端日志出现 vote submitted 201；提案关闭后 result-publish → result-get
 #      应当看到所选选项的票数
 #   跨语言字符串（盲签名变体名）只有这样对跑才会暴露 —— 见陷阱 26
 

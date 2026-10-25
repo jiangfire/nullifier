@@ -106,6 +106,16 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   - 设计与落地的口径见 [`docs/t22-eligibility-design.md`](./docs/t22-eligibility-design.md)
     （含「实现与设计稿的偏离」一节）。
 
+- **浏览器验收流程固化成脚本**（新脚本 `scripts/browser-acceptance.sh`，新命令
+  `make browser-acceptance`）：把「在真浏览器里点一遍」的**前后**全部自动化 ——
+  `setup` 备好环境（两套密钥 → 资格名单 → 提案 → 凭证池 → 门限解密 → 门户 dev server）
+  并**逐条打印人工步骤**；`verify` 核对服务端日志里的三件事（`credential attested` /
+  `vote submitted` / `eligibility already used`），等窗口关闭后发布结果并核对
+  **计票还原出的就是浏览器端选的那个选项**；`stop` 收尾。
+  ⚠️ **闭合的是「每次上线不用从零手搓」，不是「浏览器自动化」** —— 中间那一下导入
+  资格文件与点击仍然要人来做，仓库里依然没有 Playwright（盲区 2 的现状见
+  [`docs/roadmap.md`](./docs/roadmap.md) §4.3）。
+
 - **真实的选票零知识电路**（新包 `internal/infrastructure/crypto/ballot/`）：Groth16 / BN254，
   twisted Edwards 曲线。**公开输入 9 个**（提案 ID 域元素、nullifier、计票公钥、密文的两个点、
   选项数），**私有见证 3 个**（选项下标、nonce、nullifier 秘密）。约束 `a=r·G`、`b=m·G+r·Y`、

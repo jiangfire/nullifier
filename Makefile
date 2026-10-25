@@ -29,6 +29,7 @@ endif
 	vet fmt fmt-check \
 	web-install web-dev web-build web-test web-lint web-typecheck web-format web-format-check \
 	web-wasm web-proving-key web-eligibility-key eligibility-list \
+	browser-acceptance \
 	check ci clean
 
 help: ## Show available targets
@@ -154,6 +155,9 @@ web-eligibility-key: ## Publish the eligibility proving key (make web-eligibilit
 
 eligibility-list: ## Build the offline eligibility-list tool
 	$(GO) build -o eligibility-list ./cmd/eligibility-list
+
+browser-acceptance: ## Prepare the browser acceptance environment (make browser-acceptance ARGS=setup|verify|stop)
+	bash ./scripts/browser-acceptance.sh $(or $(ARGS),setup)
 
 # ---------- 组合目标 ----------
 

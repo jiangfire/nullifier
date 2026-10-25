@@ -278,7 +278,7 @@ T19 已完成其可自动化的部分（CORS 的真实源仍是部署项）；T2
 |---|---|---|
 | T22 | 资格证明（一人一票） | ✅ **已落地** —— 见下面的「T22 落地核对」 |
 | T19 | 生产配置落地 | 🟡 **部分落地** —— `CONFIG_FILE` 显式路径、缺文件启动失败、启动日志打印实际路径都已完成；CORS 的真实源仍是部署项 |
-| T20 | 端到端验收（三个盲区） | 🟡 **三盲区各补了一部分，没有一项完全闭合** —— 见 §4.3 |
+| T20 | 端到端验收（三个盲区） | 🟡 **三盲区各补了一部分，没有一项完全闭合** —— 见 §4.3（盲区 2 的手工流程已固化成 `scripts/browser-acceptance.sh`） |
 | T21 | 发版（v0.2.0） | ⬜ 未开始 |
 
 **T22 落地核对**（一人一票）—— 落地了什么：
@@ -344,6 +344,12 @@ T19 已完成其可自动化的部分（CORS 的真实源仍是部署项）；T2
 > `DataCloneError: #<Object> could not be cloned.`，**「匿名领取」在真浏览器里必然失败**。
 > node 驱动的 WASM 用例不走 Worker，所以完全测不出来。已修（`fix(web): send a plain
 > member package to the prover worker`），并补了一条回归用例钉住它。
+
+> ✅ **同一套流程已固化成脚本，并在真浏览器里再跑了一遍**（2026-10-25，
+> `scripts/browser-acceptance.sh`）：`setup` 备好环境并逐条打印人工步骤 → 在浏览器里点完 →
+> `verify` 自动核对服务端日志里的 `credential attested` / `vote submitted` /
+> `eligibility already used`，等窗口关闭后发布结果，核对**计票还原出的就是浏览器端选的
+> 那个选项**（`{"tally":{"beta":1},"total_votes":1}`）。脚本见 §4.3 盲区 2。
 
 **另有单测**：usecase（`internal/usecase/registration_eligibility_test.go`）、
 persistence（`internal/infrastructure/persistence/eligibility_use_repository_test.go`）、
@@ -432,6 +438,13 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
    - 这次验收还挖出**第二个只靠 node 测不出来的 bug**：资格包在门户里是 Vue 的响应式 Proxy，
      `postMessage` 克隆不了它 —— 「匿名领取」在真浏览器里必然失败。已修
      （`fix(web): send a plain member package to the prover worker`），并补了回归用例。
+   - ✅ **整套手工流程已固化成脚本**（本轮落地）：`scripts/browser-acceptance.sh` 分三段 ——
+     `setup` 备好环境（两套密钥 → 资格名单 → 提案 → 凭证池 → 门限解密 → 门户 dev server）
+     并**逐条打印人工步骤**；`verify` 核对服务端日志里的三件事（`credential attested` /
+     `vote submitted` / `eligibility already used`），等窗口关闭后发布结果并核对
+     **计票还原出的就是浏览器端选的那个选项**；`stop` 收尾。
+     ⚠️ **闭合的是「每次上线不用从零手搓」，不是「浏览器自动化」** —— 中间那一下
+     导入资格文件与点击仍然要人来做，仓库里依然没有 Playwright。
 3. **并发投票下的防重投与性能容量** —— 唯一索引兜底，但没测过
    - 🟡 **防重投这一半已补**（本轮落地）：`tests/e2e/concurrent_nullifier_test.go` ——
      8 个请求**同时**用同一个 nullifier、各自带不同凭证提交，断言恰好 1 张票入库、
@@ -461,7 +474,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
 | 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.4% |
 | 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 149 个用例全过 |
-| 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未开工（盲区 3 的「防重投」与「容量」两半已补；盲区 1 的 PG 集成测试已有 compose + `make pg-test` 可复现脚本，⚠️ 本机无 Docker 未实跑；盲区 2 已闭合「WASM 路径在真实浏览器里可用」这一半 —— **选票与资格两条浏览器路径都已在真浏览器里人工验过**（2026-10-25），⚠️ 但门户面板仍没有 UI 自动化回归） |
+| 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未完全闭合（盲区 3 的「防重投」与「容量」两半已补；盲区 1 的 PG 集成测试已有 compose + `make pg-test` 可复现脚本，⚠️ 本机无 Docker 未实跑；盲区 2 已闭合「WASM 路径在真实浏览器里可用」这一半 —— **选票与资格两条浏览器路径都已在真浏览器里人工验过**（2026-10-25），**且整套手工流程已固化成 `scripts/browser-acceptance.sh`**（`setup` / `verify` / `stop`），⚠️ 但门户面板仍没有 UI 自动化回归） |
 | 9 | README / techspec / 门户三处的匿名性声明不一致 | 🟡 **本轮已同步，待复核** —— 三处与 §4.1 的能力表对齐 |
 
 **Go**
