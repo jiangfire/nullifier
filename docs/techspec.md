@@ -10,6 +10,8 @@ cmd/
 ├── keygen/                 # 生成 Groth16 密钥（vk / pk）：选票与资格两套电路
 ├── ballot-wasm/            # 浏览器端 prover 的 WASM 模块（选票 + 资格两套电路）
 ├── eligibility-list/       # 离线名单工具：成员名单 → Merkle 根 + 每人的资格包
+├── audit-recompute/        # 审计离线复算：只读票库，用份额重算计票与锚点
+├── loadtest/               # 并发投票压测工具
 └── server/                 # 服务启动入口
 
 internal/
@@ -25,10 +27,14 @@ internal/
 │   │   ├── eligibility/    # 资格密码学栈：名单 Merkle 承诺、资格电路与证明器
 │   │   └── mimc/           # 选票电路与资格电路共用的 MiMC 实现
 │   ├── http/               # Gin handler / server / middleware
+│   ├── metrics/            # Prometheus 指标（只暴露计数与耗时）
 │   └── persistence/        # GORM 仓储、迁移、DB 配置
+├── shares/                 # 门限份额：哈希、归属校验、份额文件读取
+├── tally/                  # 计票的规范算法（服务端与审计复算工具共用这一份）
 └── usecase/                # 业务编排
 
 tests/
+├── architecture/           # 架构不变量守卫（含跨语言契约门禁）
 ├── e2e/
 ├── integration/
 └── testutil/
@@ -49,9 +55,22 @@ web/                        # Vue 3 前端门户
     - `VotingUseCase`
     - `ParticipationUseCase`
     - `TallyUseCase`
+- `tally`
+  - **计票的规范算法**：从「密文选票 + 计票私钥」得出计票结论、merkle 根与审计锚点哈希。
+  - **服务端与审计复算工具共用这一份**（`internal/usecase/tally.go` 与
+    `cmd/audit-recompute` 调的是同一个 `tally.Compute`）—— 两边各写一份算法，
+    一旦漂移，复算结论就失去意义：那不是审计，是第二套计票。
+  - 算法细节（merkle 叶子、规范计票 JSON、锚点哈希公式）是**冻结**的，见 §6.2。
+- `shares`
+  - 门限份额的哈希、会话归属校验与份额文件读取。
+  - CLI 的 `result-publish` 与审计复算工具共用同一份文件格式解析 —— 两个 CLI
+    各写一份，格式迟早漂移。
 - `infrastructure`
-  - `persistence`：GORM 仓储、SQLite/PostgreSQL 连接与迁移。
+  - `persistence`：GORM 仓储、SQLite/PostgreSQL 连接与迁移。`DBConfig.ReadOnly`
+    打开只读连接（SQLite `mode=ro` / PostgreSQL `default_transaction_read_only=on`）——
+    审计复算工具用它打开票库：不是「我们保证不写」，是「写不了」。
   - `http`：Gin 路由、请求校验、中间件、错误映射。
+  - `metrics`：Prometheus 指标。**只暴露计数与耗时**，不出现任何选票内容或身份。
   - `crypto`：gnark proof verifier、kryptology credential issuer、Merkle root builder。
   - `crypto/ballot`：选票密码学栈 —— BN254 twisted Edwards 群运算、v3 选票密文、
     Fr 上的 Shamir 门限份额、Groth16 选票电路与证明/验证器。选票密文与电路
@@ -253,12 +272,17 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
 
 ## 5. HTTP API
 
+> ⚠️ **v0.3.0 起，线格式被冻结**：字段名、字段语义、端点路径与密文格式只增不改。
+> 完整口径见 [`api-contract-v1.md`](./api-contract-v1.md)，并由
+> `tests/architecture/api_contract_test.go` 拿 Go 的 struct tag 与 TS 的 interface
+> **双向比对**守着（改一边不改另一边 CI 就红）。
+
 ### 5.1 公共接口
 
 - `GET /healthz`
 - `GET /api/v1/proposals`
 - `GET /api/v1/proposals/open`
-- `POST /api/v1/votes`
+- `POST /api/v1/proposals/:proposal_id/votes`
 - `POST /api/v1/proposals/:proposal_id/vote-status`
 - `GET /api/v1/proposals/:proposal_id/election-key`（计票公钥，公开值）
 - `POST /api/v1/proposals/:proposal_id/credentials/eligibility-challenge`（领取挑战，公开）
@@ -282,6 +306,7 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   - 池子只增不减：重复调用是**继续往池里加**槽位，不是补齐到 `count`。
 - `POST /api/v1/proposals/:proposal_id/decryption/setup`
 - `POST /api/v1/proposals/:proposal_id/results/publish`
+- `GET /metrics`（Prometheus 指标，见 §5.4）
 
 ### 5.3 关键约束
 
@@ -293,8 +318,11 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   - `eligibility` 报出服务端**是否在强制一人一票**（`crypto.eligibility_root`
     是否已配置）。没开的话任何人都能反复领票 —— 这是运营必须能一眼看到的
     运行状态，同样不是敏感信息。
-- `POST /api/v1/votes`
-  - 要求 `proposal_id`、`encrypted_vote`、`proof`、`nullifier`、`user_id`、`user_pub_key`、`credential_signature`，全部必填（HTTP 层与 usecase 层都强制，不存在匿名免凭证投票的路径）
+- `POST /api/v1/proposals/:proposal_id/votes`
+  - **提案 ID 只从路径来**（`c.Param("proposal_id")`），请求体里**没有** `proposal_id`
+    字段 —— 一个提案 ID 只有一个来源，两份不一致时服务端只能猜，猜错就是「把票
+    投到别的提案去」。
+  - 要求 `encrypted_vote`、`proof`、`nullifier`、`user_id`、`user_pub_key`、`credential_signature`，全部必填（HTTP 层与 usecase 层都强制，不存在匿名免凭证投票的路径）
   - **请求体不再有 `public_witness`**：公开输入由服务端按请求字段、提案与计票会话
     自行拼装（`usecase.SubmitVoteRequest.PublicInputs`）。客户端无法自选公开输入，
     因此一份 proof 只能用于它被生成的那份密文，也无法跨提案 / 跨 nullifier 复用。
@@ -381,6 +409,38 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   - 重复提交同一份 share 返回 `400 INVALID_REQUEST`，不会绕过 threshold 计数
   - share 会先校验是否属于当前 session
 
+### 5.4 Prometheus 指标（`GET /metrics`）
+
+Prometheus 文本格式，**要管理员 Bearer 令牌**（`middleware.RequireAdminBearerToken`）。
+指标实例由依赖注入创建（`di.NewMetrics`），handler 是业务事件的发生地，
+server 负责把它暴露成端点。
+
+| 指标 | 标签 | 含义 |
+|---|---|---|
+| `anonvote_http_requests_total` | `method` / `route` / `status` | HTTP 请求数 |
+| `anonvote_http_request_duration_seconds` | `method` / `route` | HTTP 请求耗时直方图 |
+| `anonvote_votes_accepted_total` | —— | 成功入库的选票数 |
+| `anonvote_votes_rejected_total` | `code` | 被拒的投票提交数（错误码与响应体的 `code` 同源） |
+| `anonvote_credential_claims_total` | `result` | 凭证领取请求数（`accepted` / `rejected`） |
+| `anonvote_credential_blind_signs_total` | `result` | 盲签名请求数 |
+| `anonvote_credential_attests_total` | `result` | 凭证 attest 请求数 |
+| `anonvote_eligibility_checks_total` | `result` | 资格证明校验数（`valid` / `invalid`） |
+| `anonvote_tally_results_published_total` | —— | 发布出去的计票结果数 |
+
+- **只暴露计数与耗时**：指标里没有任何选票内容、候选人票数、nullifier 或身份 ——
+  `internal/infrastructure/metrics` 的测试把允许出现的标签名**逐个钉死**
+  （`method` / `route` / `status` / `result` / `code`），多一个标签就是多一条泄漏路径。
+- **埋点放在业务事件真正发生的地方**（handler），不从 HTTP 状态码反推；错误码取自
+  `middleware.MapError` —— 与响应体里的 `code` 是**同一份口径**。
+- ⚠️ **中间件注册顺序是硬要求**：`middleware.MetricsMiddleware` 必须排在
+  `middleware.ErrorHandler` **之前** —— gin 的中间件先进后出，越早注册的回程越晚，
+  这样才拿得到最终状态码；顺序反了指标里就会全是 200。
+- `route` 标签用**路由模板**（`/api/v1/proposals/:proposal_id/votes`）而不是原始路径 ——
+  原始路径里带着提案 ID，拿它当标签值会让指标基数爆炸。匹配不到路由时用 `unmatched`。
+- 采集端点自身的请求**不计入** HTTP 请求数（否则请求数会被采集流量本身淹没）。
+- 带标签的指标族在没有样本时整个不出现在采集结果里 —— 这是 Prometheus 的惯例，
+  告警规则用 `or vector(0)` 兜底。
+
 ## 6. 密码学实现边界
 
 - 选票密码学栈：`internal/infrastructure/crypto/ballot`（BN254 twisted Edwards、v3 密文、Groth16 电路）
@@ -420,6 +480,26 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   恢复用拉格朗日插值。门限解密与密文格式因此不需要任何域转换。
 - 份额格式：4 字节大端下标 + 32 字节取值，共 36 字节。
 - 份额不落明文：`decryption_sessions.shares_json` 只存份额的哈希。
+
+### 6.2.1 计票的规范算法（冻结）
+
+实现在 `internal/tally`。**服务端的计票链路与审计复算工具调的是同一个
+`tally.Compute`** —— 两边各写一份算法，一旦漂移，复算结论就失去意义。
+
+以下三处是**冻结**的（改动 = 破坏性变更，库里已发布的锚点会与重算结果对不上）：
+
+| 项 | 口径 |
+|---|---|
+| merkle 叶子 | `nullifier + "\|" + cipher`（UTF-8 字节拼接） |
+| 规范计票 JSON | `[{"candidate":<名称>,"count":<票数>}]`，**候选名升序** |
+| 锚点哈希 | `SHA-256(proposalID + "\|" + base64(merkleRoot) + "\|" + 规范计票 JSON)`，小写 hex |
+
+- 空票集（一个提案没有票）时，merkle 叶子是占位串 `empty-vote-set`。
+- 锚点哈希的公式由一条 KAT 测试钉死（`internal/tally/tally_test.go` 的
+  `TestAnchorHash_KAT`）—— 改了公式，测试立刻红。
+- 审计复算工具（`cmd/audit-recompute`）拿计票份额还原私钥后走同一个 `Compute`，
+  再与库内已发布的结果**逐字节**比对（票数 / 计票 JSON / merkle 根 / 锚点哈希），
+  不一致时**退出码非 0**。
 
 ### 6.3 选票电路（真实 Groth16）
 
@@ -916,6 +996,27 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
     工具产物 → 客户端出证明 → 服务端用 root.json 验签通过。
 - Makefile 目标：`make eligibility-list`（构建名单工具）、
   `make web-eligibility-key PK=<路径>`（把资格 proving key 放进门户静态目录）。
+
+### 7.6 审计离线复算（`cmd/audit-recompute`）
+
+投票结束后，拿计票份额**脱离服务端**重算计票与锚点，与库内已发布的结果
+**逐字节**比对。
+
+```bash
+go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件>
+go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件> -json
+```
+
+- **只读票库**：`DBConfig.ReadOnly` → SQLite `mode=ro` /
+  PostgreSQL `default_transaction_read_only=on`。不是「我们保证不写」，是「写不了」。
+- **不碰服务端**：直接读库，不需要投票服务在跑，也不要 admin token。默认读服务端
+  同一份配置（`CONFIG_FILE` / `configs/config.yaml` / 环境变量）指向的同一个库；
+  `-db` 可覆盖 SQLite 路径，`-driver` 可切 postgres。
+- **份额校验与服务端完全一致**（同一份 `internal/shares` 代码）：份额必须属于本会话，
+  同一份份额不能重复计入门限份数。
+- **退出码可当门禁用**：`0` 一致 / `1` 审计未通过（结论不一致）/ `2` 用法或运行错误。
+- ⚠️ **计票份额是秘密材料** —— 凑齐门限份数就能还原全部选票的明文选项。
+- Makefile 目标：`make audit-recompute ARGS="-proposal p-1 -shares-file shares.json"`。
 
 ## 8. 测试策略
 

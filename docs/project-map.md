@@ -37,9 +37,10 @@
 | `cmd/keygen/main.go` | 生成 Groth16 密钥，**两套电路各一把**：`-circuit ballot`（默认）出 `verifying.key`（0644，服务端用）/ `proving.key`（0600，**只在客户端侧**）；`-circuit eligibility` 出 `eligibility-verifying.key` / `eligibility-proving.key`；打印 verifying key 的 sha256 指纹；默认不覆盖已有文件（`-force` 才覆盖） |
 | `cmd/eligibility-list/main.go` | **离线名单工具**（不联网、不连服务端）：`-members <名单文件> -out <目录>` → `root.json`（给服务端配 `crypto.eligibility_root`）+ 每成员一份 `eligibility-<member_id>.json`（0600，成员本人保管）。两份产物必须分开保管 |
 | `cmd/cli/main.go` | 16 个子命令的 CLI 客户端，**只走 HTTP API**，不绕过服务端校验 |
+| `cmd/audit-recompute/main.go` | **审计离线复算工具**（见 §1.11）：`-proposal <id> (-shares <a,b> \| -shares-file <文件>)` → 只读打开票库 → 用份额还原私钥 → 重算计票与锚点 → 与库内已发布的结果**逐字节**比对；退出码 `0` 一致 / `1` 审计未通过 / `2` 用法或运行错误。**与服务端共用同一份计票算法**（`internal/tally`） |
 | `cmd/ballot-wasm/main.go` | **浏览器端 prover 的 WASM 模块**（`GOOS=js GOARCH=wasm` 构建，见 §1.10）。在全局对象上注册 `nullifierProver`（**四个** API：`init` / `prove` / `initEligibility` / `proveEligibility` —— 选票与资格两套电路在同一个模块里）；非 js/wasm 平台有同名 stub，让 `go build ./...` 照常通过 |
-| `internal/di/providers.go` | 全部 Wire provider 的实现体（logger/db/各仓储/各 usecase/handler）；密码学的装配点在这里：`NewProofVerifier` `NewEncrypter` `NewThresholdCrypto` `NewNullifierGenerator` `NewCredentialIssuer` `NewEligibilityService` `NewEligibilityUseRepository` |
-| `internal/di/wire.go` + `wire_gen.go` | Wire 声明与生成产物。**当前是手工同步的**（见陷阱） |
+| `internal/di/providers.go` | 全部 Wire provider 的实现体（logger/db/各仓储/各 usecase/handler/指标）；密码学的装配点在这里：`NewProofVerifier` `NewEncrypter` `NewThresholdCrypto` `NewNullifierGenerator` `NewCredentialIssuer` `NewEligibilityService` `NewEligibilityUseRepository` |
+| `internal/di/wire.go` + `wire_gen.go` | Wire 声明与生成产物。**生成器现在能跑了**（见陷阱） |
 | `internal/config/config.go` | viper 加载 + 运行期校验；`server.mode` 推导 `Config.DebugMode`（`isDebugMode`），release/prod/production 走 `IsReleaseMode`；`CONFIG_FILE` 显式指定配置文件路径；`crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对**，且在 release 模式下**两者都必填** |
 | `internal/config/admin_token.go` | admin bearer token 兜底生成（32 字节随机，base64url） |
 
@@ -50,8 +51,14 @@
 - `internal/config/config.go` 的 `load()` —— `server.mode` 默认 `release`；release/prod/production **强制要求** `crypto.vk_path` **和** `server.admin_bearer_token`（`IsReleaseMode`），**并且强制要求 `crypto.eligibility_root` 与 `crypto.eligibility_vk_path` 同时存在**（没有它们服务端无法强制一人一票）。配置文件缺失时服务直接启动失败，这是有意的兜底。
 - `internal/config/config.go` 的 `load()` —— `crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对出现**（任何模式）：只配一个 → 启动失败，不静默降级成「不校验」。
 - `internal/config/config.go` 的 `load()` —— 配置文件默认找名为 `config.*` 的文件（`SetConfigName("config")`）；**`CONFIG_FILE` 环境变量可以显式指定路径**（`ConfigFileEnvVar`），生产环境用它加载 `configs/config.production.yaml`。显式文件不存在 → 启动失败。
-- **`internal/di/wire_gen.go` 目前是手工同步的**：本仓库离线跑不了 wire 生成器（`go.sum` 里 `github.com/google/subcommands` 只有 `/go.mod` 哈希，缺模块内容哈希，`go run github.com/google/wire/cmd/wire` 需要联网补依赖）。改了 `internal/di/wire.go` 必须**手工**改 `wire_gen.go`，provider 的声明顺序与实参顺序要一起对齐。
+- **`internal/di/wire_gen.go` 现在能用生成器重新生成了**（2026-10-25 修好）：此前缺
+  `//go:build !wireinject` 约束，`wire.go` 与 `wire_gen.go` 会同时参与编译而重复声明
+  `InitializeServer`，生成器根本跑不起来 —— 于是装配代码一直是**手工同步**的。
+  现在：`go run github.com/google/wire/cmd/wire ./internal/di` 可直接重生成。
+  ⚠️ `wire_gen.go` 的 build 约束**不能删** —— 删了生成器又会跟 `wire.go` 撞车。
 - `go.mod` 里还留着 `go.dedis.ch/kyber/v3`，但仓库里已经**没有任何 Go 文件引用它**（`kyber_elgamal.go` 已删）；`go mod tidy` 会把它摘掉。
+- ⚠️ **`go mod tidy` 在本仓库会顺手抬 go 指令版本**（2026-10-25 实测：`go 1.25.4` → `go 1.26.0`）
+  并升级一批无关依赖。**加依赖请用 `go get <包>@<版本>` 定点加**，别直接跑 tidy。
 
 ### 1.2 领域层 —— `internal/domain/`
 
@@ -104,24 +111,44 @@
 
 **陷阱**：`voting.go` 有**两条保存路径**——仓储实现了 `atomicVoteParticipationSaver` 就走事务（`SaveWithParticipation`），否则退化成先存票再存参与状态的非原子路径。目前 GORM 仓储实现了事务路径，mock 仓储没有。
 
+**计票算法不在这一层**：`tally.go` 的 `PublishResult` 只做编排，实际的「解密 → 计数 →
+merkle 根 → 锚点哈希」在 **`internal/tally`**（见 §1.11）。这么切是因为审计复算工具
+要调**同一个**算法 —— 两边各写一份，漂移了复算结论就没有意义。
+
+### 1.3.1 共用算法层 —— `internal/tally/` + `internal/shares/`
+
+两个**没有 HTTP、没有 GORM** 的小包，被服务端与命令行工具共用：
+
+| 包 | 负责 | 为什么共用 |
+|---|---|---|
+| `internal/tally` | 计票的规范算法：`Compute`（解密 → 计数 → merkle 根 → 锚点哈希）、`MarshalCanonicalTally`、`VoteLeaf`、`AnchorHash`、`Compare`（与已发布结论逐字节比对） | 服务端的计票链路与 `cmd/audit-recompute` 必须算**同一个**结果 |
+| `internal/shares` | 门限份额：`Hash` / `HashList` / `ParseRegistered` / `EnsureBelongToSession` / `EncodeList` / `DecodeList` / `Load`（读份额文件） | 服务端的份额校验与审计工具的份额校验必须**同一套口径**（同一份份额不能重复计入门限份数）；CLI 与审计工具也要吃同一种份额文件 |
+
+**冻结**：`internal/tally` 里的三处算法细节（merkle 叶子、规范计票 JSON、锚点哈希公式）
+是**冻结**的 —— 改了库里已发布的锚点就与重算结果对不上。锚点哈希的公式由一条 KAT
+测试钉死（`internal/tally/tally_test.go` 的 `TestAnchorHash_KAT`）。
+
 ### 1.4 HTTP 层 —— `internal/infrastructure/http/`
 
 | 文件 | 职责 |
 |---|---|
-| `server.go` | 建 engine、挂 4 个中间件、注册公共组与 admin 组；`GET /healthz` 返回 `{"status":"ok","debug":<bool>,"eligibility":<bool>}`（`eligibility` = 服务端是否在强制一人一票） |
-| `handler.go` | 全部 handler；DTO 定义与绑定都在这里 |
+| `server.go` | 建 engine、挂 5 个中间件、注册公共组与 admin 组；`GET /healthz` 返回 `{"status":"ok","debug":<bool>,"eligibility":<bool>}`（`eligibility` = 服务端是否在强制一人一票）；`GET /metrics`（**要 admin Bearer 令牌**） |
+| `handler.go` | 全部 handler；DTO 定义与绑定都在这里。业务事件的指标埋点也在这里（`h.metrics.RecordVoteAccepted()` 等） |
 | `middleware/admin_auth.go` | Bearer Token 鉴权 |
 | `middleware/cors.go` | 白名单 Origin 精确匹配 |
-| `middleware/error_handler.go` | 错误 → `{error, code}` 统一响应 |
+| `middleware/error_handler.go` | 错误 → `{error, code}` 统一响应。`MapError` 是**唯一**的错误码口径（响应体的 `code` 与指标的 `code` 标签同源） |
 | `middleware/recovery.go` | panic 兜底 |
 | `middleware/request_logger.go` | 请求日志（只记 method/path/status/latency/ip，**不记 header 和 body**） |
+| `middleware/metrics.go` | HTTP 请求数与耗时。⚠️ **必须挂在 `ErrorHandler` 之前** —— gin 的中间件先进后出，越早注册的回程越晚，这样才拿得到最终状态码 |
+| `internal/infrastructure/metrics/metrics.go` | Prometheus 指标集。**只暴露计数与耗时** —— 允许出现的标签名被一条测试逐个钉死 |
 
 **路由表**（`server.go` 的 `NewServer` + `handler.go` 的 `RegisterRoutes`）：
 
 | 方法 | 路径 | 鉴权 |
 |---|---|---|
 | GET | `/healthz` | 无 |
-| POST | `/api/v1/votes` | 无 |
+| GET | `/metrics` | **admin Bearer 令牌**（Prometheus 指标，只含计数与耗时） |
+| POST | `/api/v1/proposals/:id/votes` | 无（**提案 ID 只从路径来**，请求体里没有 `proposal_id`） |
 | GET | `/api/v1/proposals` | 无 |
 | GET | `/api/v1/proposals/open` | 无 |
 | POST | `/api/v1/proposals/:id/vote-status` | 无（需凭证材料） |
@@ -427,6 +454,41 @@ nonce 与 nullifier 秘密**只在这一次调用里出现**。
 - **实测耗时**（node 驱动同一个模块）：初始化 7.6 秒、出证明 2.25 秒、证明 128 字节。
   初始化那 7.6 秒是编译电路，因此必须放进 Worker，否则界面会卡住。
 
+### 1.11 审计离线复算 —— `cmd/audit-recompute/main.go`
+
+投票结束后，拿计票份额**脱离服务端**重算计票与锚点，与库内已发布的结果**逐字节**比对。
+
+```
+只读打开票库 → 读提案/选票/会话/已发布结果/锚点
+  → 校验份额属于本会话（internal/shares，与服务端同一份代码）
+  → 门限还原计票私钥
+  → tally.Compute（internal/tally，与服务端同一个函数）
+  → tally.Compare：票数 / 计票 JSON / merkle 根 / 锚点哈希
+  → 锚点表 vs 结果表是否自相矛盾
+```
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 复算结论与已发布结论**逐字节一致** |
+| `1` | **审计未通过** —— 有对不上的地方（可当门禁用） |
+| `2` | 用法错误或运行失败（库打不开、份额不足、还原私钥失败……） |
+
+**关键性质**：
+- **只读票库**：`persistence.DBConfig.ReadOnly` → SQLite `mode=ro` /
+  PostgreSQL `default_transaction_read_only=on`。不是「我们保证不写」，是「写不了」。
+  ⚠️ WAL 形态的 SQLite 也要能读 —— 已实证（`internal/infrastructure/persistence/db_readonly_test.go`）。
+- **不碰服务端**：直接读库，不需要投票服务在跑，也不要 admin token。默认读服务端
+  同一份配置指向的同一个库（`config.LoadForMigration`）。
+- **与服务端共用同一份计票算法**（`internal/tally.Compute`）—— 这是整个工具的意义所在。
+
+**陷阱**：
+- ⚠️ **计票份额是秘密材料** —— 门限份数凑齐就能还原全部选票的明文选项。份额文件用完
+  按秘密材料处理。
+- 复算**跑不完**也是一种审计失败：库里的票解不开（密文被改过）→ `report.Failure`
+  非空 → 退出码 `1`（不是 `2`）。用合法份额还原出的私钥解不开一张票，只可能是票坏了。
+- 门限私钥还原用 `ballot.RecoverSecret`，它**不做**份额归属校验 —— 归属校验在
+  `shares.EnsureBelongToSession`，两步都要走。
+
 ---
 
 ## 2. 关键流程
@@ -530,7 +592,7 @@ publish        → 提案必须已关闭（isProposalClosed）
 14. **凭证改为匿名随机领取后，服务端单靠凭证无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。**这一条已由 T22 的资格证明补回**（见 §2.4）：服务端对**去重键**去重，而不是对凭证去重；去重键由成员零知识地出示，服务端不知道它属于谁。
 15. **`configs/config.production.yaml` 不会被自动加载** —— viper 默认只找 `config.*`。**已给出一条明确路径**：`CONFIG_FILE=./configs/config.production.yaml` 启动即可（`internal/config/config.go` 的 `ConfigFileEnvVar`）。显式指定的文件不存在时**直接启动失败**，不会静默回退到开发配置。启动日志的 `config_file` 字段会打印实际加载的文件路径。
 16. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项 —— release 模式下留空会打一条启动告警（同源部署留空是合法的，所以不阻止启动）。
-17. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（**11 个受控包**：usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server），合计门槛见表内 `total` 行（77）。单个包回退会直接让 CI 变红。门槛本身还比各包当前水位低约 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。最低的一档是 `internal/infrastructure/persistence`（门槛 58）。
+17. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（**16 个受控包**：usecase / config / di / tally / shares / http / http-middleware / crypto / crypto-ballot / metrics / persistence / cmd-cli / cmd-keygen / cmd-eligibility-list / cmd-audit-recompute / cmd-server），合计门槛见表内 `total` 行（77）。单个包回退会直接让 CI 变红。门槛本身还比各包当前水位低约 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。最低的一档是 `internal/infrastructure/persistence`（门槛 58）。**新增受控包时要同步改这张表** —— 新包不入表等于不受门槛约束。
 18. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go`）和 `isProposalClosed`（`tally.go`）。改时间规则要同时改两处。
 19. **release 模式不再启动即改表** —— 必须先跑 `nullifier-server -migrate`，忘了会直接启动失败（`persistence.SchemaReady` 检查）。开发模式仍然自动迁移。
 20. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
@@ -580,7 +642,23 @@ go vet ./...
 gofmt -l ./cmd ./internal ./tests      # 应无输出
 go test ./...                          # Windows 需 CGO_ENABLED=1
 bash ./scripts/check-coverage.sh 80 coverage.ci.out   # 用 Git Bash，不是 WSL
-#   覆盖率门槛按包分档，逐包判定；门槛值见 scripts/coverage-thresholds.txt（12 个包）
+#   覆盖率门槛按包分档，逐包判定；门槛值见 scripts/coverage-thresholds.txt（16 个包）
+
+# 冻结的接口契约门禁：Go 的 struct tag ↔ TS 的 interface 双向比对 + 密文格式定版
+#   （改了字段名 / 删字段 / 改路径 / 改密文格式而不同步另一边，就会红）
+go test ./tests/architecture/ -run TestVoteSubmitRequestFieldsMatch -v
+go test ./tests/architecture/ -run TestCiphertextFormatIsFinalized -v
+
+# 计票的规范算法（锚点哈希的 KAT —— 改了公式就会红）
+go test ./internal/tally/ -run TestAnchorHash_KAT -v
+
+# 审计离线复算：一致 → 0；篡改计票结果 / 篡改选票 → 1（审计未通过）
+go test ./cmd/audit-recompute/ -v
+go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件>   # 人工跑一遍
+
+# 指标：只暴露计数与耗时（允许出现的标签名被逐个钉死）
+go test ./internal/infrastructure/metrics/ -v
+go test ./internal/infrastructure/http/ -run TestMetricsEndpoint -v
 
 # 只跑选票密码学栈（真实 Groth16：加解密往返、证明往返、篡改公开输入、越界选项、错 nullifier 秘密）
 go test ./internal/infrastructure/crypto/ballot/ -v

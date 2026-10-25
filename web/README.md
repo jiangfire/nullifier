@@ -14,19 +14,33 @@ pnpm run dev
 
 ## 已覆盖接口
 
+路径与字段名的口径来自 `src/lib/api-contract.ts` —— **冻结的接口契约**（见
+[`../docs/api-contract-v1.md`](../docs/api-contract-v1.md)），由 `tests/architecture/api_contract_test.go`
+拿 TS 与 Go 两侧双向比对守着。
+
+公共端点：
+
 1. `GET /healthz`
-2. `POST /api/v1/credentials`
-3. `POST /api/v1/proposals`
-4. `GET /api/v1/proposals`
-5. `GET /api/v1/proposals/open`
-6. `POST /api/v1/votes`
-7. `POST /api/v1/proposals/:proposal_id/vote-status`
-8. `GET /api/v1/proposals/:proposal_id/credentials`
-9. `POST /api/v1/proposals/:proposal_id/ballot-draft`
-10. `POST /api/v1/proposals/:proposal_id/decryption/setup`
-11. `POST /api/v1/proposals/:proposal_id/results/publish`
-12. `GET /api/v1/proposals/:proposal_id/results`
-13. `GET /api/v1/proposals/:proposal_id/audit-anchors`
+2. `GET /api/v1/proposals`
+3. `GET /api/v1/proposals/open`
+4. `GET /api/v1/proposals/:proposal_id/election-key`
+5. `POST /api/v1/proposals/:proposal_id/votes` —— **提案 ID 只从路径来**
+6. `POST /api/v1/proposals/:proposal_id/vote-status`
+7. `POST /api/v1/proposals/:proposal_id/credentials/eligibility-challenge`
+8. `POST /api/v1/proposals/:proposal_id/credentials/claim`
+9. `POST /api/v1/proposals/:proposal_id/credentials/blind-sign`
+10. `POST /api/v1/proposals/:proposal_id/credentials/attest`
+11. `GET /api/v1/proposals/:proposal_id/results`
+12. `GET /api/v1/proposals/:proposal_id/audit-anchors`
+
+管理端点（需 admin Bearer 令牌）：
+
+13. `POST /api/v1/credentials`
+14. `POST /api/v1/credentials/blind-sign`
+15. `POST /api/v1/proposals`
+16. `GET /api/v1/proposals/:proposal_id/credentials`
+17. `POST /api/v1/proposals/:proposal_id/decryption/setup`
+18. `POST /api/v1/proposals/:proposal_id/results/publish`
 
 ## 页面模块
 

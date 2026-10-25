@@ -81,8 +81,9 @@ nullifier 把这两个动作拆开:
 
 | 形态 | 说明 |
 |---|---|
-| HTTP API | 18 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
+| HTTP API | 18 个 `/api/v1/*` 端点 + `/healthz` + `/metrics`,管理面走 Bearer Token |
 | CLI | 16 个命令,复用同一套 HTTP API,不绕过服务端校验（`ballot-prove` 除外 —— 它纯本地出证明） |
+| 审计工具 | `cmd/audit-recompute` —— 拿计票份额**脱离服务端**重算计票与锚点,与库内已发布的结果逐字节比对 |
 | Web 门户 | Vue 3 单页应用,覆盖投票端与运营端全流程 |
 
 ## 快速开始
@@ -297,7 +298,7 @@ nullifier-server             # 再起服务
 | `GET` | `/healthz` | 健康检查(响应含 `debug` 与 `eligibility` 两个布尔字段) |
 | `GET` | `/api/v1/proposals` | 列出全部提案(按创建时间倒序,含已关闭/未开始) |
 | `GET` | `/api/v1/proposals/open` | 时间窗口内的开放提案 |
-| `POST` | `/api/v1/votes` | 提交匿名投票(7 个字段全部必填;公开输入由服务端自拼,不收 `public_witness`) |
+| `POST` | `/api/v1/proposals/:id/votes` | 提交匿名投票(6 个字段全部必填;**提案 ID 只从路径来**,请求体里不再有 `proposal_id`;公开输入由服务端自拼,不收 `public_witness`) |
 | `POST` | `/api/v1/proposals/:id/vote-status` | 持凭证材料查询是否已投票 |
 | `GET` | `/api/v1/proposals/:id/election-key` | 计票公钥(公开值,客户端本地加密用;未压缩形式 base64) |
 | `GET` | `/api/v1/proposals/:id/results` | 已发布的计票结果 |
@@ -318,6 +319,12 @@ nullifier-server             # 再起服务
 | `POST` | `/api/v1/proposals/:id/credentials/pool` | 往凭证池批量投放待领取槽位 |
 | `POST` | `/api/v1/proposals/:id/decryption/setup` | 初始化门限解密会话 |
 | `POST` | `/api/v1/proposals/:id/results/publish` | 提交份额并发布结果 |
+| `GET` | `/metrics` | Prometheus 指标(只含计数与耗时,**不含任何选票内容或身份**) |
+
+> **接口契约已冻结**(v0.3.0):字段名、端点路径与密文格式从 v0.3.0 起只增不改 ——
+> 完整口径见 [`docs/api-contract-v1.md`](docs/api-contract-v1.md),由
+> `tests/architecture/api_contract_test.go` 拿 Go 与 TS 两侧**双向比对**守着。
+> 改字段名 / 删字段 / 改语义 / 改路径 = 破坏性变更,须走下一个 minor 版本。
 
 ## 开发
 
@@ -331,6 +338,7 @@ make test              # 全部测试
 make cover             # 覆盖率门槛(THRESHOLD=90 可覆盖默认值)
 make web-lint web-typecheck web-test   # 前端检查
 make loadtest ARGS="-votes 200 -concurrency 20"   # 并发投票压测(需要一个本地 debug 服务)
+make audit-recompute ARGS="-proposal p-1 -shares-file shares.json"   # 离线复算已发布的结果(只读票库)
 make pg-test          # PostgreSQL 集成测试(用 docker-compose 起一个库,跑完关掉)
 ```
 
@@ -353,10 +361,10 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 | 口径 | 数值 | 覆盖范围 |
 |---|---|---|
-| 门槛口径 | **81.1%** | `scripts/check-coverage.sh` 选中的 12 个包:usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-eligibility-list / cmd-server(2026-10-25 实测) |
-| 全仓口径 | **72.7%** | `./...` 全部包(2026-10-25 实测) |
+| 门槛口径 | **81.2%** | `scripts/check-coverage.sh` 选中的 16 个包:usecase / config / di / tally / shares / http / http-middleware / crypto / crypto-ballot / metrics / persistence / cmd-cli / cmd-keygen / cmd-eligibility-list / cmd-audit-recompute / cmd-server(2026-10-25 实测) |
+| 全仓口径 | **75.5%** | `./...` 全部包(2026-10-25 实测) |
 
-门槛是**逐包分档**的,每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`,单个包回退会直接让 CI 变红 —— 不再是"一个总和撑着,低覆盖率的包悄悄退化"。当前最低的一档是 `internal/infrastructure/persistence`(63.9%),抬门槛时它会先卡住。**新增代码请一并补测**。
+门槛是**逐包分档**的,每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`,单个包回退会直接让 CI 变红 —— 不再是"一个总和撑着,低覆盖率的包悄悄退化"。当前最低的一档是 `internal/infrastructure/persistence`(65.8%),抬门槛时它会先卡住。**新增代码请一并补测**。
 
 ## 项目状态与限制
 
@@ -373,6 +381,9 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
   - ⚠️ **release 模式必须配 `crypto.eligibility_root` + `crypto.eligibility_vk_path`，否则启动失败。** 两项必须成对出现 —— 缺了资格校验的服务端只是个能发凭证的服务器。生产部署的三步（生成名单 → 生成资格密钥 → 部署）见上面的「一人一票：资格名单与资格密钥」。
   - ⚠️ **门户的资格领取路径没有浏览器自动化**（仓库无 Playwright）—— 自动化证据只到 node 驱动的 WASM 模块，真浏览器里人工点一遍仍要做（`bash ./scripts/browser-acceptance.sh setup` 会备好环境并打印步骤，点完跑 `verify` 核对）。⚠️ `cmd/loadtest` 不支持资格证明（只在未开启资格校验的服务上可用）。⚠️ **资格包丢失找不回来**（它是秘密材料）。⚠️ **真实名单的内容与成员标识形式仍需运营方提供**；单份名单上限 1024 人。
 - **`decryption/setup` 拒绝"投票开放中"的提案**,运营上必须在 `starts_at` 之前完成初始化。
+- **接口契约已冻结(v0.3.0)。** 凭证领取 / 投票提交 / 密文格式三处接口定版:字段名、端点路径与密文格式(v3,65 字节)从 v0.3.0 起只增不改。冻结的口径写进 [`docs/api-contract-v1.md`](./docs/api-contract-v1.md),并由 `tests/architecture/api_contract_test.go` 拿 Go 的 struct tag 与 TS 的 interface **双向比对** —— 改一边不改另一边,CI 就红。⚠️ **这是破坏性变更**:旧的 `POST /api/v1/votes` 已不存在,投票提交改为 `POST /api/v1/proposals/:id/votes`(提案 ID 只从路径来,请求体里不再有 `proposal_id`)。
+- **已发布的结果可以被重算。** `cmd/audit-recompute` 拿计票份额**脱离服务端**重算计票与锚点,与库内已发布的结果**逐字节**比对,不一致时退出码非 0(可当门禁用)。它与服务端**共用同一份计票算法**(`internal/tally`)—— 两边各写一份算法,漂移了复算结论就没有意义。连接是**只读**的(SQLite `mode=ro` / PostgreSQL `default_transaction_read_only=on`):不是"我们保证不写",是"写不了"。⚠️ **计票份额是秘密材料** —— 凑齐门限份数就能还原全部选票的明文选项。
+- **服务有指标了。** `GET /metrics` 输出 Prometheus 文本格式(需 admin Bearer 令牌):投票接受/被拒(按错误码分)、凭证领取/盲签名/attest、资格证明校验结果、计票发布数、HTTP 请求数与耗时。⚠️ **只暴露计数与耗时** —— 指标里没有任何选票内容、候选人票数或身份(有一条测试把允许出现的标签名逐个钉死)。
 - **生产部署必须显式设置** `SERVER_ADMIN_BEARER_TOKEN` 与 `SERVER_CORS_ALLOWED_ORIGINS`；`release` 模式下缺 admin token 会直接启动失败,**缺 `CRYPTO_ELIGIBILITY_ROOT` / `CRYPTO_ELIGIBILITY_VK_PATH` 也会直接启动失败**(一人一票是硬要求)。`configs/config.production.yaml` **不会**被自动加载(viper 只找 `config.yaml`),用 `CONFIG_FILE=./configs/config.production.yaml` 启动即可 —— **显式指定的文件不存在时服务直接启动失败**,不会静默回退到开发配置;启动日志的 `config_file` 字段会打印实际加载的文件路径,上线先核一眼。详见该文件内的注释。
 
 当前实现口径见 [`docs/techspec.md`](./docs/techspec.md),分层上下文索引见 [`docs/project-map.md`](./docs/project-map.md),产品路线图见 [`docs/roadmap.md`](./docs/roadmap.md)。**上线前请逐项核对** [`docs/deployment-checklist.md`](./docs/deployment-checklist.md)。

@@ -60,6 +60,12 @@
 | CLI（可选） | `go build ./cmd/cli` | ☐ |
 | 离线名单工具（可选） | `make eligibility-list` → 仓库根的 `eligibility-list` 二进制（**离线跑，不要放在投票服务机上**，见 §2.1） | ☐ |
 | 压测工具（可选） | `go build ./cmd/loadtest` | ☐ |
+| 审计复算工具（可选） | `go build ./cmd/audit-recompute` → 离线复算已发布的结果（**只读票库**，见 §8.2） | ☐ |
+
+> ⚠️ **v0.3.0 的破坏性变更**：投票提交端点从 `POST /api/v1/votes` 改为
+> `POST /api/v1/proposals/:proposal_id/votes`（请求体里不再有 `proposal_id`）。
+> 旧路径**不再注册**（404）。**自建客户端必须改**；门户与 CLI 已同步。
+> 详见 `CHANGELOG.md` 的「破坏性变更」与 [`docs/api-contract-v1.md`](./api-contract-v1.md)。
 
 - **`cmd/server` 不提供静态托管**：门户要单独部署（nginx / Caddy / 对象存储）。
 - **Windows 产物不需要额外装 MinGW**：发布包里的 `nullifier-server-windows-amd64.exe` /
@@ -303,9 +309,12 @@
 |---|---|---|
 | `GET /healthz` | `{"status":"ok","debug":false,"eligibility":true}` —— **`eligibility` 必须是 `true`**，否则这台实例没在强制一人一票（release 模式下它应该启动不了；`false` 说明配的不是你以为的那份配置） | ☐ |
 | `GET /api/v1/proposals` | 能列出提案 | ☐ |
-| `POST /api/v1/votes`（伪造签名） | **401** `INVALID_CREDENTIAL` | ☐ |
-| `POST /api/v1/votes`（篡改 proof） | **400** `INVALID_REQUEST` | ☐ |
+| `POST /api/v1/proposals/:id/votes`（伪造签名） | **401** `INVALID_CREDENTIAL` | ☐ |
+| `POST /api/v1/proposals/:id/votes`（篡改 proof） | **400** `INVALID_REQUEST` | ☐ |
+| `POST /api/v1/votes`（**旧路径**） | **404** —— 端点已收敛到提案路径，旧路径不再注册 | ☐ |
 | `POST /api/v1/proposals/:id/ballot-draft` | **404**（端点已删除，任何模式都不可达） | ☐ |
+| `GET /metrics`（无 admin token） | **401** —— 指标端点要 Bearer 令牌 | ☐ |
+| `GET /metrics`（带 admin token） | Prometheus 文本格式；**不含**任何选票内容或身份 | ☐ |
 | 领取凭证（无 admin token） | 端点是公开的 —— **没有** admin token 也能调；但开启资格校验后**还必须带资格材料**，否则是 **400 `ELIGIBILITY_REQUIRED`** | ☐ |
 | 管理端接口（无 token） | **401** | ☐ |
 | **浏览器里领一次凭证** | 「我的身份 →（先导入资格文件）→ 匿名领取」成功，页面变成「已就绪」。**必须走到 attest**（服务端日志里能看到 `credential attested`）—— 停在 claim 之后说明浏览器端与服务端的盲签名参数对不上 | ☐ |
@@ -377,6 +386,45 @@ go run ./cmd/cli credential-claim -proposal <提案> \
 > 新证明能领到 —— 也就是说**一个人可以在不同提案里各投一票**，这是设计如此。
 > 把提案 A 的证明直接拿去领提案 B 会得到 **403 `INVALID_ELIGIBILITY_PROOF`**。
 
+### 8.2 审计离线复算（投票结束后跑一遍）
+
+**这一步是「已发布的结果可以被重算」的验收** —— 它不依赖投票服务在跑，直接读库。
+
+```bash
+# SQLite：
+go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件>
+
+# PostgreSQL（读服务端同一份配置指向的同一个库；只读连接）：
+CONFIG_FILE=./configs/config.production.yaml \
+DB_DRIVER=postgres DB_HOST=... DB_NAME=... DB_USER=... DB_PASSWORD=... \
+  go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件>
+
+# 机器可读的结论：
+go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件> -json
+```
+
+| 退出码 | 含义 | 该怎么办 |
+|---|---|---|
+| `0` | 复算结论与已发布结论**逐字节一致** | 通过 |
+| `1` | **审计未通过** —— 票数 / 计票 / merkle 根 / 锚点哈希有对不上的地方 | ⛔ **不要发布结果**；先查库里是不是被改过，或复算用的份额是不是这个会话的 |
+| `2` | 用法错误或运行失败（库打不开、份额不足、还原私钥失败） | 补参数后重跑；这不是「结论不一致」 |
+
+| 验收 | 期望 | 状态 |
+|---|---|---|
+| 复算已发布的提案 | 退出码 `0`，输出「审计通过 —— 复算结论与已发布结论逐字节一致」 | ☐ |
+| 用**别的**会话的份额复算 | 退出码 `2`，报「份额校验失败」（份额必须属于本会话） | ☐ |
+
+> ⚠️ **份额是秘密材料**：门限份数凑齐就能还原全部选票的明文选项。份额文件用完请按
+> 秘密材料处理，**不要进版本库、不要再发群里**。
+>
+> ⚠️ **复算工具与服务端共用同一份计票算法**（`internal/tally`）—— 所以它复算出来的
+> 就是服务端当初算的那一份，而不是「另一套算法算的另一个结果」。锚点哈希的公式由
+> 一条 KAT 测试钉死。
+>
+> ℹ️ **连接是只读的**：SQLite 走 `mode=ro`、PostgreSQL 走
+> `default_transaction_read_only=on` —— 不是「我们保证不写」，是「写不了」。
+> 它**不需要**投票服务在跑，也**不需要** admin token。
+
 ---
 
 ## 9. 已知边界（写给用的人，不是给部署的）
@@ -405,6 +453,13 @@ go run ./cmd/cli credential-claim -proposal <提案> \
   （`0600`），丢了就得重新 setup（而重新 setup 会撞 `409`）。
 - **门户的 `.vue` 面板只有渲染测试，不是浏览器渲染**（Playwright 装不上）：模板与
   条件分支有自动化覆盖，但视觉与交互仍要人工核对。
+- ⚠️ **「Playwright 装不上」这个前提已不成立**（2026-10-25 实测：`pnpm exec playwright
+  install chromium` 可成功下载浏览器，118.1 MiB）—— 门户 UI 自动化（T28）仍在
+  v0.3.0 的范围内但**尚未做**，所以这条边界暂时不变。
+- **v0.3.0 不解决限流与容量**（路线图 T25 / T27，尚未做）：凭证领取与投票端点都是
+  公开的，**没有**任何限流；`cmd/loadtest` 给的是**吞吐与防重投的复现脚本**，**不是
+  容量数字**（它没有 prover、只能跑 debug 模式、SQLite 单写者，真 PG 上没跑过）。
+  ⚠️ **面向有规模的真实投票仍需 v0.4.0** —— 本版解决的是接口稳定性与可运维性。
 - **SQLite 只在开发/单机形态用**（生产是 PostgreSQL）。它有两条会打穿管理面接口的
   限制，服务端已经各自绕开（见 techspec §4.6）：备池写入按 100 行分批、临时表与
   临时索引固定放内存。**运维上只需知道一件事**：如果看到备池/投票报

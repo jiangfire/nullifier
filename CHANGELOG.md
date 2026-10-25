@@ -8,6 +8,69 @@
 
 ---
 
+## [未发布]
+
+v0.2.0 之后的变更。本版的主题是**「接口不再动」** —— 完成定义与验收证据见
+[`docs/release-plan-v0.3.0.md`](./docs/release-plan-v0.3.0.md)，路线图见
+[`docs/roadmap.md`](./docs/roadmap.md)（里程碑 M4）。
+
+> ⚠️ **升级前必读**：投票提交端点改了路径，旧的 `POST /api/v1/votes` 不再存在 ——
+> 详见下面的「破坏性变更」。
+
+### 破坏性变更
+
+- **投票提交端点从 `POST /api/v1/votes` 改为 `POST /api/v1/proposals/:proposal_id/votes`，
+  请求体里不再有 `proposal_id` 字段。**
+  一个提案 ID 现在只有**一个**来源（路径）。此前两份来源不一致时服务端只能猜，猜错就是
+  「把票投到别的提案去」。旧路径**不再注册**（返回 404）。
+  - 自建客户端需要改路径并去掉请求体里的 `proposal_id`；门户与 CLI 已同步
+    （门户改用 `web/src/lib/api-contract.ts` 里声明的冻结路径）。
+  - 请求体的其余六个字段（`encrypted_vote` / `proof` / `nullifier` / `user_id` /
+    `user_pub_key` / `credential_signature`）**不变**。
+
+> **本版之后**，字段名、端点路径与密文格式**冻结**：响应可新增字段、服务端可新增端点
+> （客户端须忽略不认识的字段）；改字段名 / 删字段 / 改语义 / 改路径 = 破坏性变更，
+> 须走下一个 minor 版本。完整口径见
+> [`docs/api-contract-v1.md`](./docs/api-contract-v1.md)，并由一条**跨语言门禁**守着
+> （`tests/architecture/api_contract_test.go` 拿 Go 的 struct tag 与 TS 的 interface
+> 双向比对，改一边不改另一边 CI 就红）。
+
+### 新增
+
+- **审计离线复算工具 `cmd/audit-recompute`** —— 拿计票份额**脱离服务端**重算计票与锚点，
+  与库内已发布的结果**逐字节**比对，不一致时**退出码非 0**（可当门禁用）。
+  - **与服务端共用同一份计票算法**（新包 `internal/tally`）：两边各写一份算法，一旦漂移，
+    复算结论就失去意义 —— 那不是审计，是第二套计票。锚点哈希的公式用 KAT 钉死。
+  - **只读票库**：SQLite 走 `mode=ro`、PostgreSQL 走 `default_transaction_read_only=on`
+    —— 不是「我们保证不写」，是「写不了」。
+  - **不碰服务端**：直接读库，不需要投票服务在跑，也不要 admin token。
+  - ⚠️ **计票份额是秘密材料** —— 凑齐门限份数就能还原全部选票的明文选项。
+- **Prometheus 监控指标** —— `GET /metrics` 输出 Prometheus 文本格式（需 admin Bearer 令牌）：
+  投票接受 / 被拒（按错误码分）、凭证领取 / 盲签名 / attest、资格证明校验结果、
+  计票结果发布数、HTTP 请求数与耗时直方图。
+  - **只暴露计数与耗时**：指标里没有任何选票内容、候选人票数或身份 ——
+    有一条测试把允许出现的标签名**逐个钉死**，多一个标签就是多一条泄漏路径。
+- **冻结的接口契约文档** `docs/api-contract-v1.md` + 跨语言门禁
+  `tests/architecture/api_contract_test.go`（见上面的「破坏性变更」）。
+
+### 变更
+
+- **计票的规范算法从 `internal/usecase/tally.go` 抽到新包 `internal/tally`** ——
+  服务端与审计复算工具调的是同一个 `Compute`。对外行为**不变**。
+- **门限份额的工具抽到新包 `internal/shares`**（哈希、归属校验、文件读取）——
+  CLI 的 `result-publish` 与审计工具共用同一份份额文件格式解析。
+- **`internal/di/wire_gen.go` 补上 `//go:build !wireinject` 约束** —— 此前缺这道约束，
+  `wire` 生成器跑不起来（生成代码与 `wire.go` 同时参与编译而重复声明）。
+  已用它重新生成了装配代码。
+
+### 修复
+
+- **指标中间件的注册顺序是硬要求**（写在代码注释里）：必须排在错误处理器**之前** ——
+  gin 的中间件先进后出，越早注册的回程越晚，这样才拿得到最终状态码；
+  顺序反了指标里就会全是 200。
+
+---
+
 ## [0.2.0] — 2026-10-25
 
 v0.1.0 发布之后的变更。本版的完成定义与验收证据见
