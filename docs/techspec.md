@@ -698,7 +698,24 @@ web/                        # Vue 3 前端门户
 工具自身有单元测试（`cmd/loadtest/main_test.go`）：用 `httptest` 模拟最小 API 面，覆盖
 「正常压测 → 防重投守住」「防重投失守 → 非 0 退出」「令牌不对」「参数非法」与报告计算。
 
-### 8.2 PostgreSQL 集成测试（本地 compose）
+### 8.2 门户面板的渲染测试
+
+门户的 7 个 `.vue` 面板此前**既没有类型检查也没有任何测试** —— `tsc` 不认 `.vue`
+文件，模板里的笔误（比如引用一个不存在的变量）只会在运行时炸。
+
+现在用 Vue 的**服务端渲染**把面板渲染成 HTML 字符串：模板、setup、computed 都会
+真的跑一遍。测试在 `web/src/components/panels/panels.test.ts`，助手在
+`web/src/lib/render-panel.ts`。
+
+- **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载。抓的是
+  「模板引用了不存在的变量」「setup 抛错」「条件分支写反」这一类问题。
+- 为了能在 vitest 里跑 `.vue`，`web/vitest.config.ts` 里自写了一个 SFC 编译
+  插件：离线环境装不了 `@vitejs/plugin-vue`，但 `vue` 自带 `vue/compiler-sfc`，
+  `typescript` 又是已有的 devDependency。
+- 覆盖了 debug 门控（路线图 T2）：非 debug 模式下「按选项生成凭据」按钮
+  **不渲染**。
+
+### 8.3 PostgreSQL 集成测试（本地 compose）
 
 `tests/integration` 的 PostgreSQL 用例有**两条路径**，共用同一份测试代码：
 

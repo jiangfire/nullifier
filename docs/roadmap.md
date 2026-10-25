@@ -293,7 +293,13 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 以下三项在本机（无 Docker）从未实跑过，CI 会实跑其中第一项：
 
 1. **PostgreSQL testcontainers 集成测试** —— 本机走的是跳过分支
-2. **门户 7 个 `.vue` 面板的浏览器实际渲染** —— 仓库里 `.vue` 零测试
+   - 🟡 **已补可复现脚本**（本轮落地）：仓库根 `docker-compose.yml` + `make pg-test`；
+     集成测试也支持外部库模式（`ANONVOTE_TEST_PG_HOST`），每个测试开独立 schema。
+     ⚠️ **本机无 Docker，仍未实跑** —— CI 会实跑。
+2. **门户 7 个 `.vue` 面板的浏览器实际渲染** —— 仓库里 `.vue` 曾零测试
+   - 🟡 **已用服务端渲染补上一半**（本轮落地）：`web/src/components/panels/panels.test.ts`
+     （15 个用例）把面板渲染成 HTML 字符串，模板 / setup / computed 都真跑一遍。
+     ⚠️ **不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载。
 3. **并发投票下的防重投与性能容量** —— 唯一索引兜底，但没测过
    - 🟡 **防重投这一半已补**（本轮落地）：`tests/e2e/concurrent_nullifier_test.go` ——
      8 个请求**同时**用同一个 nullifier、各自带不同凭证提交，断言恰好 1 张票入库、
@@ -422,8 +428,8 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 问题 | 门户在运营侧提供「按选项生成凭据」的入口，等于把「服务端替用户选」的能力做成一键操作。 |
 | 证据 | `web/src/composables/useVotePortal.ts:977` `issueCredential`、`web/src/components/panels/IdentityPanel.vue:13` |
 | 改法 | 按钮按 `debug` 模式条件渲染；非 debug 时给一句说明为什么没有这个入口 |
-| 落地核对 | ① ✅ `useVotePortal.ts` 读 `/healthz` 的 `debug` 字段，暴露为 `debugMode` ref；② ✅ `VotePanel.vue` 的「按选项生成凭据」按钮加 `v-if="portal.debugMode"`，非 debug 时改为一句说明文案；③ ⚠️ **验收方式与任务卡原设想不同**：仓库无 `@vue/test-utils`（离线不可安装），`.vue` 面板零测试 —— 改为在 `web/src/lib/nullifier.ts` 落纯模块 vitest（4 个用例），**按钮的条件渲染本身未被自动化测试覆盖**（属 §4.3 的盲区） |
-| 验收 | vitest：非 debug 模式渲染不出该按钮；debug 模式仍在 —— ⚠️ **部分达成**（见落地核对 ③） |
+| 落地核对 | ① ✅ `useVotePortal.ts` 读 `/healthz` 的 `debug` 字段，暴露为 `debugMode` ref；② ✅ `VotePanel.vue` 的「按选项生成凭据」按钮加 `v-if="portal.debugMode"`，非 debug 时改为一句说明文案；③ ✅ **验收方式已在 T20 批次补上**：仓库仍无 `@vue/test-utils`（离线不可安装），但**自写了 SFC 编译插件**（`web/vitest.config.ts`，用 `vue/compiler-sfc` + `typescript`，不新增依赖），因此面板可以在 vitest 里做**服务端渲染测试** —— `web/src/components/panels/panels.test.ts` 断言：debug 模式渲染出「按选项生成凭据」按钮，**非 debug 模式渲染不出这个按钮**（断言的是按钮本身，不是说明文案里出现的那个词）。⚠️ 不是浏览器渲染（无 CSS / 无事件 / 无客户端挂载） |
+| 验收 | vitest：非 debug 模式渲染不出该按钮；debug 模式仍在 —— ✅ **已达成**（`panels.test.ts` 的「投票面板的 debug 门控」三条用例） |
 | 预估 | 1 小时 |
 | 依赖 | G2 ✅ 已拍板（§6） |
 
@@ -528,7 +534,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 问题 | review §5 列的三项**从未被验证**：① PostgreSQL testcontainers 集成测试；② 门户 7 个 `.vue` 面板的浏览器实际渲染；③ 并发投票下的防重投与性能容量。 |
 | 证据 | `docs/release-review-2026-10-20.md` §5 |
 | 改法 | ① Docker 环境跑通 `tests/integration`（CI 会实跑，本地补一份 compose）；② 引入 Playwright 覆盖关键路径（领凭证 → 投票 → 查询状态 → 计票）；③ 用 `hey`/`k6` 写并发投票脚本，验证防重投（唯一索引兜底）与容量 |
-| 落地核对 | ① ⏳ CI 已实跑 PG 集成测试，本机无 Docker 走跳过分支；✅ **compose 已补**（仓库根 `docker-compose.yml` + `make pg-test`：起库 → 跑 `go test ./tests/integration/ -run Postgres` → 关库），且集成测试新增**外部库路径**（设 `ANONVOTE_TEST_PG_HOST` 即连已有 PostgreSQL，每个测试开一个独立 schema 并在跑完时 `DROP SCHEMA ... CASCADE`）—— 两条路径共用同一份测试代码，本地与 CI 跑的是同一套断言；② ⏳ 离线环境装不了 Playwright，门户 `.vue` 仍零测试；③ 🟡 **防重投这一半已落地**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求 + 同一 nullifier + 不同凭证，断言恰好 1 张票入库、其余 409 `DOUBLE_VOTING`（本机可复现，`go test ./tests/e2e/ -run TestAPI_ConcurrentSameNullifier_E2E`）；**容量这一半也已落地**：新工具 `cmd/loadtest`（纯 HTTP API，不碰数据库）输出吞吐 / 延迟分位 / 状态分布 / 防重投结论，`-json` 可机器读，**防重投没守住时退出码非 0**；本机实测 200 票 / 并发 20 → 257 req/s、200 张全 201、同 nullifier 并发 8 次恰好放行 1 张（⚠️ SQLite 单写者 + 只能在 debug 模式跑，**不是容量规划**） |
+| 落地核对 | ① ⏳ CI 已实跑 PG 集成测试，本机无 Docker 走跳过分支；✅ **compose 已补**（仓库根 `docker-compose.yml` + `make pg-test`：起库 → 跑 `go test ./tests/integration/ -run Postgres` → 关库），且集成测试新增**外部库路径**（设 `ANONVOTE_TEST_PG_HOST` 即连已有 PostgreSQL，每个测试开一个独立 schema 并在跑完时 `DROP SCHEMA ... CASCADE`）—— 两条路径共用同一份测试代码，本地与 CI 跑的是同一套断言；② 🟡 **Playwright 离线装不了，但盲区已用另一种方式部分补上**：门户 7 个 `.vue` 面板此前**既无类型检查也无测试**（`tsc` 不认 `.vue`），现在有**服务端渲染测试**（`web/src/components/panels/panels.test.ts`，15 个用例）—— 模板、setup、computed 都会真跑一遍，顺带覆盖了 T2 的 debug 门控（非 debug 模式下按钮不渲染）。⚠️ **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载，视觉与交互仍靠人工核对；③ 🟡 **防重投这一半已落地**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求 + 同一 nullifier + 不同凭证，断言恰好 1 张票入库、其余 409 `DOUBLE_VOTING`（本机可复现，`go test ./tests/e2e/ -run TestAPI_ConcurrentSameNullifier_E2E`）；**容量这一半也已落地**：新工具 `cmd/loadtest`（纯 HTTP API，不碰数据库）输出吞吐 / 延迟分位 / 状态分布 / 防重投结论，`-json` 可机器读，**防重投没守住时退出码非 0**；本机实测 200 票 / 并发 20 → 257 req/s、200 张全 201、同 nullifier 并发 8 次恰好放行 1 张（⚠️ SQLite 单写者 + 只能在 debug 模式跑，**不是容量规划**） |
 | 验收 | 三项都有**可复现的脚本 + 输出**，并把结果贴进 PR |
 | 预估 | 2–3 天 |
 | 依赖 | T14（浏览器端投票链路才完整） |

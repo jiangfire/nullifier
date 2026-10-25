@@ -213,6 +213,33 @@
 | `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `blind-rsa.ts` `credential.ts` `datetime.ts` `error-messages.ts` `field.ts` `focus-trap.ts` `keccak.ts` `mimc.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` `sha256.ts` `sha384.ts` —— 除 `api.ts` 外都有单测 |
 | `src/styles/` | `tokens.css` `base.css` `components.css` `shell.css` |
 | `src/types/` | `portal.ts` `portal-api.ts` |
+| `vitest.config.ts` | 测试配置 + **自写的 `.vue` 编译插件**（见下） |
+| `test/setup.ts` | 测试环境的浏览器全局对象（`localStorage` / `sessionStorage` / `window`） |
+
+**面板渲染测试**（`src/components/panels/panels.test.ts`）：
+
+- 7 个面板此前**既没有类型检查也没有任何测试** —— `tsc` 不认 `.vue` 文件（只有
+  `src/env.d.ts` 里的 `declare module '*.vue'` 让导入不报错），所以模板里的笔误
+  只会在运行时炸。
+- 现在用 Vue 的**服务端渲染**（`vue/server-renderer`）把面板渲染成 HTML 字符串：
+  模板、setup、computed 都会真的跑一遍。助手在 `src/lib/render-panel.ts`。
+- **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载。抓的是
+  「模板引用了不存在的变量」「setup 抛错」「条件分支写反」这一类问题。
+- 覆盖了路线图 T2 的门控：非 debug 模式下「按选项生成凭据」按钮**不渲染**
+  （断言的是按钮本身，不是文案里出现的那个词）。
+
+**`.vue` 编译插件**（`vitest.config.ts` 内联）：
+
+- 离线环境装不了 `@vitejs/plugin-vue`（模块缓存里没有），但 `vue` 自带
+  `vue/compiler-sfc`（再导出 `@vue/compiler-sfc`），`typescript` 又是已有的
+  devDependency —— 三样凑齐就不必新装包。
+- 走 `compileScript({ inlineTemplate: true })`：模板被编译进 `setup` 的返回值，
+  产物是单个模块。仓库里 17 个 `.vue` **全是 `<script setup>`**，没有别的形态。
+- 两个踩过的坑：① `ts.transpileModule` 按**扩展名**判断脚本类型，`.vue` 是它不
+  认识的扩展名 → 会按 JS 解析，`import type { X } from '...'` 直接语法错误。解法是
+  给它一个 `.ts` 后缀。② `rewriteDefault` 的默认 babel 解析器**不认 TypeScript**，
+  而且它只对「函数声明」形式的默认导出生效 —— 对 `_defineComponent({...})` 是空
+  操作，所以这里根本不需要它（`compileScript` 的产物自带合法 `export default`）。
 
 **模式**：设计令牌在 `styles/tokens.css`，组件只引用变量不写裸色值；视图推导（工作区归属/标题/引导步进）集中在 `lib/portal-view.ts`。
 
@@ -231,7 +258,7 @@
 - **admin token 存 `sessionStorage`**（不落 `localStorage`），但仍是明文；同源脚本能读到。
 - **`ballot-draft` 在非 debug 模式返回 404**：门户此时拿不到任何可提交的密文/证明 —— **浏览器端 prover 还没做**（见 §5）。
 - **门户的匿名性文案仍与服务端能力有落差**：非 debug 模式下的提示文案说「正式客户端会在浏览器本地生成密文与证明」，但客户端 prover 尚未落地。
-- `.vue` 面板**零测试**。改面板只能靠 `tsc` + lint + 手工验证。
+- `.vue` 面板**有渲染测试，但不是浏览器渲染**（见 §1.7 的「面板渲染测试」）。没有 CSS、没有事件绑定、没有客户端挂载 —— 改界面的视觉与交互仍要靠人工核对。
 - `pnpm run format`（prettier）会重写 `.pnpm-store`，必须先确认 `.prettierignore` 覆盖（当前已覆盖 `.pnpm-store/`）。
 
 ### 1.8 CLI —— `cmd/cli/main.go`
@@ -431,6 +458,8 @@ pnpm --dir web run test -- src/lib/nullifier.test.ts   # 只跑 nullifier 单测
 pnpm --dir web run test -- src/lib/ballot-cipher.test.ts   # 客户端加密（含跨语言向量）
 pnpm --dir web run test -- src/lib/mimc.test.ts   # MiMC（含跨语言向量）
 pnpm --dir web run test -- src/lib/blind-rsa.test.ts   # 盲签名 client 侧（含跨语言向量）
+pnpm --dir web run test -- src/lib/credential.test.ts   # 凭证消息（含跨语言向量）
+pnpm --dir web run test -- src/components/panels/panels.test.ts   # 7 个面板的渲染测试
 pnpm --dir web run lint
 pnpm --dir web exec tsc --noEmit
 pnpm --dir web run build

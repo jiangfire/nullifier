@@ -107,6 +107,16 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   TLS、门户独立部署、投票运营流程（**解密会话必须在投票窗口打开之前初始化**）、
   启动日志自检与回滚。第一节就把「release 模式下任何客户端都投不出票（缺 prover）」
   写在最前面 —— **这条不是部署能修的**。
+- **门户 7 个 `.vue` 面板第一次有了自动化测试**（`web/src/components/panels/panels.test.ts`，
+  15 个用例）：此前它们**既没有类型检查也没有任何测试** —— `tsc` 不认 `.vue` 文件，
+  模板里的笔误只会在运行时炸。现在用 Vue 的服务端渲染把面板渲染成 HTML 字符串，
+  模板、setup、computed 都真跑一遍，顺带覆盖了 T2 的 debug 门控（非 debug 模式下
+  「按选项生成凭据」按钮**不渲染**）。
+  - 为了能在 vitest 里跑 `.vue`，`web/vitest.config.ts` 里**自写了 SFC 编译插件**：
+    离线环境装不了 `@vitejs/plugin-vue`，但 `vue` 自带 `vue/compiler-sfc`，
+    `typescript` 又是已有的 devDependency —— **不新增任何依赖**。
+  - ⚠️ **不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载。视觉与交互仍靠
+    人工核对（Playwright 离线装不上）。
 - `GET /healthz` 响应新增 `debug` 布尔字段（由 `server.mode` 推导）。
 - **服务现在能用 `CONFIG_FILE` 显式指定配置文件**：`CONFIG_FILE=./configs/config.production.yaml`
   启动即可加载生产配置 —— 那个文件此前**永远不会被自动加载**（viper 只找 `config.yaml`），
