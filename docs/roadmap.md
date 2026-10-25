@@ -503,7 +503,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 3 | 存在「服务端能拿到明文选项」的代码路径（grep 不到才过） | ✅ **已过** —— 这条检查从人工 grep 变成持续门禁 `tests/architecture/plaintext_option_test.go`，而且**不设豁免机制**：HTTP 层请求体不得有明文选项 json tag、usecase 层不得有接受明文选项的入口、服务端代加密那条链的符号不许复活、`ballot-draft` 端点不许复活（POST 它必须 404）。**残留为零** |
 | 4 | 存在「proof 可以跨提案复用」的路径 | ✅ **已过** —— 公开输入由服务端自拼，跨提案 / 跨 nullifier 复用均验签失败 |
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
-| 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.80% |
+| 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 **80.96%**（12 个受控包；2026-10-25 补测 `cmd/eligibility-list` 后由 80.83% 升上来） |
 | 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 19 个测试文件 / 156 个用例全过 |
 | 8 | §4.3 三项盲区没有可复现输出 | 🟡 **已过两半，剩门户 UI 自动化**（盲区 3 的「防重投」与「容量」两半已补；盲区 1 ✅ **PG 集成测试已在本机真 PostgreSQL 17.7 上实跑通过**（外部库路径，`go test ./tests/integration/ -run Postgres` 全过），**整条浏览器验收也在 PG 上跑通**（`DB_DRIVER=postgres`，计票还原出所选选项）—— 剩 testcontainers 那条路径要 CI 实跑；盲区 2 ✅ 已闭合「WASM 路径在真实浏览器里可用」这一半 —— **选票与资格两条浏览器路径都已在真浏览器里人工验过**（2026-10-25），**且整套手工流程已固化成 `scripts/browser-acceptance.sh`**（`setup` / `verify` / `stop`），⚠️ 但门户面板仍没有 UI 自动化回归） |
 | 9 | README / techspec / 门户三处的匿名性声明不一致 | ✅ **已过**（2026-10-25 复核）—— 三处与 §4.1 的能力表对齐。复核时**在门户里挖出一处对用户说错的陈述**：门户「术语参考」面板仍写着「**当前版本密文由服务端生成，生成时服务端能看到你选的选项**」「还没有真实的选票电路」—— 那是 v0.1.0 的口径，v0.2.0 的密文与证明都在浏览器本地生成。已改（`fix(web): tell the truth about where the ballot is encrypted`），并加了一条守卫用例钉住它（`web/src/components/panels/panels.test.ts`）：文案里再出现「服务端能看到你选的选项」这类说法就红。**服务端那条底线由 `tests/architecture/` 守，门户文案这一半现在也守了** |
@@ -511,7 +511,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 **Go**
 
 - [ ] 上述全过
-- [ ] 决策门 G1–G9 全部拍板并落到代码/文档 —— **G1 / G2 / G3 / G4 / G5 / G7 / G8 / G9 已拍板**；G6 仍待拍板
+- [ ] 决策门 G1–G9 全部拍板并落到代码/文档 —— **G1 / G2 / G3 / G4 / G5 / G7 / G8 / G9 已拍板**；**G6（是否换纯 Go sqlite 驱动）经 2026-10-25 补证后，结论明确为「保留 cgo」= 当前实现 = 本版发出去的样子**（已发布产物实测无外部 DLL 依赖，见 §6）—— **待用户确认；若确认「保留 cgo」，本项即闭合**
 - [ ] `VERSION` 与 tag 一致 —— **`VERSION` 已改为 `0.2.0`**（2026-10-25），tag `v0.2.0` 未打（等拍板）；release workflow 会校验两者一致，不一致直接失败
 - [ ] 生产部署清单全勾：[`docs/deployment-checklist.md`](./deployment-checklist.md)（`SERVER_ADMIN_BEARER_TOKEN` / `SERVER_CORS_ALLOWED_ORIGINS` / `CRYPTO_VK_PATH` / `DB_DRIVER=postgres` / TLS / 门户独立部署 / 迁移步骤 / 密钥就位 / 启动日志自检）
 
@@ -566,7 +566,32 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 
 | # | 决策 | 选项 | 建议 | 卡住什么 |
 |---|---|---|---|---|
-| G6 | 是否换纯 Go sqlite 驱动 | 保留 cgo（当前）/ 换 `modernc.org/sqlite` | **保留 cgo**：换驱动会波及持久化层方言差异测试，收益只是「静态链接二进制」，不值 | 发布形态 |
+| G6 | 是否换纯 Go sqlite 驱动 | 保留 cgo（当前）/ 换 `modernc.org/sqlite` | **保留 cgo** —— 原建议（「换驱动会波及方言差异测试，收益只是静态链接二进制，不值」）**方向对但理由要换成实测的**（2026-10-25 补证，见下） | 发布形态（**不阻塞 v0.2.0**：发出去的产物就是「保留 cgo」这一版） |
+
+> **G6 的实测依据（2026-10-25）** —— 把「保留 cgo」这个选项从「直觉上不值」变成「有证据」：
+>
+> - **「静态链接二进制」这个收益在 Windows 上已经拿到了。** 直接下载 v0.1.0 已发布的
+>   `nullifier-windows-amd64.zip`（zip 里只有两个 exe，没有任何 DLL），用 `llvm-objdump -p`
+>   看导入表：服务端只依赖 `KERNEL32.dll` 与 `api-ms-win-crt-*.dll`（**Windows 10+ 自带的
+>   UCRT**），**没有 `libgcc_s_seh-1.dll`、没有 `libwinpthread-1.dll`** —— 终端用户下载解压
+>   就能直接跑，不需要装 MinGW。原因是 Go 的**内部链接器**在 windows 上静态链接了
+>   `libmingwex.a` / `libmingw32.a` / `libmsvcrt.a` / `libgcc.a`
+>   （`cmd/link/internal/ld/lib.go` 的 `loadWindowsHostArchives`）。CLI 更是只依赖
+>   `kernel32.dll`（它不走 cgo）。
+> - **换驱动的成本比原记录更高**：2026-10-25 修的「备池接口大批量必然 500」用的正是
+>   **mattn 特有的** `sqlite3.SQLiteDriver.ConnectHook` 挂 `PRAGMA temp_store=MEMORY`
+>   （`internal/infrastructure/persistence/db.go`）。modernc 的驱动**没有 ConnectHook**，
+>   换过去要改用 DSN 里的 `_pragma=temp_store(MEMORY)` —— 等于**重写一个正在流血的修复**。
+> - **「离线装不了」这个前提不成立**：`modernc.org/sqlite` 在本机模块缓存里就有
+>   v1.23.1 … v1.57.0；`gorm.io/driver/sqlite` 的 `Dialector.DriverName` 也支持换驱动。
+>   所以「换不了」不能当理由 —— 但结论不变。
+> - **换驱动唯一剩下的真实收益**：产物可以 `CGO_ENABLED=0` 构建 → Linux 产物也能**完全静态**
+>   （不依赖 glibc），对 distroless / scratch 容器部署有价值；构建侧也不再需要 C 工具链
+>   （Windows runner 不用装 MinGW）。**但生产用的是带 glibc 的 Linux 服务器**（PostgreSQL
+>   也在同一套环境里），这不是当前痛点。
+> - **口径**：G6 **不阻塞 v0.2.0 发布** —— 发出去的就是「保留 cgo」这一版，产物形态已在
+>   v0.1.0 上验证过（5 平台二进制 + 冒烟测试）。真要换，属于**代码变更**（新增依赖 +
+>   重写 temp_store 修复 + 重跑方言差异测试），不在 v0.2.0 范围内，应单开一版处理。
 | G9 | CLI 是否需要本地 prover | CLI 也做本地 prover / CLI 只做「带 proof 提交」 | ✅ **已拍板：两个都要**（2026-10-21）—— 原建议是「CLI 只做带 proof 提交，生成 proof 放浏览器端」，那条建议的前提是浏览器端 prover 可行。**实测离线环境装不了 `gnark-wasm`**（模块缓存里没有）。**落地**：CLI 新增 `ballot-prove`；**浏览器侧最终也做成了**（2026-10-21，见下） | T14 |
 
 > **G9 的后续补充（2026-10-21）**：浏览器端 prover 的落地路线**不是**原设想里的

@@ -62,6 +62,12 @@
 | 压测工具（可选） | `go build ./cmd/loadtest` | ☐ |
 
 - **`cmd/server` 不提供静态托管**：门户要单独部署（nginx / Caddy / 对象存储）。
+- **Windows 产物不需要额外装 MinGW**：发布包里的 `nullifier-server-windows-amd64.exe` /
+  `nullifier-cli-windows-amd64.exe` 解压即用，**不依赖 `libgcc_s_seh-1.dll` 或
+  `libwinpthread-1.dll`**（2026-10-25 实测 v0.1.0 已发布产物的导入表：只依赖
+  `KERNEL32.dll` 与 Windows 10+ 自带的 UCRT）。Go 的内部链接器把 mingw 的支持库静态
+  链进去了。Linux / macOS 产物依赖系统 libc/glibc —— 那是服务器本来就有的。
+  （这条对应路线图 §6 的 **G6**：换纯 Go 驱动的「静态链接」收益在 Windows 上已经有了。）
 - 门户构建时 `web/package.json` 的 `version` 由发布流水线从仓库根的 `VERSION` 注入，
   **不要手改**。
 - **构建顺序**：先 `make web-wasm`（把 wasm 与胶水放进 `web/public/`），再
