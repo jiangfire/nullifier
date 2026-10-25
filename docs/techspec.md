@@ -900,6 +900,11 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   - **两份产物必须分开保管** —— 服务端只该拿到 root
   - **每次运行都会重新生成资格秘密**，因此树根每次都不同：名单与资格包必须**成套**
     保存，不能只留 root
+  - **产物格式是接口，由 `cmd/eligibility-list` 的测试钉住**：工具落盘的 JSON
+    （`root.json` 的 `root`/`depth`/`count`、成员包的 `secret`/`leaf`/`index`/`path`/
+    `root`/`depth`）要被客户端与服务端读懂，任何字段编码或路径长度的偏差都会
+    让「工具生成的名单」在真实投票时全线失败。测试覆盖**从文件读回**的完整往返：
+    工具产物 → 客户端出证明 → 服务端用 root.json 验签通过。
 - Makefile 目标：`make eligibility-list`（构建名单工具）、
   `make web-eligibility-key PK=<路径>`（把资格 proving key 放进门户静态目录）。
 

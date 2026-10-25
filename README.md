@@ -353,7 +353,7 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 | 口径 | 数值 | 覆盖范围 |
 |---|---|---|
-| 门槛口径 | **80.8%** | `scripts/check-coverage.sh` 选中的 11 个包:usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server(2026-10-25 实测) |
+| 门槛口径 | **81.0%** | `scripts/check-coverage.sh` 选中的 12 个包:usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-eligibility-list / cmd-server(2026-10-25 实测) |
 | 全仓口径 | **72.7%** | `./...` 全部包(2026-10-25 实测) |
 
 门槛是**逐包分档**的,每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`,单个包回退会直接让 CI 变红 —— 不再是"一个总和撑着,低覆盖率的包悄悄退化"。当前最低的一档是 `internal/infrastructure/persistence`(63.9%),抬门槛时它会先卡住。**新增代码请一并补测**。

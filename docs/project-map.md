@@ -558,6 +558,10 @@ publish        → 提案必须已关闭（isProposalClosed）
    - **一条语句的绑定参数有上限**：7 列 × 4681 行就超了（新版上限 32766），报 `too many SQL variables`。而 `credentials/pool` 允许一次投 **10000** 个槽位 —— 不分批必然失败。修法：`persistence/credential_claim_repository.go` 里分批（100 行/条语句），**批次在同一个事务里**。
    - **多行 INSERT 的主键去重会建临时索引**，撑破内存就溢写临时文件；本机（Windows，用户目录下的临时目录）实测这个临时文件建不出来 → 整条 INSERT 以 `SQLITE_CANTOPEN` 失败，接口只报一句看不懂的 `unable to open database file`。修法：驱动的 ConnectHook 对**每条连接**设 `PRAGMA temp_store=MEMORY`（`persistence/db.go`）。
    - **两条都要有回归测试**：光有分批不够（内存库的临时表天生在内存里，复现不出第二条），光有 pragma 也不够（第一条是确定性失败）。用例见 `internal/infrastructure/persistence/credential_claim_repository_test.go` 的 `TestCredentialClaimRepository_SaveLargeBatch` —— **必须用文件库 + UUID 长度的 id**，否则测不出来。
+40. **名单工具的产物格式是接口，不是实现细节。** `cmd/eligibility-list` 落盘的 JSON（`root.json` 的 `root`/`depth`/`count`、成员包的 `secret`/`leaf`/`index`/`path`/`root`/`depth`）要被**客户端与服务端读懂** —— 运营方跑工具生成名单 → root 配到服务端 → 成员包发给本人 → 本人用它领票。中间隔着一次序列化与一次反序列化，字段名、编码方式、路径长度错任何一样，都要等到**真实投票时**才暴露，那时票已经开了。
+   - **曾经没有测试守着这条链路**：`tests/e2e/eligibility_test.go` 的名单是在测试里**手搓**的（自己算叶子、自己 `BuildTree`），走的是「同一个包直接构造」的路；真实部署用的是工具落盘的**文件**。两者之间隔着一层，测试看不见。
+   - **现在的口径**：`cmd/eligibility-list/main_test.go` 从**文件读回**工具产物，跑完整的「工具产物 → 客户端出证明 → 服务端用 root.json 验签通过」往返，并钉住产物契约（文件名、字段、路径长度 = `TreeDepth`、成员包 0600、包与 root 必须成套）。
+   - **守法**：改 `eligibility.MemberPackage` / `ListPackage` 的 JSON tag、改树深、改工具的落盘逻辑，都要跑这个包的测试；它现在是覆盖率受控包之一（门槛 82%）。
 
 ---
 
@@ -570,7 +574,7 @@ go vet ./...
 gofmt -l ./cmd ./internal ./tests      # 应无输出
 go test ./...                          # Windows 需 CGO_ENABLED=1
 bash ./scripts/check-coverage.sh 80 coverage.ci.out   # 用 Git Bash，不是 WSL
-#   覆盖率门槛按包分档，逐包判定；门槛值见 scripts/coverage-thresholds.txt（11 个包）
+#   覆盖率门槛按包分档，逐包判定；门槛值见 scripts/coverage-thresholds.txt（12 个包）
 
 # 只跑选票密码学栈（真实 Groth16：加解密往返、证明往返、篡改公开输入、越界选项、错 nullifier 秘密）
 go test ./internal/infrastructure/crypto/ballot/ -v
