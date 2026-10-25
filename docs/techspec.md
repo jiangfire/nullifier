@@ -760,6 +760,10 @@ web/                        # Vue 3 前端门户
   成员包与挑战交给浏览器端 prover（`web/src/lib/eligibility-prover.ts`，密码学全在
   WASM 里）出证明，最后带着证明去领凭证。
   - **资格包只留在内存**：不写 `localStorage`、不上传，刷新页面就要重新导入。
+  - **发给 Worker 前要把成员包拷成普通对象**：门户里它存在 Vue 的 `ref` 里，读出来是
+    响应式 Proxy，而 `postMessage` 的结构化克隆克隆不了 Proxy —— 浏览器会抛
+    `DataCloneError: #<Object> could not be cloned.`，「匿名领取」必然失败。修法见
+    `web/src/lib/eligibility-prover.ts` 的 `buildEligibilityProveRequest`（逐字段拷贝）。
   - 前提是静态目录里还备好 `eligibility-proving.key`（`make web-eligibility-key PK=<路径>`）。
 - **nullifier 现在由 prover 派生**：出票时由 `ballot.ProveBallot` 在本地随机一个秘密
   `s` 并派生 `nullifier = MiMC(s, proposal_id)`，秘密不出本地。门户表单里的 nullifier
@@ -1089,8 +1093,10 @@ make pg-test        # 起库 → 跑集成测试 → 关库
     电路与 WASM、重生成两套密钥，并让所有成员换新的资格包。
   - **服务端在未开启资格校验时不强制一人一票**（`GET /healthz` 的 `eligibility`
     字段会报出来）；release 模式强制开启，开发模式默认关闭。
-  - **门户的浏览器端资格路径仍需人工在真浏览器里点一遍**：仓库里没有 Playwright，
-    自动化只到 node 驱动 WASM（`tests/e2e/wasm_eligibility_test.go`）。
+  - **门户的浏览器端资格路径已在真浏览器里人工验过一遍**（2026-10-25，Chromium / Electron：
+    导入资格文件 → 领取 201 → 重复领取 409 → 本地生成选票 → 提交 201 → 计票还原出所选
+    选项）。仓库里**没有** Playwright，自动化只到 node 驱动 WASM
+    （`tests/e2e/wasm_eligibility_test.go`）—— **每次上线仍要人工点一遍**。
   - **`cmd/loadtest` 不支持资格证明**（见 §8.1）：它不会取挑战、也不会出资格证明。
   - **资格表不许与凭证、票据关联**：`eligibility_uses` 只存去重键。一旦能把资格
     连到票，「分发不泄露身份」这条底线就破了。

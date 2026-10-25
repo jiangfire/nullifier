@@ -293,6 +293,17 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 
 ### 修复
 
+- **门户的资格领取在真浏览器里必然失败：发给 prover Worker 的成员包是 Vue 的响应式 Proxy。**
+  资格包存在 `ref` 里，读出来是 Proxy，而 `postMessage` 的结构化克隆克隆不了 Proxy ——
+  浏览器直接抛 `DataCloneError: #<Object> could not be cloned.`，证明根本发不出去，页面提示
+  「资格证明失败」。**node 驱动的 WASM 用例测不出来**（它不走 Worker），2026-10-25 的真实
+  浏览器验收才暴露出来。
+  - 现在拼请求体时把成员包**逐字段拷成普通对象**（在边界上保证可克隆）；前端新增一条回归
+    用例：响应式 ref 里的成员包拼出的请求体必须不是 reactive，且能 `structuredClone` ——
+    去掉修复即红。
+- **`web/.gitignore` 漏了资格 proving key。** 旧的三件套（`ballot-prover.wasm`、
+  `wasm_exec.js`、`proving.key`）都被忽略了，新增的 `public/eligibility-proving.key` 却**没有**
+  —— 它是可以被误提交的密钥材料。现在与选票 proving key 同等对待：只进门户静态目录，不进仓库。
 - **门户的盲签名变体名此前写错了，领取凭证这条路在真浏览器里是断的。** 服务端在
   `issuer_key` 响应里回的 `variant` 是 CIRCL `blindsign/blindrsa` 的**线路名**
   `RSABSSA-SHA384-PSS-Deterministic`，门户写的是 Go 侧的枚举标识符

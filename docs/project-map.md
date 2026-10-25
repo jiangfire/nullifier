@@ -542,6 +542,7 @@ publish        → 提案必须已关闭（isProposalClosed）
 33. **资格包丢了就领不了了，没有找回路径。** 资格秘密只存在于 `eligibility-<member_id>.json` 里；服务端不存秘密、也不存叶子。补发只能由 `cmd/eligibility-list` 重新生成 —— 但它每次运行都会**重新随机生成秘密**，树根随之改变，等于换了一份名单，所有成员都要换新的资格包。名单与资格包必须**成套**保存。
 34. **`eligibility.TreeDepth = 10` 是编译期常量。** 名单上限 1024 人。改它要重编电路与 WASM、重生成两套密钥，并让所有成员换新的资格包 —— 不是改个配置项那么简单。
 35. **「一人一票」只在公开领取端点上强制。** 管理端签发（`POST /api/v1/credentials`，CLI 的 `credential-issue`）**不校验资格证明** —— 运营方可以为指定 `user_id` 签发凭证。运营流程若允许管理端补发凭证，这条路径会绕过资格去重。
+36. **发给 Worker 的东西必须是「普通对象」。** 门户里资格包存在 Vue 的 `ref` 里，读出来是**响应式 Proxy**，而 `postMessage` 的结构化克隆克隆不了 Proxy —— 浏览器直接抛 `DataCloneError: #<Object> could not be cloned.`，「匿名领取」必然失败。修法是在 `buildEligibilityProveRequest` 里把成员包**逐字段拷成普通对象**（在边界上保证可克隆，与来源是不是 Proxy 无关）。**这个坑 node 测不出来**：node 驱动的 WASM 用例不走 Worker，只有真浏览器能发现；`web/src/lib/eligibility-prover.test.ts` 有一条用例钉住它。
 
 ---
 
@@ -683,9 +684,11 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
   verifying key 验签通过（201），计票还原出浏览器端选的那个选项。
   但**门户面板仍没有浏览器自动化回归**（仓库无 Playwright，见 §1.7）—— 盲区 2 闭合的是
   「WASM 路径在真实浏览器里可用」，不是「门户有端到端 UI 回归」。
-- **「一人一票」的资格证明已落地（T22）**，但还有三处边界没闭合：
-  - **门户的浏览器端资格路径还没有在真浏览器里人工点过一遍**：自动化只到 node 驱动
-    WASM（`tests/e2e/wasm_eligibility_test.go`）。仓库无 Playwright，这条仍靠人工。
+- **「一人一票」的资格证明已落地（T22）**，但还有三处要注意：
+  - **门户的浏览器端资格路径已在真浏览器里人工点过一遍**（2026-10-25，Chromium / Electron）：
+    导入资格文件 → 领取 201 → **重复领取 409「这份资格已经领过票了 —— 一人一票」** →
+    浏览器本地生成选票 → 提交 201 → 计票还原出所选选项。但仓库无 Playwright，
+    **每次上线仍要人工点一遍**（步骤见 `docs/deployment-checklist.md` §8.1）。
   - **`cmd/loadtest` 不支持资格证明**（它不会取挑战、也不会出资格证明），因此压测仍然
     只能在 debug 模式跑。
   - **资格包丢了无法恢复**（服务端不存秘密与叶子），补发要重新生成整份名单。

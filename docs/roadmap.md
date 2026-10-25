@@ -327,6 +327,24 @@ T19 已完成其可自动化的部分（CORS 的真实源仍是部署项）；T2
 `TestAPI_WASMEligibilityProver_E2E` —— 用 node 驱动**真的 WASM 模块**出资格证明，
 服务端用**真的资格验证密钥**验过，去重键与 Go 侧自算的一致。
 
+**真浏览器里的资格路径验收（2026-10-25，Chromium / Electron）** —— 走完了整条链路：
+
+| 步 | 期望 | 实测 |
+|---|---|---|
+| 导入资格文件 | 提示「资格文件已导入」，只留在内存 | ✅ `eligibility-m-0001.json` |
+| 匿名领取 | 取挑战 → 浏览器本地出资格证明 → claim / blind-sign / attest 全过 | ✅ claim **201**、attest **201**（服务端日志 `credential attested`） |
+| **重复领取（同一资格）** | **409 `ELIGIBILITY_ALREADY_USED`** | ✅ 门户提示「**这份资格已经领过票了 —— 一人一票**」 |
+| 换另一个提案再领 | 能领（去重键按提案派生） | ✅ claim **201** |
+| 浏览器本地生成选票 | 密文 + nullifier + 证明都在本地生成 | ✅ `selected_option: beta` |
+| 提交选票 | 服务端只拿到密文 | ✅ **201**（服务端日志 `vote submitted`） |
+| 计票 | 门限解密还原出浏览器端选的选项 | ✅ `{"tally":{"beta":1},"total_votes":1}` |
+
+> ⚠️ **这次验收挖出一个只有真浏览器能发现的 bug**：资格包存在 Vue 的 `ref` 里，读出来是
+> 响应式 Proxy，而 `postMessage` 的结构化克隆克隆不了 Proxy —— 浏览器抛
+> `DataCloneError: #<Object> could not be cloned.`，**「匿名领取」在真浏览器里必然失败**。
+> node 驱动的 WASM 用例不走 Worker，所以完全测不出来。已修（`fix(web): send a plain
+> member package to the prover worker`），并补了一条回归用例钉住它。
+
 **另有单测**：usecase（`internal/usecase/registration_eligibility_test.go`）、
 persistence（`internal/infrastructure/persistence/eligibility_use_repository_test.go`）、
 http（`internal/infrastructure/http/eligibility_endpoints_test.go`）、
@@ -339,8 +357,9 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 
 **T22 仍然没有闭合的**：
 
-- **浏览器端没有自动化**：仓库里没有 Playwright，门户的资格领取路径**仍需真浏览器人工点一遍**
-  （步骤见 `docs/deployment-checklist.md`）。自动化证据只到 node 驱动的 WASM 模块。
+- **浏览器端没有自动化**：仓库里没有 Playwright。门户的资格领取路径**已在真浏览器里人工
+  验过一遍**（2026-10-25，见上面的验收表），但**每次上线仍要人工点一遍**
+  （步骤见 `docs/deployment-checklist.md` §8.1）—— 自动化证据只到 node 驱动的 WASM 模块。
 - **PG 集成测试本机无 Docker**（与 T22 无关，但整体验收仍缺）。
 - **`cmd/loadtest` 不支持资格证明**：它只在**未开启资格校验**的服务上可用。
 - **资格包丢失无法找回**（成员包是秘密材料，发放靠安全渠道）。
@@ -397,10 +416,14 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
      写成了 Go 的枚举标识符，服务端发的是 CIRCL 的线路名 —— 领取流程会停在 claim 之后
      （blind-sign 从未发出）。已修（`fix(web): use the CIRCL wire name for the blind
      signature variant`），并加了 Go/TS 两侧的跨语言锁定。
-   - ⚠️ **T22 的资格领取路径也在这条盲区里**：门户的「导入资格文件 → 领凭证」没有浏览器
-     自动化。自动化证据只到 node 驱动的 WASM 模块
-     （`tests/e2e/wasm_eligibility_test.go`）—— **真浏览器里人工点一遍仍然要做**
-     （步骤见 `docs/deployment-checklist.md`）。
+   - ✅ **T22 的资格领取路径已在真浏览器里验过**（2026-10-25，Chromium / Electron）：导入资格
+     文件 → 匿名领取（claim 201）→ **重复领取 409「这份资格已经领过票了 —— 一人一票」** →
+     浏览器本地生成选票 → 提交 201 → 计票还原出所选选项。⚠️ 仓库仍**没有**浏览器自动化
+     （证据只到 node 驱动的 WASM 模块），**每次上线仍要人工点一遍**
+     （步骤见 `docs/deployment-checklist.md` §8.1）。
+   - 这次验收还挖出**第二个只靠 node 测不出来的 bug**：资格包在门户里是 Vue 的响应式 Proxy，
+     `postMessage` 克隆不了它 —— 「匿名领取」在真浏览器里必然失败。已修
+     （`fix(web): send a plain member package to the prover worker`），并补了回归用例。
 3. **并发投票下的防重投与性能容量** —— 唯一索引兜底，但没测过
    - 🟡 **防重投这一半已补**（本轮落地）：`tests/e2e/concurrent_nullifier_test.go` ——
      8 个请求**同时**用同一个 nullifier、各自带不同凭证提交，断言恰好 1 张票入库、
@@ -424,13 +447,13 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | # | 检查项 | 当前状态 |
 |---|---|---|
 | 1 | 能力 A–F 任一未完成 | ✅ **已过** —— A / B / D 已在 CLI 与门户两侧闭合（浏览器端 prover 走自建的 Go → js/wasm 路线）；C / E / F 已达成。能力 A 不再有残留：服务端的代加密链（`ballot-draft`）已删除 |
-| 2 | 能力 G 的完成定义未达成 —— 领取凭证时不需要任何资格证明（T22），意味着服务端无法强制一人一票 | ✅ **已过** —— **T22 已落地（2026-10-25）**：领取凭证必须先过零知识资格证明（`eligibility-challenge` → `claim` 带 `{eligibility_proof, qualification_id, challenge}`），**服务端只见 root**、无法把资格对应到任何成员；同一份资格第二次领取撞 `eligibility_uses` 的唯一索引 → 409 `ELIGIBILITY_ALREADY_USED`；跨提案不可复用。验收 ①–⑤ 各有 e2e 证据（`tests/e2e/eligibility_test.go`），浏览器路径的跨语言证据见 `tests/e2e/wasm_eligibility_test.go`。**部署侧的硬要求**：release 模式必须配 `crypto.eligibility_root` + `crypto.eligibility_vk_path`，否则服务启动失败 |
+| 2 | 能力 G 的完成定义未达成 —— 领取凭证时不需要任何资格证明（T22），意味着服务端无法强制一人一票 | ✅ **已过** —— **T22 已落地（2026-10-25）**：领取凭证必须先过零知识资格证明（`eligibility-challenge` → `claim` 带 `{eligibility_proof, qualification_id, challenge}`），**服务端只见 root**、无法把资格对应到任何成员；同一份资格第二次领取撞 `eligibility_uses` 的唯一索引 → 409 `ELIGIBILITY_ALREADY_USED`；跨提案不可复用。验收 ①–⑤ 各有 e2e 证据（`tests/e2e/eligibility_test.go`），浏览器路径的跨语言证据见 `tests/e2e/wasm_eligibility_test.go`（node）与 2026-10-25 的**真浏览器人工验收**（见 §4.1 的验收表）。**部署侧的硬要求**：release 模式必须配 `crypto.eligibility_root` + `crypto.eligibility_vk_path`，否则服务启动失败 |
 | 3 | 存在「服务端能拿到明文选项」的代码路径（grep 不到才过） | ✅ **已过** —— 这条检查从人工 grep 变成持续门禁 `tests/architecture/plaintext_option_test.go`，而且**不设豁免机制**：HTTP 层请求体不得有明文选项 json tag、usecase 层不得有接受明文选项的入口、服务端代加密那条链的符号不许复活、`ballot-draft` 端点不许复活（POST 它必须 404）。**残留为零** |
 | 4 | 存在「proof 可以跨提案复用」的路径 | ✅ **已过** —— 公开输入由服务端自拼，跨提案 / 跨 nullifier 复用均验签失败 |
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
 | 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.4% |
 | 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 149 个用例全过 |
-| 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未开工（盲区 3 的「防重投」与「容量」两半已补；盲区 1 的 PG 集成测试已有 compose + `make pg-test` 可复现脚本，⚠️ 本机无 Docker 未实跑；盲区 2 已闭合「WASM 路径在真实浏览器里可用」这一半，⚠️ 但门户面板仍没有 UI 自动化回归） |
+| 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未开工（盲区 3 的「防重投」与「容量」两半已补；盲区 1 的 PG 集成测试已有 compose + `make pg-test` 可复现脚本，⚠️ 本机无 Docker 未实跑；盲区 2 已闭合「WASM 路径在真实浏览器里可用」这一半 —— **选票与资格两条浏览器路径都已在真浏览器里人工验过**（2026-10-25），⚠️ 但门户面板仍没有 UI 自动化回归） |
 | 9 | README / techspec / 门户三处的匿名性声明不一致 | 🟡 **本轮已同步，待复核** —— 三处与 §4.1 的能力表对齐 |
 
 **Go**

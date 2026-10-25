@@ -285,6 +285,7 @@ go run ./cmd/cli credential-claim -proposal p-1 \
 |---|---|---|---|
 | ⑥ | 服务端只见 root：把「成员包」拿掉，服务端仍能验资格、但无法把 leaf 对应到任何人 | 结构性的：服务端只持有 root 与 verifying key（`crypto/eligibility_service.go`），没有名单、没有成员包 | `internal/infrastructure/crypto/eligibility_service.go` + `internal/infrastructure/crypto/eligibility/merkle.go`（`ListPackage` 只有 root / depth / count） |
 | ⑦ | 跨语言一致性：浏览器端出的资格证明能被服务端的真验证密钥验过 | e2e：node 驱动**真的 WASM 模块**出资格证明，服务端用**真的资格验证密钥**验过，去重键与 Go 侧自算一致 | `tests/e2e/wasm_eligibility_test.go` 的 `TestAPI_WASMEligibilityProver_E2E` |
+| ⑧ | 门户的资格领取在**真浏览器**里走通 | 人工：导入资格文件 → 领取 → 重复领取 → 本地生成选票 → 提交 → 计票 | 2026-10-25（Chromium / Electron）：claim **201** / 重复领取 **409** / 提交 **201** / 计票 `{"beta":1}` |
 
 **单测与守卫**（另有，不在 T22 的五条之列）：
 `internal/usecase/registration_eligibility_test.go`（challenge / 必需性 / 验签失败 / 落库去重 /
@@ -390,9 +391,14 @@ No-Go #2 仍然判未过。
 
 ### 8.1 仍然没有闭合的（写文档时必须说清）
 
-- **浏览器端没有自动化**：仓库里没有 Playwright，门户的「导入资格文件 → 领凭证」这条路
-  **仍需在真浏览器里人工点一遍**（步骤见 [`docs/deployment-checklist.md`](./deployment-checklist.md)）。
+- **浏览器端没有自动化**：仓库里没有 Playwright。门户的「导入资格文件 → 领凭证」这条路
+  **已在真浏览器里人工点过一遍**（2026-10-25，Chromium / Electron：导入资格文件 → 领取
+  **201** → **重复领取 409「这份资格已经领过票了 —— 一人一票」** → 浏览器本地生成选票 →
+  提交 **201** → 计票还原出所选选项），但**每次上线仍要人工点一遍**
+  （步骤见 [`docs/deployment-checklist.md`](./deployment-checklist.md) §8.1）。
   自动化证据只到 node 驱动的 WASM 模块（`tests/e2e/wasm_eligibility_test.go`）。
+  > 那次真浏览器验收还挖出一个**只有真浏览器能发现的 bug**：资格包在门户里是 Vue 的响应式
+  > Proxy，`postMessage` 克隆不了它 —— 「匿名领取」必然失败。已修并补了回归用例。
 - **PostgreSQL 集成测试本机无 Docker**：与 T22 无关，但整体验收仍缺这一项。
 - **`cmd/loadtest` 不支持资格证明**：它只在**未开启资格校验**的服务上可用
   （开了之后 claim 会返回 `ELIGIBILITY_REQUIRED`）。
