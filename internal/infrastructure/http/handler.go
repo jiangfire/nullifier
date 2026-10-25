@@ -81,9 +81,14 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.POST("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
 	r.POST("/proposals/:proposal_id/ballot-draft", h.PrepareBallotDraft)
 	r.GET("/proposals/:proposal_id/election-key", h.GetElectionKey)
-	// 匿名领取凭证：请求体不含任何身份信息，服务端因此无从记录
-	// 「谁领了哪个凭证」。
-	r.POST("/proposals/:proposal_id/credentials/claim", h.ClaimCredential)
+	// 匿名领取凭证：真两段式盲签名，三步走。
+	//   ① claim      —— 预留一个池槽位，拿到 user_id 与签发方公钥（不签名）
+	//   ② blind-sign —— 服务端对**盲化后**的消息做盲签名
+	//   ③ attest     —— 客户端交回解盲后的签名，服务端验签并落库
+	// 请求体里刻意没有任何身份字段：服务端一旦知道公钥，盲化当场失效。
+	r.POST("/proposals/:proposal_id/credentials/claim", h.ReserveCredential)
+	r.POST("/proposals/:proposal_id/credentials/blind-sign", h.BlindSignCredential)
+	r.POST("/proposals/:proposal_id/credentials/attest", h.AttestCredential)
 	r.GET("/proposals/:proposal_id/results", h.GetResult)
 	r.GET("/proposals/:proposal_id/audit-anchors", h.ListAuditAnchors)
 }
@@ -153,10 +158,95 @@ func (h *Handler) SubmitVote(c *gin.Context) {
 	})
 }
 
-type issueCredentialPayload struct {
+// reserveCredentialPayload 是管理端预留签发权的请求体。
+//
+// **没有 user_pub_key**：服务端一旦知道公钥，就能算出凭证消息的原文 ——
+// 盲化当场失效（它手上有私钥，根本不需要解盲）。
+type reserveCredentialPayload struct {
 	ProposalID string `json:"proposal_id" validate:"required"`
 	UserID     string `json:"user_id" validate:"required"`
+}
+
+// blindSignPayload 是盲签名请求体。
+type blindSignPayload struct {
+	UserID string `json:"user_id" validate:"required"`
+	// BlindedMessage 是客户端盲化后的消息 —— 签发方只见得到它。
+	BlindedMessage string `json:"blinded_message" validate:"required,base64"`
+	// IssuerKeyVersion 是客户端盲化时用的那一版密钥。
+	IssuerKeyVersion int `json:"issuer_key_version" validate:"required,min=1"`
+}
+
+// adminBlindSignPayload 是管理端盲签名请求体。
+type adminBlindSignPayload struct {
+	ProposalID       string `json:"proposal_id" validate:"required"`
+	UserID           string `json:"user_id" validate:"required"`
+	BlindedMessage   string `json:"blinded_message" validate:"required,base64"`
+	IssuerKeyVersion int    `json:"issuer_key_version" validate:"required,min=1"`
+}
+
+// attestCredentialPayload 是 attest 请求体：客户端解盲出来的最终签名。
+type attestCredentialPayload struct {
+	UserID     string `json:"user_id" validate:"required"`
 	UserPubKey string `json:"user_pub_key" validate:"required,base64"`
+	Signature  string `json:"signature" validate:"required,base64"`
+}
+
+// reservationResponse 是「预留签发权」的响应。
+//
+// 它带出签发方公钥：客户端要拿它把凭证消息盲化。公钥本来就是公开值。
+func reservationResponse(reservation *usecase.CredentialReservation) gin.H {
+	return gin.H{
+		"proposal_id":        reservation.ProposalID,
+		"user_id":            reservation.UserID,
+		"issuer_key_version": reservation.IssuerKey.Version,
+		"variant":            reservation.IssuerKey.Variant,
+		"modulus":            base64.StdEncoding.EncodeToString(reservation.IssuerKey.Modulus),
+		"exponent":           reservation.IssuerKey.Exponent,
+	}
+}
+
+func credentialResponse(credential *entity.Credential) gin.H {
+	return gin.H{
+		"id":                 credential.ID,
+		"proposal_id":        credential.ProposalID,
+		"user_id":            credential.UserID,
+		"user_pub_key":       base64.StdEncoding.EncodeToString(credential.UserPubKey),
+		"signature":          base64.StdEncoding.EncodeToString(credential.Signature),
+		"issuer_key_version": credential.IssuerKeyVersion,
+		"issued_at":          credential.IssuedAt.Format("2006-01-02T15:04:05Z07:00"),
+	}
+}
+
+// ReserveCredentialForUser 管理端为一个指定的 user_id 预留签发权。
+//
+// 它**不签名**：管理端客户端拿 user_id 与签发方公钥后本地盲化，再走
+// 「盲签名 → attest」两步。服务端因此在签名阶段只见盲化消息。
+func (h *Handler) ReserveCredentialForUser(c *gin.Context) {
+	if h.registerUC == nil {
+		c.Error(fmt.Errorf("register usecase is not configured"))
+		return
+	}
+
+	var payload reserveCredentialPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+	if err := h.validate.Struct(payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+
+	reservation, err := h.registerUC.ReserveCredentialForUser(
+		c.Request.Context(),
+		payload.ProposalID,
+		payload.UserID,
+	)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	c.JSON(http.StatusCreated, reservationResponse(reservation))
 }
 
 type voteStatusPayload struct {
@@ -165,66 +255,46 @@ type voteStatusPayload struct {
 	CredentialSignature string `json:"credential_signature" validate:"required,base64"`
 }
 
-func (h *Handler) IssueCredential(c *gin.Context) {
-	if h.registerUC == nil {
-		c.Error(fmt.Errorf("register usecase is not configured"))
-		return
-	}
-
-	var payload issueCredentialPayload
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
-		return
-	}
-	if err := h.validate.Struct(payload); err != nil {
-		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
-		return
-	}
-
-	pubKeyBytes, err := base64.StdEncoding.DecodeString(payload.UserPubKey)
-	if err != nil {
-		c.Error(fmt.Errorf("%w: user_pub_key must be base64", usecase.ErrInvalidRequest))
-		return
-	}
-
-	credential, err := h.registerUC.IssueCredential(c.Request.Context(), payload.ProposalID, payload.UserID, pubKeyBytes)
-	if err != nil {
-		c.Error(err)
-		return
-	}
-
-	c.JSON(http.StatusCreated, gin.H{
-		"id":                 credential.ID,
-		"proposal_id":        credential.ProposalID,
-		"user_id":            credential.UserID,
-		"user_pub_key":       base64.StdEncoding.EncodeToString(credential.UserPubKey),
-		"signature":          base64.StdEncoding.EncodeToString(credential.Signature),
-		"issuer_key_version": credential.IssuerKeyVersion,
-		"issued_at":          credential.IssuedAt.Format("2006-01-02T15:04:05Z07:00"),
-	})
-}
-
-// claimCredentialPayload 是匿名领取凭证的请求体。
-//
-// **刻意没有任何身份字段**：领取者只提交自己的公钥，user_id 由服务端
-// 从凭证池里随机分配 —— 服务端因此无法把凭证和投票人对应起来。
-type claimCredentialPayload struct {
-	UserPubKey string `json:"user_pub_key" validate:"required,base64"`
-}
-
 // fillCredentialPoolPayload 是管理端备池的请求体。
 type fillCredentialPoolPayload struct {
 	Count int `json:"count" validate:"required,min=1,max=10000"`
 }
 
-// ClaimCredential 匿名领取一个凭证。
-func (h *Handler) ClaimCredential(c *gin.Context) {
+// ReserveCredential 匿名预留一个凭证池槽位。
+//
+// **请求体里刻意没有任何字段**（旧版的 `user_pub_key` 一律忽略）：服务端
+// 一旦知道公钥，就能算出凭证消息的原文，盲化当场失效。user_id 由服务端从
+// 凭证池里随机分配 —— 服务端因此无法把凭证和投票人对应起来。
+//
+// 这一步**不签名**：客户端拿 user_id 与签发方公钥后本地盲化，再走盲签名与
+// attest 两步。
+func (h *Handler) ReserveCredential(c *gin.Context) {
 	if h.registerUC == nil {
 		c.Error(fmt.Errorf("register usecase is not configured"))
 		return
 	}
 
-	var payload claimCredentialPayload
+	reservation, err := h.registerUC.ReserveCredential(
+		c.Request.Context(),
+		c.Param("proposal_id"),
+	)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	c.JSON(http.StatusCreated, reservationResponse(reservation))
+}
+
+// BlindSignCredential 公开端点的盲签名。
+//
+// 只覆盖「池里还空着的槽位」：否则签发方会变成任意消息的签名预言机。
+func (h *Handler) BlindSignCredential(c *gin.Context) {
+	if h.registerUC == nil {
+		c.Error(fmt.Errorf("register usecase is not configured"))
+		return
+	}
+
+	var payload blindSignPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
 		return
@@ -234,31 +304,114 @@ func (h *Handler) ClaimCredential(c *gin.Context) {
 		return
 	}
 
-	pubKeyBytes, err := base64.StdEncoding.DecodeString(payload.UserPubKey)
+	blindedMessage, err := base64.StdEncoding.DecodeString(payload.BlindedMessage)
 	if err != nil {
-		c.Error(fmt.Errorf("%w: user_pub_key must be base64", usecase.ErrInvalidRequest))
+		c.Error(fmt.Errorf("%w: blinded_message must be base64", usecase.ErrInvalidRequest))
 		return
 	}
 
-	credential, err := h.registerUC.ClaimCredential(
+	blindSignature, err := h.registerUC.BlindSignCredential(
 		c.Request.Context(),
 		c.Param("proposal_id"),
-		pubKeyBytes,
+		payload.UserID,
+		blindedMessage,
+		payload.IssuerKeyVersion,
+		usecase.BlindSignScopePoolSlot,
 	)
 	if err != nil {
 		c.Error(err)
 		return
 	}
-
-	c.JSON(http.StatusCreated, gin.H{
-		"id":                 credential.ID,
-		"proposal_id":        credential.ProposalID,
-		"user_id":            credential.UserID,
-		"user_pub_key":       base64.StdEncoding.EncodeToString(credential.UserPubKey),
-		"signature":          base64.StdEncoding.EncodeToString(credential.Signature),
-		"issuer_key_version": credential.IssuerKeyVersion,
-		"issued_at":          credential.IssuedAt.Format("2006-01-02T15:04:05Z07:00"),
+	c.JSON(http.StatusOK, gin.H{
+		"blind_signature": base64.StdEncoding.EncodeToString(blindSignature),
 	})
+}
+
+// AdminBlindSignCredential 管理端的盲签名。
+//
+// 可以覆盖任意 user_id：运营方本来就有服务端的完整权限，这条不给他新增能力。
+func (h *Handler) AdminBlindSignCredential(c *gin.Context) {
+	if h.registerUC == nil {
+		c.Error(fmt.Errorf("register usecase is not configured"))
+		return
+	}
+
+	var payload adminBlindSignPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+	if err := h.validate.Struct(payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+
+	blindedMessage, err := base64.StdEncoding.DecodeString(payload.BlindedMessage)
+	if err != nil {
+		c.Error(fmt.Errorf("%w: blinded_message must be base64", usecase.ErrInvalidRequest))
+		return
+	}
+
+	blindSignature, err := h.registerUC.BlindSignCredential(
+		c.Request.Context(),
+		payload.ProposalID,
+		payload.UserID,
+		blindedMessage,
+		payload.IssuerKeyVersion,
+		usecase.BlindSignScopeAnyUser,
+	)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"blind_signature": base64.StdEncoding.EncodeToString(blindSignature),
+	})
+}
+
+// AttestCredential 校验客户端解盲出来的最终签名，通过后落库。
+//
+// 验签绑定的消息是 `sha256(user_id ‖ 0x00 ‖ user_pub_key)`：拿 A 的盲签名
+// 去签 B 必然验不过 —— 交叉攻击就是被这一步挡住的。
+func (h *Handler) AttestCredential(c *gin.Context) {
+	if h.registerUC == nil {
+		c.Error(fmt.Errorf("register usecase is not configured"))
+		return
+	}
+
+	var payload attestCredentialPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+	if err := h.validate.Struct(payload); err != nil {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+
+	userPubKey, err := base64.StdEncoding.DecodeString(payload.UserPubKey)
+	if err != nil {
+		c.Error(fmt.Errorf("%w: user_pub_key must be base64", usecase.ErrInvalidRequest))
+		return
+	}
+	signature, err := base64.StdEncoding.DecodeString(payload.Signature)
+	if err != nil {
+		c.Error(fmt.Errorf("%w: signature must be base64", usecase.ErrInvalidRequest))
+		return
+	}
+
+	credential, err := h.registerUC.AttestCredential(
+		c.Request.Context(),
+		c.Param("proposal_id"),
+		payload.UserID,
+		userPubKey,
+		signature,
+	)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	c.JSON(http.StatusCreated, credentialResponse(credential))
 }
 
 // FillCredentialPool 管理端为提案备好待领取的凭证槽位。

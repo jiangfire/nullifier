@@ -81,8 +81,8 @@ func TestKAT_BlindRsaClientSide(t *testing.T) {
 	require.NoError(t, err)
 	signer := blindrsa.NewSigner(privateKey)
 
-	// 凭证消息与 crypto 包的 buildCredentialMessage 同口径。
-	message := buildCredentialMessage("u-blind-1", []byte("one-time-public-key"))
+	// 凭证消息与 crypto 包的 CredentialMessage 同口径。
+	message := CredentialMessage("u-blind-1", []byte("one-time-public-key"))
 	require.Equal(
 		t,
 		"c5518e49bf357e08eace129b9eb4104bb8620264b6c903cdd12a667fefa4e297",

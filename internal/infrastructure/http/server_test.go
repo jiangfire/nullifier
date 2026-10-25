@@ -16,6 +16,7 @@ import (
 	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	"anonvote/internal/infrastructure/persistence"
 	"anonvote/internal/usecase"
+	"anonvote/tests/testutil"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend/groth16"
@@ -154,9 +155,26 @@ func TestHandler_InvalidPayload(t *testing.T) {
 			method: http.MethodPost,
 			path:   "/api/v1/credentials",
 			body: map[string]any{
-				"proposal_id":  "p1",
+				"proposal_id": "",
+				"user_id":     "u1",
+			},
+		},
+		{
+			method: http.MethodPost,
+			path:   "/api/v1/proposals/p1/credentials/blind-sign",
+			body: map[string]any{
+				"user_id":            "u1",
+				"blinded_message":    "%%%invalid-base64%%%",
+				"issuer_key_version": 1,
+			},
+		},
+		{
+			method: http.MethodPost,
+			path:   "/api/v1/proposals/p1/credentials/attest",
+			body: map[string]any{
 				"user_id":      "u1",
 				"user_pub_key": "%%%invalid-base64%%%",
+				"signature":    base64.StdEncoding.EncodeToString([]byte("sig")),
 			},
 		},
 		{
@@ -209,7 +227,7 @@ func TestHandler_InvalidPayload(t *testing.T) {
 			req.Header.Set("Authorization", "Bearer secret")
 		}
 		engine.ServeHTTP(rec, req)
-		require.Equal(t, http.StatusBadRequest, rec.Code)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "path=%s", tc.path)
 	}
 }
 
@@ -435,9 +453,8 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	defer ts.Close()
 
 	credentialReq := map[string]any{
-		"proposal_id":  "",
-		"user_id":      "u-1",
-		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key")),
+		"proposal_id": "",
+		"user_id":     "u-1",
 	}
 	var resp *http.Response
 	proposalReq := map[string]any{
@@ -455,15 +472,15 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
 	_ = resp.Body.Close()
 
+	// 管理端签发走真两段式盲签名。
 	credentialReq["proposal_id"] = proposalResp.ID
-	resp = doPostAdminJSON(t, ts.URL+"/api/v1/credentials", "secret", credentialReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var credentialResp struct {
-		UserPubKey string `json:"user_pub_key"`
-		Signature  string `json:"signature"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credentialResp))
-	_ = resp.Body.Close()
+	blindClient := testutil.NewBlindClient(ts.URL)
+	blindClient.AdminToken = "secret"
+	credential, err := blindClient.IssueCredential(
+		proposalResp.ID, "u-1", []byte("user-pub-key"),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, credential.Signature)
 
 	statuses := doGetProposalCredentialStatuses(t, ts.URL, proposalResp.ID)
 	require.Len(t, statuses, 1)
@@ -505,11 +522,10 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	require.NotEmpty(t, draftResp.Proof)
 	require.NotEmpty(t, draftResp.Nullifier)
 
-	var err error
 	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/vote-status", map[string]any{
 		"user_id":              "u-1",
-		"user_pub_key":         credentialResp.UserPubKey,
-		"credential_signature": credentialResp.Signature,
+		"user_pub_key":         credential.UserPubKey,
+		"credential_signature": credential.Signature,
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_ = resp.Body.Close()
@@ -520,8 +536,8 @@ func TestHandler_SuccessFlow(t *testing.T) {
 		"proof":                draftResp.Proof,
 		"nullifier":            draftResp.Nullifier,
 		"user_id":              "u-1",
-		"user_pub_key":         credentialResp.UserPubKey,
-		"credential_signature": credentialResp.Signature,
+		"user_pub_key":         credential.UserPubKey,
+		"credential_signature": credential.Signature,
 	}
 	resp = doPostJSON(t, ts.URL+"/api/v1/votes", voteReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -533,8 +549,8 @@ func TestHandler_SuccessFlow(t *testing.T) {
 
 	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/vote-status", map[string]any{
 		"user_id":              "u-1",
-		"user_pub_key":         credentialResp.UserPubKey,
-		"credential_signature": credentialResp.Signature,
+		"user_pub_key":         credential.UserPubKey,
+		"credential_signature": credential.Signature,
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	_ = resp.Body.Close()

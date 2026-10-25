@@ -222,10 +222,11 @@ func (uc *VotingUseCase) Submit(ctx context.Context, req *SubmitVoteRequest) err
 	if uc.issuer == nil {
 		return errors.New("credential issuer is not configured")
 	}
-	if err := uc.issuer.VerifyCredential(req.UserID, req.UserPubKey, req.CredentialSignature); err != nil {
+	if _, err := uc.issuer.VerifyCredential(
+		req.UserID, req.UserPubKey, req.CredentialSignature,
+	); err != nil {
 		return fmt.Errorf("%w: credential signature verification failed", ErrInvalidCredential)
 	}
-
 	userHash := hashUserID(req.UserID)
 
 	// 查重与落库都用**规范形式**。客户端可以用大写或带空白的形式提交同一个

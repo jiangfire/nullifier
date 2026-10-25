@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"anonvote/internal/domain/entity"
+	"anonvote/tests/testutil"
 
 	"github.com/stretchr/testify/require"
 )
@@ -32,6 +33,14 @@ func createProposalForClaim(t *testing.T, ts *httptest.Server) string {
 	return proposal.ID
 }
 
+// newBlindClient 建一个走 HTTP 的盲签名客户端。
+func newBlindClient(t *testing.T, ts *httptest.Server) *testutil.BlindClient {
+	t.Helper()
+	client := testutil.NewBlindClient(ts.URL)
+	client.AdminToken = "secret"
+	return client
+}
+
 // 匿名领取凭证：不需要 admin token，服务端也不知道领取的是谁。
 func TestClaimCredential_AnonymousClaim(t *testing.T) {
 	engine, _, _ := buildFullStackEngineWithVerifier(t, nil)
@@ -39,33 +48,14 @@ func TestClaimCredential_AnonymousClaim(t *testing.T) {
 	defer ts.Close()
 
 	proposalID := createProposalForClaim(t, ts)
+	client := newBlindClient(t, ts)
 
 	// 备池需要 admin token。
-	resp := doPostAdminJSON(
-		t,
-		ts.URL+"/api/v1/proposals/"+proposalID+"/credentials/pool",
-		"secret",
-		map[string]any{"count": 2},
-	)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	_ = resp.Body.Close()
+	require.NoError(t, client.FillCredentialPool(proposalID, 2))
 
 	// 领取不需要任何鉴权。
-	resp = doPostJSON(
-		t,
-		ts.URL+"/api/v1/proposals/"+proposalID+"/credentials/claim",
-		map[string]any{"user_pub_key": base64.StdEncoding.EncodeToString([]byte("claimant-pub"))},
-	)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var credential struct {
-		ID         string `json:"id"`
-		UserID     string `json:"user_id"`
-		UserPubKey string `json:"user_pub_key"`
-		Signature  string `json:"signature"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credential))
-	_ = resp.Body.Close()
-
+	credential, err := client.ClaimCredential(proposalID, []byte("claimant-pub"))
+	require.NoError(t, err)
 	require.NotEmpty(t, credential.ID)
 	require.NotEmpty(t, credential.UserID)
 	require.NotEmpty(t, credential.Signature)
@@ -73,39 +63,34 @@ func TestClaimCredential_AnonymousClaim(t *testing.T) {
 	require.Equal(t, base64.StdEncoding.EncodeToString([]byte("claimant-pub")), credential.UserPubKey)
 }
 
-// 领取请求里即使塞了 user_id，服务端也会忽略它 —— user_id 只能来自池里的假名。
-func TestClaimCredential_IgnoresClientSuppliedUserID(t *testing.T) {
+// 预留请求里即使塞了 user_id 与 user_pub_key，服务端也会忽略 —— user_id 只能
+// 来自池里的假名，而公钥**绝不能**提前告诉服务端。
+func TestClaimCredential_IgnoresClientSuppliedIdentity(t *testing.T) {
 	engine, _, _ := buildFullStackEngineWithVerifier(t, nil)
 	ts := httptest.NewServer(engine)
 	defer ts.Close()
 
 	proposalID := createProposalForClaim(t, ts)
-	resp := doPostAdminJSON(
-		t,
-		ts.URL+"/api/v1/proposals/"+proposalID+"/credentials/pool",
-		"secret",
-		map[string]any{"count": 1},
-	)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	_ = resp.Body.Close()
+	client := newBlindClient(t, ts)
+	require.NoError(t, client.FillCredentialPool(proposalID, 1))
 
-	resp = doPostJSON(
+	resp := doPostJSON(
 		t,
 		ts.URL+"/api/v1/proposals/"+proposalID+"/credentials/claim",
 		map[string]any{
-			"user_pub_key": base64.StdEncoding.EncodeToString([]byte("claimant-pub")),
+			"user_pub_key": base64.StdEncoding.EncodeToString([]byte("early-pub")),
 			"user_id":      "i-am-the-voter",
 		},
 	)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var credential struct {
-		UserID string `json:"user_id"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credential))
+	var reservation testutil.Reservation
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&reservation))
 	_ = resp.Body.Close()
 
-	require.NotEqual(t, "i-am-the-voter", credential.UserID, "user_id 必须来自池里的假名")
-	require.NotEmpty(t, credential.UserID)
+	require.NotEqual(t, "i-am-the-voter", reservation.UserID, "user_id 必须来自池里的假名")
+	require.NotEmpty(t, reservation.UserID)
+	// 响应里带出的是签发方公钥 —— 它本来就是公开值，客户端要拿它盲化消息。
+	require.NotEmpty(t, reservation.Modulus)
 }
 
 // 池领完了要返回 4xx，而不是 5xx。
@@ -119,7 +104,7 @@ func TestClaimCredential_PoolEmptyReturns4xx(t *testing.T) {
 	resp := doPostJSON(
 		t,
 		ts.URL+"/api/v1/proposals/"+proposalID+"/credentials/claim",
-		map[string]any{"user_pub_key": base64.StdEncoding.EncodeToString([]byte("claimant-pub"))},
+		map[string]any{},
 	)
 	require.Equal(t, http.StatusConflict, resp.StatusCode)
 	_ = resp.Body.Close()
@@ -149,22 +134,11 @@ func TestClaimCredential_MarksSlotClaimed(t *testing.T) {
 	defer ts.Close()
 
 	proposalID := createProposalForClaim(t, ts)
-	resp := doPostAdminJSON(
-		t,
-		ts.URL+"/api/v1/proposals/"+proposalID+"/credentials/pool",
-		"secret",
-		map[string]any{"count": 1},
-	)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	_ = resp.Body.Close()
+	client := newBlindClient(t, ts)
+	require.NoError(t, client.FillCredentialPool(proposalID, 1))
 
-	resp = doPostJSON(
-		t,
-		ts.URL+"/api/v1/proposals/"+proposalID+"/credentials/claim",
-		map[string]any{"user_pub_key": base64.StdEncoding.EncodeToString([]byte("claimant-pub"))},
-	)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	_ = resp.Body.Close()
+	_, err := client.ClaimCredential(proposalID, []byte("claimant-pub"))
+	require.NoError(t, err)
 
 	var claims []entity.CredentialClaim
 	require.NoError(t, db.Find(&claims).Error)
@@ -177,4 +151,55 @@ func TestClaimCredential_MarksSlotClaimed(t *testing.T) {
 	require.NoError(t, db.Find(&credentials).Error)
 	require.Len(t, credentials, 1)
 	require.Equal(t, claims[0].UserID, credentials[0].UserID)
+}
+
+// TestClaimCredential_BlindSignRejectsUnknownUserID 验证公开的盲签名端点不能
+// 为「池里没有的 user_id」签名 —— 否则签发方就是任意消息的签名预言机。
+func TestClaimCredential_BlindSignRejectsUnknownUserID(t *testing.T) {
+	engine, _, _ := buildFullStackEngineWithVerifier(t, nil)
+	ts := httptest.NewServer(engine)
+	defer ts.Close()
+
+	proposalID := createProposalForClaim(t, ts)
+	client := newBlindClient(t, ts)
+	require.NoError(t, client.FillCredentialPool(proposalID, 1))
+
+	resp := doPostJSON(
+		t,
+		ts.URL+"/api/v1/proposals/"+proposalID+"/credentials/blind-sign",
+		map[string]any{
+			"user_id":            "not-in-pool",
+			"blinded_message":    base64.StdEncoding.EncodeToString([]byte("blinded")),
+			"issuer_key_version": 1,
+		},
+	)
+	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	_ = resp.Body.Close()
+}
+
+// TestClaimCredential_AttestRejectsForgedSignature 验证 attest 端点会验签：
+// 随便编一个签名过不去。
+func TestClaimCredential_AttestRejectsForgedSignature(t *testing.T) {
+	engine, _, _ := buildFullStackEngineWithVerifier(t, nil)
+	ts := httptest.NewServer(engine)
+	defer ts.Close()
+
+	proposalID := createProposalForClaim(t, ts)
+	client := newBlindClient(t, ts)
+	require.NoError(t, client.FillCredentialPool(proposalID, 1))
+
+	reservation, err := client.Reserve(proposalID)
+	require.NoError(t, err)
+
+	resp := doPostJSON(
+		t,
+		ts.URL+"/api/v1/proposals/"+proposalID+"/credentials/attest",
+		map[string]any{
+			"user_id":      reservation.UserID,
+			"user_pub_key": base64.StdEncoding.EncodeToString([]byte("pub")),
+			"signature":    base64.StdEncoding.EncodeToString([]byte("forged")),
+		},
+	)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	_ = resp.Body.Close()
 }

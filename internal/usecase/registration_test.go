@@ -38,19 +38,28 @@ func (m *credentialRepositoryMock) ListByProposal(ctx context.Context, proposalI
 
 var _ repository.CredentialRepository = (*credentialRepositoryMock)(nil)
 
+// credentialIssuerMock 是签发方的假实现。
+//
+// 它只做服务端该做的事：盲签名、给公钥、验签 —— **没有一次性签发**。
 type credentialIssuerMock struct {
 	mock.Mock
 }
 
-func (m *credentialIssuerMock) Issue(ctx context.Context, userID string, userPubKey []byte) (*entity.Credential, error) {
-	args := m.Called(ctx, userID, userPubKey)
-	credential, _ := args.Get(0).(*entity.Credential)
-	return credential, args.Error(1)
+func (m *credentialIssuerMock) BlindSign(ctx context.Context, keyVersion int, blindedMessage []byte) ([]byte, error) {
+	args := m.Called(ctx, keyVersion, blindedMessage)
+	signature, _ := args.Get(0).([]byte)
+	return signature, args.Error(1)
 }
 
-func (m *credentialIssuerMock) VerifyCredential(userID string, userPubKey []byte, signature []byte) error {
+func (m *credentialIssuerMock) IssuerPublicKey(ctx context.Context) (*domaincrypto.IssuerPublicKey, error) {
+	args := m.Called(ctx)
+	key, _ := args.Get(0).(*domaincrypto.IssuerPublicKey)
+	return key, args.Error(1)
+}
+
+func (m *credentialIssuerMock) VerifyCredential(userID string, userPubKey []byte, signature []byte) (int, error) {
 	args := m.Called(userID, userPubKey, signature)
-	return args.Error(0)
+	return args.Int(0), args.Error(1)
 }
 
 var _ domaincrypto.CredentialIssuer = (*credentialIssuerMock)(nil)
@@ -66,6 +75,16 @@ func (m *credentialClaimRepositoryMock) Save(ctx context.Context, claims []*enti
 
 func (m *credentialClaimRepositoryMock) TakeAvailable(ctx context.Context, proposalID string) (*entity.CredentialClaim, error) {
 	args := m.Called(ctx, proposalID)
+	claim, _ := args.Get(0).(*entity.CredentialClaim)
+	return claim, args.Error(1)
+}
+
+func (m *credentialClaimRepositoryMock) GetAvailableByUserID(
+	ctx context.Context,
+	proposalID string,
+	userID string,
+) (*entity.CredentialClaim, error) {
+	args := m.Called(ctx, proposalID, userID)
 	claim, _ := args.Get(0).(*entity.CredentialClaim)
 	return claim, args.Error(1)
 }
@@ -88,40 +107,334 @@ func (m *credentialClaimRepositoryMock) CountAvailable(ctx context.Context, prop
 
 var _ repository.CredentialClaimRepository = (*credentialClaimRepositoryMock)(nil)
 
-func TestRegisterUseCase_IssueCredential(t *testing.T) {
-	repo := new(credentialRepositoryMock)
-	proposalRepo := new(proposalRepositoryMock)
-	issuer := new(credentialIssuerMock)
-	uc := NewRegisterUseCase(repo, proposalRepo, issuer, zap.NewNop())
-
-	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
-	repo.On("GetByProposalAndUserID", mock.Anything, "p-1", "u-1").Return((*entity.Credential)(nil), repository.ErrNotFound).Once()
-	issuer.On("Issue", mock.Anything, "u-1", []byte("pub")).Return(&entity.Credential{
-		ProposalID: "p-1",
-		UserID:     "u-1",
-		UserPubKey: []byte("pub"),
-		Signature:  []byte("sig"),
-	}, nil).Once()
-	repo.On("Save", mock.Anything, mock.AnythingOfType("*entity.Credential")).Return(nil).Once()
-
-	credential, err := uc.IssueCredential(context.Background(), "p-1", "u-1", []byte("pub"))
-	assert.NoError(t, err)
-	assert.NotNil(t, credential)
-	assert.NotEmpty(t, credential.ID)
+// testIssuerKey 是测试用的签发方公钥。
+func testIssuerKey() *domaincrypto.IssuerPublicKey {
+	return &domaincrypto.IssuerPublicKey{
+		Version:  1,
+		Modulus:  []byte("modulus"),
+		Exponent: 65537,
+		Variant:  "SHA384PSSDeterministic",
+	}
 }
 
-func TestRegisterUseCase_IssueCredential_AlreadyIssued(t *testing.T) {
+func TestRegisterUseCase_ReserveCredential(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
+		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
+		Once()
+	issuer.On("IssuerPublicKey", mock.Anything).Return(testIssuerKey(), nil).Once()
+
+	reservation, err := uc.ReserveCredential(context.Background(), "p-1")
+	require.NoError(t, err)
+	require.NotNil(t, reservation)
+	// user_id 来自池里的假名，不是领取者提供的。
+	assert.Equal(t, "pseudonym-1", reservation.UserID)
+	assert.Equal(t, "p-1", reservation.ProposalID)
+	require.NotNil(t, reservation.IssuerKey)
+	assert.Equal(t, 1, reservation.IssuerKey.Version)
+}
+
+func TestRegisterUseCase_ReserveCredential_PoolEmpty(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
+		Return((*entity.CredentialClaim)(nil), repository.ErrNotFound).
+		Once()
+
+	reservation, err := uc.ReserveCredential(context.Background(), "p-1")
+	assert.ErrorIs(t, err, ErrCredentialPoolEmpty)
+	assert.Nil(t, reservation)
+}
+
+func TestRegisterUseCase_ReserveCredentialForUser(t *testing.T) {
 	repo := new(credentialRepositoryMock)
 	proposalRepo := new(proposalRepositoryMock)
 	issuer := new(credentialIssuerMock)
 	uc := NewRegisterUseCase(repo, proposalRepo, issuer, zap.NewNop())
 
 	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
-	repo.On("GetByProposalAndUserID", mock.Anything, "p-1", "u-1").Return(&entity.Credential{ID: "cred-1"}, nil).Once()
+	repo.On("GetByProposalAndUserID", mock.Anything, "p-1", "u-1").
+		Return((*entity.Credential)(nil), repository.ErrNotFound).Once()
+	issuer.On("IssuerPublicKey", mock.Anything).Return(testIssuerKey(), nil).Once()
 
-	credential, err := uc.IssueCredential(context.Background(), "p-1", "u-1", []byte("pub"))
+	reservation, err := uc.ReserveCredentialForUser(context.Background(), "p-1", "u-1")
+	require.NoError(t, err)
+	require.NotNil(t, reservation)
+	assert.Equal(t, "u-1", reservation.UserID)
+}
+
+func TestRegisterUseCase_ReserveCredentialForUser_AlreadyIssued(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	uc := NewRegisterUseCase(repo, proposalRepo, issuer, zap.NewNop())
+
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	repo.On("GetByProposalAndUserID", mock.Anything, "p-1", "u-1").
+		Return(&entity.Credential{ID: "cred-1"}, nil).Once()
+
+	reservation, err := uc.ReserveCredentialForUser(context.Background(), "p-1", "u-1")
+	assert.ErrorIs(t, err, ErrCredentialAlreadyIssued)
+	assert.Nil(t, reservation)
+}
+
+func TestRegisterUseCase_BlindSignCredential(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	claimRepo.On("GetAvailableByUserID", mock.Anything, "p-1", "pseudonym-1").
+		Return(&entity.CredentialClaim{ID: "slot-1", UserID: "pseudonym-1"}, nil).
+		Once()
+	issuer.On("BlindSign", mock.Anything, 1, []byte("blinded")).
+		Return([]byte("blind-signature"), nil).
+		Once()
+
+	signature, err := uc.BlindSignCredential(
+		context.Background(), "p-1", "pseudonym-1", []byte("blinded"), 1, BlindSignScopePoolSlot,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("blind-signature"), signature)
+}
+
+// TestRegisterUseCase_BlindSignCredential_RejectsSlotlessUserID 验证公开端点不能
+// 为「池里没有的 user_id」盲签名 —— 否则签发方就是任意消息的签名预言机。
+func TestRegisterUseCase_BlindSignCredential_RejectsSlotlessUserID(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	claimRepo.On("GetAvailableByUserID", mock.Anything, "p-1", "not-in-pool").
+		Return((*entity.CredentialClaim)(nil), repository.ErrNotFound).
+		Once()
+
+	signature, err := uc.BlindSignCredential(
+		context.Background(), "p-1", "not-in-pool", []byte("blinded"), 1, BlindSignScopePoolSlot,
+	)
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+	assert.Nil(t, signature)
+	issuer.AssertNotCalled(t, "BlindSign", mock.Anything, mock.Anything, mock.Anything)
+}
+
+// TestRegisterUseCase_BlindSignCredential_AnyUserScope 验证管理端可以为任意
+// user_id 盲签名（运营方本来就有完整权限）。
+func TestRegisterUseCase_BlindSignCredential_AnyUserScope(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	issuer.On("BlindSign", mock.Anything, 1, []byte("blinded")).
+		Return([]byte("blind-signature"), nil).
+		Once()
+
+	signature, err := uc.BlindSignCredential(
+		context.Background(), "p-1", "operator-chosen", []byte("blinded"), 1, BlindSignScopeAnyUser,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("blind-signature"), signature)
+}
+
+func TestRegisterUseCase_BlindSignCredential_RejectsBadInput(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	_, err := uc.BlindSignCredential(
+		context.Background(), "p-1", "u-1", nil, 1, BlindSignScopeAnyUser,
+	)
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+
+	_, err = uc.BlindSignCredential(
+		context.Background(), "", "u-1", []byte("blinded"), 1, BlindSignScopeAnyUser,
+	)
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+
+	_, err = uc.BlindSignCredential(
+		context.Background(), "p-1", "", []byte("blinded"), 1, BlindSignScopeAnyUser,
+	)
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+}
+
+func TestRegisterUseCase_AttestCredential(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	issuer.On("VerifyCredential", "pseudonym-1", []byte("pub"), []byte("sig")).
+		Return(3, nil).
+		Once()
+	repo.On("GetByProposalAndUserID", mock.Anything, "p-1", "pseudonym-1").
+		Return((*entity.Credential)(nil), repository.ErrNotFound).Once()
+	claimRepo.On("GetAvailableByUserID", mock.Anything, "p-1", "pseudonym-1").
+		Return(&entity.CredentialClaim{ID: "slot-1", UserID: "pseudonym-1"}, nil).Once()
+	claimRepo.On("MarkClaimed", mock.Anything, "slot-1", []byte("pub"), []byte("sig"), mock.AnythingOfType("time.Time")).
+		Return(true, nil).
+		Once()
+
+	var saved *entity.Credential
+	repo.On("Save", mock.Anything, mock.AnythingOfType("*entity.Credential")).
+		Run(func(args mock.Arguments) {
+			saved, _ = args.Get(1).(*entity.Credential)
+		}).
+		Return(nil).
+		Once()
+
+	credential, err := uc.AttestCredential(
+		context.Background(), "p-1", "pseudonym-1", []byte("pub"), []byte("sig"),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, credential)
+	assert.Equal(t, "pseudonym-1", credential.UserID)
+	assert.Equal(t, []byte("pub"), credential.UserPubKey)
+	assert.Equal(t, []byte("sig"), credential.Signature)
+	assert.Equal(t, "p-1", credential.ProposalID)
+	assert.Equal(t, 3, credential.IssuerKeyVersion)
+	require.NotNil(t, saved)
+}
+
+// TestRegisterUseCase_AttestCredential_RejectsBadSignature 验证「拿 A 的盲签名
+// 去签 B」在这里被挡下 —— 路线图 T17 的交叉攻击验收项。
+func TestRegisterUseCase_AttestCredential_RejectsBadSignature(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	issuer.On("VerifyCredential", "pseudonym-2", []byte("pub-b"), []byte("sig-a")).
+		Return(0, assert.AnError).
+		Once()
+
+	credential, err := uc.AttestCredential(
+		context.Background(), "p-1", "pseudonym-2", []byte("pub-b"), []byte("sig-a"),
+	)
+	assert.ErrorIs(t, err, ErrInvalidCredential)
+	assert.Nil(t, credential)
+	repo.AssertNotCalled(t, "Save", mock.Anything, mock.Anything)
+}
+
+func TestRegisterUseCase_AttestCredential_AlreadyIssued(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	issuer.On("VerifyCredential", "pseudonym-1", []byte("pub"), []byte("sig")).
+		Return(1, nil).
+		Once()
+	repo.On("GetByProposalAndUserID", mock.Anything, "p-1", "pseudonym-1").
+		Return(&entity.Credential{ID: "cred-1"}, nil).Once()
+
+	credential, err := uc.AttestCredential(
+		context.Background(), "p-1", "pseudonym-1", []byte("pub"), []byte("sig"),
+	)
 	assert.ErrorIs(t, err, ErrCredentialAlreadyIssued)
 	assert.Nil(t, credential)
+}
+
+// TestRegisterUseCase_AttestCredential_SlotTaken 验证槽位被别人抢走时会报冲突
+// —— 客户端换一个槽位重来。
+func TestRegisterUseCase_AttestCredential_SlotTaken(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	issuer.On("VerifyCredential", "pseudonym-1", []byte("pub"), []byte("sig")).
+		Return(1, nil).
+		Once()
+	repo.On("GetByProposalAndUserID", mock.Anything, "p-1", "pseudonym-1").
+		Return((*entity.Credential)(nil), repository.ErrNotFound).Once()
+	claimRepo.On("GetAvailableByUserID", mock.Anything, "p-1", "pseudonym-1").
+		Return(&entity.CredentialClaim{ID: "slot-1", UserID: "pseudonym-1"}, nil).Once()
+	claimRepo.On("MarkClaimed", mock.Anything, "slot-1", []byte("pub"), []byte("sig"), mock.AnythingOfType("time.Time")).
+		Return(false, nil).
+		Once()
+
+	credential, err := uc.AttestCredential(
+		context.Background(), "p-1", "pseudonym-1", []byte("pub"), []byte("sig"),
+	)
+	assert.ErrorIs(t, err, ErrCredentialAlreadyIssued)
+	assert.Nil(t, credential)
+	repo.AssertNotCalled(t, "Save", mock.Anything, mock.Anything)
+}
+
+// TestRegisterUseCase_AttestCredential_DuplicateConstraint 验证并发 attest 时
+// 唯一约束兜底。
+func TestRegisterUseCase_AttestCredential_DuplicateConstraint(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	issuer.On("VerifyCredential", "pseudonym-1", []byte("pub"), []byte("sig")).
+		Return(1, nil).
+		Once()
+	repo.On("GetByProposalAndUserID", mock.Anything, "p-1", "pseudonym-1").
+		Return((*entity.Credential)(nil), repository.ErrNotFound).Once()
+	claimRepo.On("GetAvailableByUserID", mock.Anything, "p-1", "pseudonym-1").
+		Return((*entity.CredentialClaim)(nil), repository.ErrNotFound).Once()
+	repo.On("Save", mock.Anything, mock.AnythingOfType("*entity.Credential")).
+		Return(repository.ErrDuplicateCredential).
+		Once()
+
+	credential, err := uc.AttestCredential(
+		context.Background(), "p-1", "pseudonym-1", []byte("pub"), []byte("sig"),
+	)
+	assert.ErrorIs(t, err, ErrCredentialAlreadyIssued)
+	assert.Nil(t, credential)
+}
+
+func TestRegisterUseCase_AttestCredential_RejectsBadInput(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
+
+	_, err := uc.AttestCredential(context.Background(), "p-1", "u-1", nil, []byte("sig"))
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+
+	_, err = uc.AttestCredential(context.Background(), "p-1", "u-1", []byte("pub"), nil)
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+
+	_, err = uc.AttestCredential(context.Background(), "", "u-1", []byte("pub"), []byte("sig"))
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+
+	_, err = uc.AttestCredential(context.Background(), "p-1", "", []byte("pub"), []byte("sig"))
+	assert.ErrorIs(t, err, ErrInvalidRequest)
 }
 
 func TestRegisterUseCase_FillCredentialPool(t *testing.T) {
@@ -171,106 +484,5 @@ func TestRegisterUseCase_FillCredentialPool_RejectsBadInput(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidRequest)
 
 	_, err = uc.FillCredentialPool(context.Background(), "p-1", maxCredentialPoolSize+1)
-	assert.ErrorIs(t, err, ErrInvalidRequest)
-}
-
-func TestRegisterUseCase_ClaimCredential(t *testing.T) {
-	repo := new(credentialRepositoryMock)
-	proposalRepo := new(proposalRepositoryMock)
-	issuer := new(credentialIssuerMock)
-	claimRepo := new(credentialClaimRepositoryMock)
-	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
-
-	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
-	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
-		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
-		Once()
-	issuer.On("Issue", mock.Anything, "pseudonym-1", []byte("claimant-pub")).
-		Return(&entity.Credential{Signature: []byte("sig"), IssuerKeyVersion: 3}, nil).
-		Once()
-	claimRepo.On("MarkClaimed", mock.Anything, "slot-1", []byte("claimant-pub"), []byte("sig"), mock.AnythingOfType("time.Time")).
-		Return(true, nil).
-		Once()
-
-	var saved *entity.Credential
-	repo.On("Save", mock.Anything, mock.AnythingOfType("*entity.Credential")).
-		Run(func(args mock.Arguments) {
-			saved, _ = args.Get(1).(*entity.Credential)
-		}).
-		Return(nil).
-		Once()
-
-	credential, err := uc.ClaimCredential(context.Background(), "p-1", []byte("claimant-pub"))
-	require.NoError(t, err)
-	require.NotNil(t, credential)
-
-	// user_id 来自池里的假名，不是领取者提供的；公钥才是领取者带来的。
-	assert.Equal(t, "pseudonym-1", credential.UserID)
-	assert.Equal(t, []byte("claimant-pub"), credential.UserPubKey)
-	assert.Equal(t, "p-1", credential.ProposalID)
-	assert.Equal(t, 3, credential.IssuerKeyVersion)
-	require.NotNil(t, saved)
-	assert.Equal(t, "pseudonym-1", saved.UserID)
-}
-
-func TestRegisterUseCase_ClaimCredential_PoolEmpty(t *testing.T) {
-	repo := new(credentialRepositoryMock)
-	proposalRepo := new(proposalRepositoryMock)
-	issuer := new(credentialIssuerMock)
-	claimRepo := new(credentialClaimRepositoryMock)
-	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
-
-	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
-	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
-		Return((*entity.CredentialClaim)(nil), repository.ErrNotFound).
-		Once()
-
-	credential, err := uc.ClaimCredential(context.Background(), "p-1", []byte("claimant-pub"))
-	assert.ErrorIs(t, err, ErrCredentialPoolEmpty)
-	assert.Nil(t, credential)
-}
-
-func TestRegisterUseCase_ClaimCredential_RetriesWhenSlotTaken(t *testing.T) {
-	repo := new(credentialRepositoryMock)
-	proposalRepo := new(proposalRepositoryMock)
-	issuer := new(credentialIssuerMock)
-	claimRepo := new(credentialClaimRepositoryMock)
-	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
-
-	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
-	// 第一个槽位被别人抢走，第二个才是自己的。
-	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
-		Return(&entity.CredentialClaim{ID: "slot-1", UserID: "pseudonym-1"}, nil).
-		Once()
-	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
-		Return(&entity.CredentialClaim{ID: "slot-2", UserID: "pseudonym-2"}, nil).
-		Once()
-	issuer.On("Issue", mock.Anything, mock.Anything, []byte("claimant-pub")).
-		Return(&entity.Credential{Signature: []byte("sig")}, nil).
-		Twice()
-	claimRepo.On("MarkClaimed", mock.Anything, "slot-1", mock.Anything, mock.Anything, mock.Anything).
-		Return(false, nil).
-		Once()
-	claimRepo.On("MarkClaimed", mock.Anything, "slot-2", mock.Anything, mock.Anything, mock.Anything).
-		Return(true, nil).
-		Once()
-	repo.On("Save", mock.Anything, mock.AnythingOfType("*entity.Credential")).Return(nil).Once()
-
-	credential, err := uc.ClaimCredential(context.Background(), "p-1", []byte("claimant-pub"))
-	require.NoError(t, err)
-	assert.Equal(t, "pseudonym-2", credential.UserID)
-}
-
-func TestRegisterUseCase_ClaimCredential_RequiresPubKey(t *testing.T) {
-	repo := new(credentialRepositoryMock)
-	proposalRepo := new(proposalRepositoryMock)
-	issuer := new(credentialIssuerMock)
-	claimRepo := new(credentialClaimRepositoryMock)
-	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
-
-	_, err := uc.ClaimCredential(context.Background(), "p-1", nil)
-	assert.ErrorIs(t, err, ErrInvalidRequest)
-
-	_, err = uc.ClaimCredential(context.Background(), "", []byte("pub"))
 	assert.ErrorIs(t, err, ErrInvalidRequest)
 }

@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	domaincrypto "anonvote/internal/domain/crypto"
+	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	"anonvote/internal/infrastructure/crypto/ballot"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
@@ -30,6 +32,34 @@ type cli struct {
 type apiError struct {
 	Code  string `json:"code"`
 	Error string `json:"error"`
+}
+
+// httpError 是带 HTTP 状态码的服务端错误。
+//
+// 状态码是必需的：领取凭证遇到「槽位被别人抢走」时客户端要换个槽位重来，
+// 判断依据就是 409 + CREDENTIAL_EXISTS。
+type httpError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *httpError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("%s (%s)", e.Message, e.Code)
+	}
+	return e.Message
+}
+
+// isSlotTaken 判断错误是不是「槽位被别人抢走」—— 只有这种情况值得重试。
+//
+// 409 有两种：槽位被抢（换个槽位重来就行）与凭证池已空（重试也没用）。
+func isSlotTaken(err error) bool {
+	var httpErr *httpError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	return httpErr.Status == http.StatusConflict && httpErr.Code == "CREDENTIAL_EXISTS"
 }
 
 type credentialFile struct {
@@ -197,6 +227,148 @@ func (c *cli) cmdCreateProposal(args []string) error {
 	return nil
 }
 
+// credentialReservation 是「预留签发权」的响应。
+type credentialReservation struct {
+	ProposalID       string `json:"proposal_id"`
+	UserID           string `json:"user_id"`
+	IssuerKeyVersion int    `json:"issuer_key_version"`
+	Variant          string `json:"variant"`
+	Modulus          string `json:"modulus"`
+	Exponent         int    `json:"exponent"`
+}
+
+// blindSignatureResponse 是盲签名的响应。
+type blindSignatureResponse struct {
+	BlindSignature string `json:"blind_signature"`
+}
+
+// issuerPublicKey 把响应里的公钥字段还原成领域类型。
+func (r *credentialReservation) issuerPublicKey() (*domaincrypto.IssuerPublicKey, error) {
+	modulus, err := base64.StdEncoding.DecodeString(r.Modulus)
+	if err != nil {
+		return nil, fmt.Errorf("issuer modulus must be base64: %w", err)
+	}
+	return &domaincrypto.IssuerPublicKey{
+		Version:  r.IssuerKeyVersion,
+		Modulus:  modulus,
+		Exponent: r.Exponent,
+		Variant:  r.Variant,
+	}, nil
+}
+
+// claimMaxAttempts 是匿名领取的重试次数。
+//
+// 预留**不占位**：服务端取槽位时不改状态，所以并发领取会抢到同一个槽位。抢输的
+// 那个换一个槽位重来 —— 但重试要重新盲化（新的 user_id 意味着新的消息），所以
+// 重试只能在客户端做。
+const claimMaxAttempts = 5
+
+// runBlindSignatureFlow 走完真两段式盲签名的**客户端侧**，并在槽位被抢时重试。
+//
+// attempts 是最大尝试次数：匿名领取走 claimMaxAttempts（槽位会撞车），管理端
+// 签发走 1（user_id 是指定的，重试没有意义 —— 那个 user_id 要么已经领过，要么
+// 永远领不到）。
+func (c *cli) runBlindSignatureFlow(
+	userPubKey []byte,
+	attempts int,
+	reserve func() (*credentialReservation, error),
+	blindSign func(*credentialReservation, []byte) ([]byte, error),
+) (*credentialFile, error) {
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		credential, err := c.runBlindSignatureOnce(userPubKey, reserve, blindSign)
+		if err == nil {
+			return credential, nil
+		}
+		if !isSlotTaken(err) {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// runBlindSignatureOnce 走一遍真两段式盲签名的客户端侧流程：
+//
+// ① 预留签发权（拿到 user_id 与签发方公钥）
+// ② 本地把凭证消息盲化
+// ③ 把盲化消息送去盲签名
+// ④ 本地解盲，得到最终签名
+// ⑤ 交回最终签名，服务端验签后落库
+//
+// 预留与盲签名由调用方提供 —— 匿名领取与管理端签发走的是不同的端点，但中间
+// 这四步完全一样。
+//
+// 注意客户端**从头到尾没把公钥发给服务端**（第 ⑤ 步才发）：服务端一旦知道
+// 公钥就能算出消息原文，盲化当场失效。
+func (c *cli) runBlindSignatureOnce(
+	userPubKey []byte,
+	reserve func() (*credentialReservation, error),
+	blindSign func(*credentialReservation, []byte) ([]byte, error),
+) (*credentialFile, error) {
+	reservation, err := reserve()
+	if err != nil {
+		return nil, err
+	}
+	issuerKey, err := reservation.issuerPublicKey()
+	if err != nil {
+		return nil, err
+	}
+	client, err := cryptoinfra.NewCredentialBlindClient(issuerKey)
+	if err != nil {
+		return nil, err
+	}
+	blinded, err := client.Blind(reservation.UserID, userPubKey)
+	if err != nil {
+		return nil, err
+	}
+	blindSignature, err := blindSign(reservation, blinded.BlindedMessage)
+	if err != nil {
+		return nil, err
+	}
+	signature, err := client.Finalize(blinded, blindSignature)
+	if err != nil {
+		return nil, err
+	}
+
+	var credential credentialFile
+	attestPath := fmt.Sprintf(
+		"/api/v1/proposals/%s/credentials/attest", url.PathEscape(reservation.ProposalID),
+	)
+	attestBody := map[string]any{
+		"user_id":      reservation.UserID,
+		"user_pub_key": base64.StdEncoding.EncodeToString(userPubKey),
+		"signature":    base64.StdEncoding.EncodeToString(signature),
+	}
+	if err := c.postJSON(attestPath, attestBody, false, &credential); err != nil {
+		return nil, err
+	}
+	return &credential, nil
+}
+
+// resolveUserPubKey 取命令行的 -pubkey，没给就随机生成一个。
+//
+// 公钥是客户端的一次性密钥：它只在 attest 那一步发给服务端。
+func resolveUserPubKey(pubKey string) ([]byte, error) {
+	trimmed := strings.TrimSpace(pubKey)
+	if trimmed == "" {
+		generated, err := randomBase64(32)
+		if err != nil {
+			return nil, err
+		}
+		trimmed = generated
+	}
+	decoded, err := base64.StdEncoding.DecodeString(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("pubkey must be base64: %w", err)
+	}
+	return decoded, nil
+}
+
+// cmdIssueCredential 管理端为一个指定的 user_id 签发凭证。
+//
+// 走的是**真两段式盲签名**：管理端客户端在本地盲化凭证消息，服务端只见盲化
+// 消息，客户端解盲后再把最终签名交回去验签。
 func (c *cli) cmdIssueCredential(args []string) error {
 	fs := flag.NewFlagSet("credential-issue", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -207,44 +379,54 @@ func (c *cli) cmdIssueCredential(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*proposalID) == "" || strings.TrimSpace(*userID) == "" {
+	proposal := strings.TrimSpace(*proposalID)
+	user := strings.TrimSpace(*userID)
+	if proposal == "" || user == "" {
 		return errors.New("必须提供 -proposal -user")
 	}
-	userPubKey := strings.TrimSpace(*pubKey)
-	if userPubKey == "" {
-		generated, err := randomBase64(32)
-		if err != nil {
-			return err
-		}
-		userPubKey = generated
-	}
-	body := map[string]any{
-		"proposal_id":  strings.TrimSpace(*proposalID),
-		"user_id":      strings.TrimSpace(*userID),
-		"user_pub_key": userPubKey,
-	}
-	var out credentialFile
-	if err := c.postJSON("/api/v1/credentials", body, true, &out); err != nil {
+	userPubKey, err := resolveUserPubKey(*pubKey)
+	if err != nil {
 		return err
 	}
-	out.Version = 1
-	out.ExportedAt = time.Now().UTC().Format(time.RFC3339)
-	if *outFile != "" {
-		if err := writeJSON(*outFile, out); err != nil {
-			return err
-		}
-		fmt.Printf("凭证已写入 %s\n", *outFile)
-		return nil
+
+	credential, err := c.runBlindSignatureFlow(
+		userPubKey,
+		1,
+		func() (*credentialReservation, error) {
+			var reservation credentialReservation
+			body := map[string]any{"proposal_id": proposal, "user_id": user}
+			if err := c.postJSON("/api/v1/credentials", body, true, &reservation); err != nil {
+				return nil, err
+			}
+			return &reservation, nil
+		},
+		func(reservation *credentialReservation, blinded []byte) ([]byte, error) {
+			var response blindSignatureResponse
+			body := map[string]any{
+				"proposal_id":        reservation.ProposalID,
+				"user_id":            reservation.UserID,
+				"blinded_message":    base64.StdEncoding.EncodeToString(blinded),
+				"issuer_key_version": reservation.IssuerKeyVersion,
+			}
+			if err := c.postJSON("/api/v1/credentials/blind-sign", body, true, &response); err != nil {
+				return nil, err
+			}
+			return base64.StdEncoding.DecodeString(response.BlindSignature)
+		},
+	)
+	if err != nil {
+		return err
 	}
-	printJSON(out)
-	return nil
+	credential.Version = 1
+	credential.ExportedAt = time.Now().UTC().Format(time.RFC3339)
+	return c.writeCredential(*credential, *outFile)
 }
 
 // cmdClaimCredential 匿名领取一张凭证。
 //
-// 领取请求里只有自己生成的公钥，没有任何身份信息：服务端随机给出一个凭证，
-// 因此服务端与运营方都无法把凭证和投票人对应起来。这条路径是公开的
-// （不需要 admin token），与门户的「领取凭证」按钮是同一个接口。
+// 领取请求里没有任何身份信息：服务端随机给出一个池槽位（user_id），运营方
+// 因此不知道谁领了哪一个。客户端本地盲化凭证消息 → 服务端盲签名 → 客户端
+// 解盲 → 服务端验签落库。
 func (c *cli) cmdClaimCredential(args []string) error {
 	fs := flag.NewFlagSet("credential-claim", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -258,35 +440,58 @@ func (c *cli) cmdClaimCredential(args []string) error {
 	if proposal == "" {
 		return errors.New("必须提供 -proposal")
 	}
-	userPubKey := strings.TrimSpace(*pubKey)
-	if userPubKey == "" {
-		generated, err := randomBase64(32)
-		if err != nil {
-			return err
-		}
-		userPubKey = generated
-	}
-
-	body := map[string]any{"user_pub_key": userPubKey}
-	var out credentialFile
-	if err := c.postJSON(
-		fmt.Sprintf("/api/v1/proposals/%s/credentials/claim", url.PathEscape(proposal)),
-		body,
-		false,
-		&out,
-	); err != nil {
+	userPubKey, err := resolveUserPubKey(*pubKey)
+	if err != nil {
 		return err
 	}
-	out.Version = 1
-	out.ExportedAt = time.Now().UTC().Format(time.RFC3339)
-	if *outFile != "" {
-		if err := writeJSON(*outFile, out); err != nil {
+
+	credential, err := c.runBlindSignatureFlow(
+		userPubKey,
+		claimMaxAttempts,
+		func() (*credentialReservation, error) {
+			var reservation credentialReservation
+			path := fmt.Sprintf(
+				"/api/v1/proposals/%s/credentials/claim", url.PathEscape(proposal),
+			)
+			if err := c.postJSON(path, map[string]any{}, false, &reservation); err != nil {
+				return nil, err
+			}
+			return &reservation, nil
+		},
+		func(reservation *credentialReservation, blinded []byte) ([]byte, error) {
+			var response blindSignatureResponse
+			path := fmt.Sprintf(
+				"/api/v1/proposals/%s/credentials/blind-sign", url.PathEscape(proposal),
+			)
+			body := map[string]any{
+				"user_id":            reservation.UserID,
+				"blinded_message":    base64.StdEncoding.EncodeToString(blinded),
+				"issuer_key_version": reservation.IssuerKeyVersion,
+			}
+			if err := c.postJSON(path, body, false, &response); err != nil {
+				return nil, err
+			}
+			return base64.StdEncoding.DecodeString(response.BlindSignature)
+		},
+	)
+	if err != nil {
+		return err
+	}
+	credential.Version = 1
+	credential.ExportedAt = time.Now().UTC().Format(time.RFC3339)
+	return c.writeCredential(*credential, *outFile)
+}
+
+// writeCredential 把凭证写到文件或标准输出。
+func (c *cli) writeCredential(credential credentialFile, outFile string) error {
+	if outFile != "" {
+		if err := writeJSON(outFile, credential); err != nil {
 			return err
 		}
-		fmt.Printf("凭证已写入 %s\n", *outFile)
+		fmt.Printf("凭证已写入 %s\n", outFile)
 		return nil
 	}
-	printJSON(out)
+	printJSON(credential)
 	return nil
 }
 
@@ -721,12 +926,16 @@ func (c *cli) do(req *http.Request, admin bool, out any) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var apiErr apiError
 		if json.Unmarshal(body, &apiErr) == nil && apiErr.Error != "" {
-			if apiErr.Code != "" {
-				return fmt.Errorf("%s (%s)", apiErr.Error, apiErr.Code)
+			return &httpError{
+				Status:  resp.StatusCode,
+				Code:    apiErr.Code,
+				Message: apiErr.Error,
 			}
-			return errors.New(apiErr.Error)
 		}
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return &httpError{
+			Status:  resp.StatusCode,
+			Message: fmt.Sprintf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body))),
+		}
 	}
 	if out == nil {
 		return nil

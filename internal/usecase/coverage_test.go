@@ -67,18 +67,22 @@ func TestCreateProposalRequest_Validate(t *testing.T) {
 	require.ErrorIs(t, req.Validate(), ErrInvalidRequest)
 }
 
-func TestRegisterUseCase_IssueCredential_InvalidAndMissingDeps(t *testing.T) {
+func TestRegisterUseCase_ReserveCredential_InvalidAndMissingDeps(t *testing.T) {
 	uc := NewRegisterUseCase(nil, nil, nil, nil)
-	_, err := uc.IssueCredential(context.Background(), "p1", "u1", []byte("pub"))
+	_, err := uc.ReserveCredentialForUser(context.Background(), "p1", "u1")
 	require.Error(t, err)
 
 	repo := new(credentialRepositoryMock)
 	uc = NewRegisterUseCase(repo, nil, nil, nil)
-	_, err = uc.IssueCredential(context.Background(), "", "", []byte("pub"))
+	_, err = uc.ReserveCredentialForUser(context.Background(), "", "")
+	require.Error(t, err)
+
+	uc = NewRegisterUseCaseWithPool(repo, nil, nil, nil, nil)
+	_, err = uc.ReserveCredential(context.Background(), "p1")
 	require.Error(t, err)
 }
 
-func TestRegisterUseCase_IssueCredential_CheckExistingError(t *testing.T) {
+func TestRegisterUseCase_ReserveCredentialForUser_CheckExistingError(t *testing.T) {
 	repo := new(credentialRepositoryMock)
 	proposalRepo := new(proposalRepositoryMock)
 	issuer := new(credentialIssuerMock)
@@ -86,7 +90,7 @@ func TestRegisterUseCase_IssueCredential_CheckExistingError(t *testing.T) {
 
 	proposalRepo.On("GetByID", mock.Anything, "p1").Return(&entity.Proposal{ID: "p1"}, nil).Once()
 	repo.On("GetByProposalAndUserID", mock.Anything, "p1", "u1").Return((*entity.Credential)(nil), errors.New("db down")).Once()
-	_, err := uc.IssueCredential(context.Background(), "p1", "u1", []byte("pub"))
+	_, err := uc.ReserveCredentialForUser(context.Background(), "p1", "u1")
 	require.Error(t, err)
 }
 

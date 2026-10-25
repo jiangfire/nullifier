@@ -25,7 +25,14 @@ func NewCredentialRepository(db *gorm.DB) *CredentialRepository {
 }
 
 func (r *CredentialRepository) Save(ctx context.Context, credential *entity.Credential) error {
-	return r.Create(ctx, credential)
+	if err := r.Create(ctx, credential); err != nil {
+		// 同一提案下的 user_id 唯一：并发 attest 时靠它兜底。
+		if isUniqueConstraintError(err) {
+			return repository.ErrDuplicateCredential
+		}
+		return err
+	}
+	return nil
 }
 
 func (r *CredentialRepository) GetByProposalAndUserID(ctx context.Context, proposalID string, userID string) (*entity.Credential, error) {

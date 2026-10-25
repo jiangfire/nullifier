@@ -14,6 +14,7 @@ import (
 	"anonvote/internal/domain/entity"
 	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	"anonvote/internal/infrastructure/crypto/ballot"
+	"anonvote/tests/testutil"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	"github.com/stretchr/testify/require"
@@ -228,24 +229,15 @@ func createOpenProposal(t *testing.T, ts *httptest.Server, title string) string 
 	return proposal.ID
 }
 
-// issueCredential 给用户签发一张凭证。
+// issueCredential 给用户签发一张凭证（走真两段式盲签名）。
 func issueCredential(t *testing.T, ts *httptest.Server, proposalID, userID string) credentialMaterial {
 	t.Helper()
 
-	req := map[string]any{
-		"proposal_id":  proposalID,
-		"user_id":      userID,
-		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key-" + userID)),
-	}
-	resp := doPostAdminJSON(t, ts.URL+"/api/v1/credentials", "secret", req)
-	defer func() { _ = resp.Body.Close() }()
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-
-	var credential struct {
-		UserPubKey string `json:"user_pub_key"`
-		Signature  string `json:"signature"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credential))
+	client := testutil.NewBlindClient(ts.URL)
+	client.AdminToken = "secret"
+	userPubKey := []byte("user-pub-key-" + userID)
+	credential, err := client.IssueCredential(proposalID, userID, userPubKey)
+	require.NoError(t, err)
 	return credentialMaterial{
 		UserID:     userID,
 		UserPubKey: credential.UserPubKey,

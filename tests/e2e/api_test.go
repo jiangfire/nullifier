@@ -104,11 +104,6 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	defer ts.Close()
 
 	// 1) 签发凭证
-	credentialReq := map[string]any{
-		"proposal_id":  "",
-		"user_id":      "u-1",
-		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key")),
-	}
 	var resp *http.Response
 	// 2) 创建提案
 	startAt := time.Now().UTC().Add(30 * time.Minute).Format(time.RFC3339)
@@ -129,15 +124,9 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 	resp.Body.Close()
 	require.NotEmpty(t, proposalResp.ID)
 
-	credentialReq["proposal_id"] = proposalResp.ID
-	resp = postAdminJSON(t, ts.URL+"/api/v1/credentials", adminToken, credentialReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var credentialResp struct {
-		UserPubKey string `json:"user_pub_key"`
-		Signature  string `json:"signature"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credentialResp))
-	resp.Body.Close()
+	credentialResp := issueCredential(
+		t, ts, adminToken, proposalResp.ID, "u-1", []byte("user-pub-key"),
+	)
 	require.NotEmpty(t, credentialResp.UserPubKey)
 	require.NotEmpty(t, credentialResp.Signature)
 
@@ -352,11 +341,6 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 	ts := httptest.NewServer(server.Engine())
 	defer ts.Close()
 
-	credentialReq := map[string]any{
-		"proposal_id":  "",
-		"user_id":      "u-concurrent",
-		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key-concurrent")),
-	}
 	var resp *http.Response
 	proposalReq := map[string]any{
 		"title":       "Concurrent Vote Test",
@@ -373,15 +357,9 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
 	_ = resp.Body.Close()
 
-	credentialReq["proposal_id"] = proposalResp.ID
-	resp = postAdminJSON(t, ts.URL+"/api/v1/credentials", adminToken, credentialReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var credentialResp struct {
-		UserPubKey string `json:"user_pub_key"`
-		Signature  string `json:"signature"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credentialResp))
-	_ = resp.Body.Close()
+	credentialResp := issueCredential(
+		t, ts, adminToken, proposalResp.ID, "u-concurrent", []byte("user-pub-key-concurrent"),
+	)
 
 	setupReq := map[string]any{
 		"threshold": 2,

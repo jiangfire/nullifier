@@ -206,8 +206,21 @@ func TestRun_CommandsThatWriteFiles(t *testing.T) {
 	t.Run("credential-issue 落盘", func(t *testing.T) {
 		t.Parallel()
 
-		srv, requests := newRecordingServer(t, http.StatusOK,
-			`{"proposal_id":"p1","user_id":"u-1","user_pub_key":"pk","signature":"sig"}`)
+		// 管理端签发走真两段式盲签名：服务端只见盲化消息。
+		server := newBlindSigningServer(t)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server.requests = append(server.requests, r.URL.Path)
+			switch r.URL.Path {
+			case "/api/v1/credentials":
+				server.writeReservation(t, w, "p1", "u-1")
+			case "/api/v1/credentials/blind-sign":
+				server.writeBlindSignature(t, w, r)
+			default:
+				server.writeCredential(t, w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+
 		outPath := filepath.Join(dir, "issued.json")
 
 		code := 0
@@ -220,11 +233,11 @@ func TestRun_CommandsThatWriteFiles(t *testing.T) {
 
 		require.Equal(t, 0, code)
 		require.Contains(t, out, outPath)
-
-		req := <-requests
-		require.Equal(t, http.MethodPost, req.Method)
-		require.Equal(t, "/api/v1/credentials", req.Path)
-		require.Equal(t, "Bearer secret", req.Auth)
+		require.Equal(t, []string{
+			"/api/v1/credentials",
+			"/api/v1/credentials/blind-sign",
+			"/api/v1/proposals/p1/credentials/attest",
+		}, server.requests)
 
 		var issued credentialFile
 		raw, err := os.ReadFile(outPath)

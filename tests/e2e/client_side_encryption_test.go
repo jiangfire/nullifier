@@ -94,19 +94,10 @@ func TestAPI_ClientSideEncryption_E2E(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&proposalResp))
 	resp.Body.Close()
 
-	// 2) 签发凭证
-	resp = postAdminJSON(t, ts.URL+"/api/v1/credentials", adminToken, map[string]any{
-		"proposal_id":  proposalResp.ID,
-		"user_id":      "u-1",
-		"user_pub_key": base64.StdEncoding.EncodeToString([]byte("user-pub-key")),
-	})
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var credentialResp struct {
-		UserPubKey string `json:"user_pub_key"`
-		Signature  string `json:"signature"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&credentialResp))
-	resp.Body.Close()
+	// 2) 签发凭证（真两段式盲签名）
+	credentialResp := issueCredential(
+		t, ts, adminToken, proposalResp.ID, "u-1", []byte("user-pub-key"),
+	)
 
 	// 3) 初始化门限解密会话
 	resp = postAdminJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/decryption/setup",

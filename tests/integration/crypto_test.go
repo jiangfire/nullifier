@@ -112,9 +112,23 @@ func TestCryptoPipeline_Integration(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, nullifierValue, 64)
 
-	// kryptology blind signature issue
+	// kryptology blind signature：真两段式 —— 客户端本地盲化，服务端只见盲化消息。
 	issuer := cryptoinfra.NewKryptologyCredentialIssuer()
-	credential, err := issuer.Issue(context.Background(), "user-1", []byte("user-public-key"))
+	issuerKey, err := issuer.IssuerPublicKey(context.Background())
 	require.NoError(t, err)
-	require.NotEmpty(t, credential.Signature)
+	client, err := cryptoinfra.NewCredentialBlindClient(issuerKey)
+	require.NoError(t, err)
+	blinded, err := client.Blind("user-1", []byte("user-public-key"))
+	require.NoError(t, err)
+	blindSignature, err := issuer.BlindSign(
+		context.Background(), issuerKey.Version, blinded.BlindedMessage,
+	)
+	require.NoError(t, err)
+	signature, err := client.Finalize(blinded, blindSignature)
+	require.NoError(t, err)
+	require.NotEmpty(t, signature)
+
+	version, err := issuer.VerifyCredential("user-1", []byte("user-public-key"), signature)
+	require.NoError(t, err)
+	require.Positive(t, version)
 }

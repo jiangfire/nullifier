@@ -96,23 +96,57 @@ var _ domaincrypto.Encrypter = (*encrypterMock)(nil)
 // acceptingCredentialIssuer 是总是验签通过的假签发方。
 type acceptingCredentialIssuer struct{}
 
-func (acceptingCredentialIssuer) Issue(ctx context.Context, userID string, userPubKey []byte) (*entity.Credential, error) {
-	return &entity.Credential{UserID: userID, UserPubKey: userPubKey}, nil
+func (acceptingCredentialIssuer) BlindSign(
+	ctx context.Context,
+	keyVersion int,
+	blindedMessage []byte,
+) ([]byte, error) {
+	return blindedMessage, nil
 }
 
-func (acceptingCredentialIssuer) VerifyCredential(userID string, userPubKey []byte, signature []byte) error {
-	return nil
+func (acceptingCredentialIssuer) IssuerPublicKey(ctx context.Context) (*domaincrypto.IssuerPublicKey, error) {
+	return &domaincrypto.IssuerPublicKey{
+		Version:  1,
+		Modulus:  []byte("modulus"),
+		Exponent: 65537,
+		Variant:  "SHA384PSSDeterministic",
+	}, nil
+}
+
+func (acceptingCredentialIssuer) VerifyCredential(
+	userID string,
+	userPubKey []byte,
+	signature []byte,
+) (int, error) {
+	return 1, nil
 }
 
 // rejectingCredentialIssuer 是验签总是失败的假签发方，用来覆盖伪造签名。
 type rejectingCredentialIssuer struct{}
 
-func (rejectingCredentialIssuer) Issue(ctx context.Context, userID string, userPubKey []byte) (*entity.Credential, error) {
-	return &entity.Credential{UserID: userID, UserPubKey: userPubKey}, nil
+func (rejectingCredentialIssuer) BlindSign(
+	ctx context.Context,
+	keyVersion int,
+	blindedMessage []byte,
+) ([]byte, error) {
+	return blindedMessage, nil
 }
 
-func (rejectingCredentialIssuer) VerifyCredential(userID string, userPubKey []byte, signature []byte) error {
-	return errors.New("signature verification failed")
+func (rejectingCredentialIssuer) IssuerPublicKey(ctx context.Context) (*domaincrypto.IssuerPublicKey, error) {
+	return &domaincrypto.IssuerPublicKey{
+		Version:  1,
+		Modulus:  []byte("modulus"),
+		Exponent: 65537,
+		Variant:  "SHA384PSSDeterministic",
+	}, nil
+}
+
+func (rejectingCredentialIssuer) VerifyCredential(
+	userID string,
+	userPubKey []byte,
+	signature []byte,
+) (int, error) {
+	return 0, errors.New("signature verification failed")
 }
 
 type decryptionSessionRepositoryMock struct {

@@ -6,6 +6,13 @@ import {
   isTargetUnknown,
 } from '../lib/ballot';
 import { localInputToRfc3339, toLocalDateTimeInput } from '../lib/datetime';
+import {
+  base64ToBytes,
+  blindCredentialMessage,
+  bytesToBase64,
+  finalizeCredentialSignature,
+  parseIssuerKey,
+} from '../lib/credential';
 import { generateNullifier } from '../lib/nullifier';
 import { describeApiError } from '../lib/error-messages';
 import {
@@ -125,6 +132,42 @@ function boolOf(object: JsonMap | null, key: string): boolean | null {
   const value = object[key];
   return typeof value === 'boolean' ? value : null;
 }
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+/**
+ * 匿名领取的重试次数。
+ *
+ * 服务端取槽位时**不占位**（占位会变成「只预留不 attest 就能耗尽池」的 DoS），
+ * 所以并发领取会抢到同一个槽位。抢输的那个换一个槽位重来 —— 但重试要重新
+ * 盲化（新的 user_id 意味着新的消息），所以重试只能在客户端做。
+ */
+const claimMaxAttempts = 5;
+
+/**
+ * 判断错误是不是「槽位被别人抢走」—— 只有这种情况值得重试。
+ *
+ * 409 有两种：槽位被抢（换个槽位重来就行）与凭证池已空（重试也没用）。
+ */
+function isSlotTaken(status: number, code: string | null): boolean {
+  return status === 409 && code === 'CREDENTIAL_EXISTS';
+}
+
+/** 凭证两段式流程的结果。 */
+type CredentialFlowResult =
+  | { ok: true; credential: JsonMap }
+  | {
+      ok: false;
+      title: string;
+      message: string;
+      /** 换一个槽位重来就能成（只有槽位被抢时为真）。 */
+      retryable?: boolean;
+    };
 
 function randomBase64(size: number): string {
   const bytes = new Uint8Array(size);
@@ -992,57 +1035,209 @@ export function useVotePortal() {
   /**
    * 匿名领取凭证。
    *
-   * 请求里只有自己生成的公钥，没有任何身份信息：服务端随机给出一个凭证，
-   * 因此服务端与运营方都无法把凭证和投票人对应起来。
+   * 走真两段式盲签名：客户端本地盲化凭证消息，服务端只见盲化消息；
+   * 客户端解盲后再把最终签名交回去，服务端验签后落库。
+   *
+   * 预留请求里**没有任何身份信息**：服务端随机给出一个凭证假名，服务端与运营方
+   * 都无法把凭证和投票人对应起来。
+   *
+   * 槽位被别人抢走时换一个槽位重来（服务端取槽位时不占位，并发领取会撞车）。
    */
   async function claimCredential(): Promise<boolean> {
     clearErrorGroup(identityErrors);
-    if (voteForm.proposalId.trim() === '') {
+    const proposalId = voteForm.proposalId.trim();
+    if (proposalId === '') {
       identityErrors.userId = '请先选择 proposal_id，再领取该提案的凭证';
       addNotice('error', '领取失败', identityErrors.userId);
       return false;
     }
 
-    const pubKey = regenerateBase64Key();
+    const userPubKey = regenerateBase64Key();
     credentialLoading.value = true;
-    const result = await apiCall({
+    let failure: CredentialFlowResult | null = null;
+    for (let attempt = 0; attempt < claimMaxAttempts; attempt += 1) {
+      const result = await claimCredentialOnce(proposalId, userPubKey);
+      if (result.ok) {
+        credentialLoading.value = false;
+        const credential = result.credential;
+        wallet.proposalId = textOf(credential, 'proposal_id') || proposalId;
+        wallet.userId = textOf(credential, 'user_id');
+        wallet.userPubKey = textOf(credential, 'user_pub_key') || userPubKey;
+        wallet.signature = textOf(credential, 'signature');
+        wallet.issuerKeyVersion = textOf(credential, 'issuer_key_version');
+        wallet.issuedAt = textOf(credential, 'issued_at');
+        hasVoted.value = null;
+        addNotice(
+          'success',
+          '凭证已领取',
+          '凭证与你的身份没有绑定，服务端也不知道是谁领的',
+        );
+        return true;
+      }
+      if (!result.retryable) {
+        credentialLoading.value = false;
+        addNotice('error', result.title, result.message);
+        return false;
+      }
+      failure = result;
+    }
+    credentialLoading.value = false;
+    addNotice(
+      'error',
+      failure?.title ?? '领取失败',
+      failure?.message ?? '凭证池的槽位一直被占用，请稍后重试',
+    );
+    return false;
+  }
+
+  /** 匿名领取的单次尝试：预留 → 盲化 → 盲签名 → 解盲 → attest。 */
+  async function claimCredentialOnce(
+    proposalId: string,
+    userPubKey: string,
+  ): Promise<CredentialFlowResult> {
+    const reserve = await apiCall({
       baseUrl: apiBaseUrl.value,
-      path: `/api/v1/proposals/${encodeURIComponent(voteForm.proposalId.trim())}/credentials/claim`,
+      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/claim`,
+      method: 'POST',
+      body: {},
+    });
+    if (!reserve.ok) {
+      return {
+        ok: false,
+        title: '领取失败',
+        message: describeApiError(reserve.error, reserve.code, '凭证池可能已经领完'),
+      };
+    }
+    const reservation = toObject(reserve.data);
+    return completeCredentialBlindSignature(proposalId, userPubKey, reservation, {
+      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/blind-sign`,
+      buildBody: (issuerKeyVersion, blindedMessage) => ({
+        user_id: textOf(reservation, 'user_id'),
+        blinded_message: blindedMessage,
+        issuer_key_version: issuerKeyVersion,
+      }),
+    });
+  }
+
+  /**
+   * 走完凭证盲签名的客户端侧：本地盲化 → 盲签名 → 本地解盲 → attest。
+   *
+   * 匿名领取与管理端签发只差「预留」与「盲签名」两步的端点，中间完全一样。
+   */
+  async function completeCredentialBlindSignature(
+    proposalId: string,
+    userPubKey: string,
+    reservation: JsonMap | null,
+    blindSign: {
+      path: string;
+      headers?: Record<string, string>;
+      buildBody: (
+        issuerKeyVersion: number,
+        blindedMessage: string,
+      ) => Record<string, unknown>;
+    },
+  ): Promise<CredentialFlowResult> {
+    if (reservation === null) {
+      return { ok: false, title: '领取失败', message: '服务端返回的预留结果格式不对' };
+    }
+    const userId = textOf(reservation, 'user_id');
+    if (userId === '') {
+      return { ok: false, title: '领取失败', message: '服务端没有返回 user_id' };
+    }
+
+    let issuerKey;
+    try {
+      issuerKey = parseIssuerKey(reservation);
+    } catch (error) {
+      return {
+        ok: false,
+        title: '领取失败',
+        message: `签发方公钥不可用：${describeError(error)}`,
+      };
+    }
+
+    let blinded;
+    try {
+      blinded = blindCredentialMessage(issuerKey, userId, base64ToBytes(userPubKey));
+    } catch (error) {
+      return {
+        ok: false,
+        title: '领取失败',
+        message: `本地盲化失败：${describeError(error)}`,
+      };
+    }
+
+    const blindSignResult = await apiCall({
+      baseUrl: apiBaseUrl.value,
+      path: blindSign.path,
+      method: 'POST',
+      headers: blindSign.headers,
+      body: blindSign.buildBody(
+        issuerKey.version,
+        bytesToBase64(blinded.blindedMessage),
+      ),
+    });
+    if (!blindSignResult.ok) {
+      return {
+        ok: false,
+        title: '盲签名失败',
+        message: describeApiError(
+          blindSignResult.error,
+          blindSignResult.code,
+          '服务端拒绝了这次盲签名',
+        ),
+      };
+    }
+    const blindSignature = textOf(toObject(blindSignResult.data), 'blind_signature');
+    if (blindSignature === '') {
+      return { ok: false, title: '盲签名失败', message: '服务端没有返回盲签名' };
+    }
+
+    let signature;
+    try {
+      signature = finalizeCredentialSignature(
+        blinded,
+        base64ToBytes(blindSignature),
+        issuerKey,
+      );
+    } catch (error) {
+      return { ok: false, title: '解盲失败', message: describeError(error) };
+    }
+
+    const attestResult = await apiCall({
+      baseUrl: apiBaseUrl.value,
+      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/attest`,
       method: 'POST',
       body: {
-        user_pub_key: pubKey,
+        user_id: userId,
+        user_pub_key: userPubKey,
+        signature: bytesToBase64(signature),
       },
     });
-    credentialLoading.value = false;
-
-    if (!result.ok) {
-      addNotice(
-        'error',
-        '领取失败',
-        describeApiError(result.error, result.code, '凭证池可能已经领完'),
-      );
-      return false;
+    if (!attestResult.ok) {
+      return {
+        ok: false,
+        title: '凭证落库失败',
+        message: describeApiError(
+          attestResult.error,
+          attestResult.code,
+          '服务端没有接受这张凭证',
+        ),
+        // 槽位被别人抢走时，换一个槽位重来就能成。
+        retryable: isSlotTaken(attestResult.status, attestResult.code),
+      };
     }
-    const payload = toObject(result.data);
-    wallet.proposalId =
-      textOf(payload, 'proposal_id') || voteForm.proposalId.trim();
-    wallet.userId = textOf(payload, 'user_id');
-    wallet.userPubKey = textOf(payload, 'user_pub_key') || pubKey;
-    wallet.signature = textOf(payload, 'signature');
-    wallet.issuerKeyVersion = textOf(payload, 'issuer_key_version');
-    wallet.issuedAt = textOf(payload, 'issued_at');
-    hasVoted.value = null;
-    addNotice(
-      'success',
-      '凭证已领取',
-      '凭证与你的身份没有绑定，服务端也不知道是谁领的',
-    );
-    return true;
+    const credential = toObject(attestResult.data);
+    if (credential === null) {
+      return { ok: false, title: '凭证落库失败', message: '服务端返回的凭证格式不对' };
+    }
+    return { ok: true, credential };
   }
 
   async function issueCredential(): Promise<boolean> {
     clearErrorGroup(identityErrors);
-    if (voteForm.proposalId.trim() === '') {
+    const proposalId = voteForm.proposalId.trim();
+    if (proposalId === '') {
       identityErrors.userId = '请先选择 proposal_id，再领取该提案的凭证';
       addNotice('error', '签发失败', identityErrors.userId);
       return false;
@@ -1068,35 +1263,54 @@ export function useVotePortal() {
     }
 
     credentialLoading.value = true;
-    const result = await apiCall({
+    const reserve = await apiCall({
       baseUrl: apiBaseUrl.value,
       path: '/api/v1/credentials',
       method: 'POST',
       headers: adminHeaders(),
       body: {
-        proposal_id: voteForm.proposalId.trim(),
+        proposal_id: proposalId,
         user_id: identityForm.userId.trim(),
-        user_pub_key: currentPubKey.value,
       },
     });
-    credentialLoading.value = false;
-
-    if (!result.ok) {
+    if (!reserve.ok) {
+      credentialLoading.value = false;
       addNotice(
         'error',
         '签发失败',
-        describeApiError(result.error, result.code, '后端未返回凭证'),
+        describeApiError(reserve.error, reserve.code, '后端未返回凭证'),
       );
       return false;
     }
-    const payload = toObject(result.data);
-    wallet.proposalId =
-      textOf(payload, 'proposal_id') || voteForm.proposalId.trim();
-    wallet.userId = textOf(payload, 'user_id') || identityForm.userId.trim();
-    wallet.userPubKey = textOf(payload, 'user_pub_key');
-    wallet.signature = textOf(payload, 'signature');
-    wallet.issuerKeyVersion = textOf(payload, 'issuer_key_version');
-    wallet.issuedAt = textOf(payload, 'issued_at');
+    const reservation = toObject(reserve.data);
+    const result = await completeCredentialBlindSignature(
+      proposalId,
+      currentPubKey.value,
+      reservation,
+      {
+        path: '/api/v1/credentials/blind-sign',
+        headers: adminHeaders(),
+        buildBody: (issuerKeyVersion, blindedMessage) => ({
+          proposal_id: proposalId,
+          user_id: textOf(reservation, 'user_id'),
+          blinded_message: blindedMessage,
+          issuer_key_version: issuerKeyVersion,
+        }),
+      },
+    );
+    credentialLoading.value = false;
+
+    if (!result.ok) {
+      addNotice('error', result.title, result.message);
+      return false;
+    }
+    const credential = result.credential;
+    wallet.proposalId = textOf(credential, 'proposal_id') || proposalId;
+    wallet.userId = textOf(credential, 'user_id') || identityForm.userId.trim();
+    wallet.userPubKey = textOf(credential, 'user_pub_key') || currentPubKey.value;
+    wallet.signature = textOf(credential, 'signature');
+    wallet.issuerKeyVersion = textOf(credential, 'issuer_key_version');
+    wallet.issuedAt = textOf(credential, 'issued_at');
     hasVoted.value = null;
     addNotice('success', '凭证已领取', '你已可以进行匿名投票');
     return true;

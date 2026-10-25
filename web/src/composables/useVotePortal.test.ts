@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { nextTick } from 'vue';
+import { bytesToBase64 } from '../lib/credential';
 import { useVotePortal } from './useVotePortal';
 
 /**
@@ -62,8 +63,9 @@ interface FetchCall {
 
 interface FetchRoute {
   match: (url: string) => boolean;
-  payload: unknown;
-  status?: number;
+  /** 可以是常量，也可以是函数 —— 后者用于「第 1 次失败、第 2 次成功」这类场景。 */
+  payload: unknown | (() => unknown);
+  status?: number | (() => number);
 }
 
 function stubFetch(routes: FetchRoute[]): FetchCall[] {
@@ -78,11 +80,14 @@ function stubFetch(routes: FetchRoute[]): FetchCall[] {
       }
       calls.push({ url, body });
       const route = routes.find((item) => item.match(url));
-      const status = route?.status ?? 200;
+      const status =
+        typeof route?.status === 'function' ? route.status() : (route?.status ?? 200);
+      const payload =
+        typeof route?.payload === 'function' ? route.payload() : route?.payload;
       return {
         ok: status >= 200 && status < 300,
         status,
-        text: async () => JSON.stringify(route ? route.payload : {}),
+        text: async () => JSON.stringify(payload ?? {}),
       };
     }),
   );
@@ -116,6 +121,65 @@ const draftRoute = {
     nullifier: 'null-1',
   },
 };
+
+/**
+ * 签发方公钥（2048 位 RSA）。
+ *
+ * 与 Go 侧跨语言向量测试用的是同一把测试密钥 —— 它只出现在测试里，不参与任何
+ * 生产路径。
+ */
+const issuerModulusHex =
+  'a8f6a0ae71df41acaa192da461e1e12503dd57e23646fd22fa6130e7fb821895f' +
+  '1508a7bd20d5e173736552a9b2e1d2758d97777eaa7350e668239574fb01126a5' +
+  '06eeb4773451ef64e948b1b0f5f6365c20e037dc5ab824e32a425777cfa8e4205e' +
+  '9be1684fe103d13c628266cf41205d8d849ac977f2f0f400fdb2547c3803e03f5' +
+  'e512b32275b8079db69250633dd10c8e3dd77e8246f550bd236a4fad1535dbe06' +
+  '17c5b7bc24c1cdb94b2f865e77eee33f03fe593709555f1c1969cc555da085f53' +
+  'e267c058aac495c180e2583974dee64d5f9094c025504d4545e5ba65a52c7dbf5b' +
+  'ccac52c05244d8f09b9196590e80ad0a0ecfdf0cf2be35325a745a9';
+
+function hexToBytes(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/** 「预留签发权」的响应。 */
+function reservationPayload(attempt = 1) {
+  return {
+    proposal_id: 'p1',
+    user_id: attempt === 1 ? 'pseudonym-from-pool' : 'pseudonym-from-pool-2',
+    issuer_key_version: 1,
+    variant: 'SHA384PSSDeterministic',
+    modulus: bytesToBase64(hexToBytes(issuerModulusHex)),
+    exponent: 65537,
+  };
+}
+
+/**
+ * 盲签名的响应。
+ *
+ * 这里给的是一串占位字节：门户只关心解盲这一步能跑通（长度必须等于密钥长度），
+ * 真正的验签在服务端做。
+ */
+function blindSignaturePayload() {
+  return { blind_signature: bytesToBase64(new Uint8Array(256)) };
+}
+
+/** attest 之后的凭证。 */
+function attestedCredential(userId = 'pseudonym-from-pool') {
+  return {
+    id: 'cred-1',
+    proposal_id: 'p1',
+    user_id: userId,
+    user_pub_key: 'pub-key',
+    signature: 'sig',
+    issuer_key_version: 1,
+    issued_at: '2026-10-21T00:00:00Z',
+  };
+}
 
 describe('投票凭据与当前意图的绑定', () => {
   beforeEach(() => {
@@ -273,16 +337,66 @@ describe('匿名领取凭证', () => {
     vi.unstubAllGlobals();
   });
 
-  it('只提交公钥，不提交任何身份信息', async () => {
+  it('走完整两段式：预留不带公钥，盲签名只见盲化消息', async () => {
+    const calls = stubFetch([
+      { match: (url) => url.includes('/credentials/claim'), payload: reservationPayload() },
+      { match: (url) => url.includes('/credentials/blind-sign'), payload: blindSignaturePayload() },
+      { match: (url) => url.includes('/credentials/attest'), payload: attestedCredential() },
+    ]);
+    const portal = setupPortal();
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(true);
+
+    // ① 预留阶段：请求体是空的 —— 服务端一旦知道公钥就能算出消息原文，
+    //    盲化当场失效，所以公钥只能在 attest 那一步才出现。
+    const reserveCall = calls.find((item) => item.url.includes('/credentials/claim'));
+    expect(reserveCall).toBeDefined();
+    expect(reserveCall?.url).toContain('/api/v1/proposals/p1/credentials/claim');
+    expect(reserveCall?.body).not.toHaveProperty('user_pub_key');
+    expect(reserveCall?.body).not.toHaveProperty('user_id');
+    expect(Object.keys(reserveCall?.body ?? {})).toEqual([]);
+
+    // ② 盲签名阶段：服务端拿到的只是盲化消息。
+    const blindSignCall = calls.find((item) => item.url.includes('/credentials/blind-sign'));
+    expect(blindSignCall).toBeDefined();
+    expect(blindSignCall?.body?.user_id).toBe('pseudonym-from-pool');
+    expect(blindSignCall?.body?.issuer_key_version).toBe(1);
+    expect(String(blindSignCall?.body?.blinded_message ?? '')).not.toBe('');
+
+    // ③ attest 阶段：公钥与最终签名一起交回。
+    const attestCall = calls.find((item) => item.url.includes('/credentials/attest'));
+    expect(attestCall).toBeDefined();
+    expect(attestCall?.body?.user_id).toBe('pseudonym-from-pool');
+    expect(String(attestCall?.body?.user_pub_key ?? '')).not.toBe('');
+    expect(String(attestCall?.body?.signature ?? '')).not.toBe('');
+
+    expect(portal.wallet.userId).toBe('pseudonym-from-pool');
+  });
+
+  it('槽位被别人抢走时换一个槽位重来', async () => {
+    let claimAttempts = 0;
+    let attestAttempts = 0;
     const calls = stubFetch([
       {
         match: (url) => url.includes('/credentials/claim'),
-        payload: {
-          proposal_id: 'p1',
-          user_id: 'pseudonym-from-pool',
-          user_pub_key: 'pub-from-server',
-          signature: 'sig',
+        payload: () => {
+          claimAttempts += 1;
+          return reservationPayload(claimAttempts);
         },
+      },
+      { match: (url) => url.includes('/credentials/blind-sign'), payload: blindSignaturePayload() },
+      {
+        match: (url) => url.includes('/credentials/attest'),
+        status: () => {
+          attestAttempts += 1;
+          return attestAttempts === 1 ? 409 : 200;
+        },
+        payload: () =>
+          attestAttempts === 1
+            ? { code: 'CREDENTIAL_EXISTS', error: '凭证已存在' }
+            : attestedCredential('pseudonym-from-pool-2'),
       },
     ]);
     const portal = setupPortal();
@@ -290,14 +404,29 @@ describe('匿名领取凭证', () => {
     const claimed = await portal.claimCredential();
 
     expect(claimed).toBe(true);
-    const call = calls.find((item) => item.url.includes('/credentials/claim'));
-    expect(call).toBeDefined();
-    expect(call?.url).toContain('/api/v1/proposals/p1/credentials/claim');
-    // 请求体里只有公钥：没有 user_id，服务器无从知道是谁领的。
-    expect(call?.body).toHaveProperty('user_pub_key');
-    expect(call?.body).not.toHaveProperty('user_id');
-    expect(Object.keys(call?.body ?? {})).toEqual(['user_pub_key']);
-    expect(portal.wallet.userId).toBe('pseudonym-from-pool');
+    // 预留重试了一次：换一个槽位重新盲化。
+    const reserveCalls = calls.filter((item) => item.url.includes('/credentials/claim'));
+    expect(reserveCalls.length).toBe(2);
+    expect(portal.wallet.userId).toBe('pseudonym-from-pool-2');
+  });
+
+  it('凭证池领完时不重试', async () => {
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('/credentials/claim'),
+        status: 409,
+        payload: { code: 'CREDENTIAL_POOL_EMPTY', error: '凭证池已空' },
+      },
+    ]);
+    const portal = setupPortal();
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(false);
+    const reserveCalls = calls.filter((item) => item.url.includes('/credentials/claim'));
+    expect(reserveCalls.length).toBe(1);
+    const errors = portal.notices.value.filter((item) => item.level === 'error');
+    expect(errors.length).toBeGreaterThan(0);
   });
 
   it('领取失败时给出提示', async () => {

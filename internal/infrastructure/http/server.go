@@ -48,7 +48,8 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 
 	admin := v1.Group("/")
 	admin.Use(middleware.RequireAdminBearerToken(cfg.AdminBearerToken))
-	admin.POST("/credentials", handler.IssueCredential)
+	admin.POST("/credentials", handler.ReserveCredentialForUser)
+	admin.POST("/credentials/blind-sign", handler.AdminBlindSignCredential)
 	admin.POST("/proposals", handler.CreateProposal)
 	admin.GET("/proposals/:proposal_id/credentials", handler.ListProposalCredentialStatuses)
 	admin.POST("/proposals/:proposal_id/credentials/pool", handler.FillCredentialPool)

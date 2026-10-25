@@ -126,23 +126,14 @@ func TestAPI_ConcurrentSameNullifier_E2E(t *testing.T) {
 	}, 0, concurrency)
 	for i := 0; i < concurrency; i++ {
 		userID := fmt.Sprintf("u-concurrent-%d", i)
-		resp = postAdminJSON(t, ts.URL+"/api/v1/credentials", adminToken, map[string]any{
-			"proposal_id":  proposalResp.ID,
-			"user_id":      userID,
-			"user_pub_key": base64.StdEncoding.EncodeToString([]byte("pub-" + userID)),
-		})
-		require.Equal(t, http.StatusCreated, resp.StatusCode)
-		var credentialResp struct {
-			UserPubKey string `json:"user_pub_key"`
-			Signature  string `json:"signature"`
-		}
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&credentialResp))
-		resp.Body.Close()
+		credential := issueCredential(
+			t, ts, adminToken, proposalResp.ID, userID, []byte("pub-"+userID),
+		)
 		credentials = append(credentials, struct {
 			userID    string
 			pubKey    string
 			signature string
-		}{userID: userID, pubKey: credentialResp.UserPubKey, signature: credentialResp.Signature})
+		}{userID: userID, pubKey: credential.UserPubKey, signature: credential.Signature})
 	}
 
 	// 4) 取公开的计票公钥，在本地加密一份合法密文（每个请求都用同一份密文：
