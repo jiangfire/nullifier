@@ -118,6 +118,8 @@ func serve(migrateOnly bool) error {
 		zap.Int("cors_allowed_origins", len(cfg.CORSAllowedOrigins)),
 		zap.String("admin_token_source", adminTokenSource),
 		zap.Bool("proof_verification_enabled", strings.TrimSpace(cfg.VerifyingKeyPath) != ""),
+		// 一人一票是不是真的开着：这是运营最需要一眼看到的运行状态。
+		zap.Bool("eligibility_enforced", strings.TrimSpace(cfg.EligibilityRoot) != ""),
 	)
 
 	// 临时 token 只对当前进程有效，必须让运维看见；

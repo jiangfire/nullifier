@@ -57,6 +57,8 @@ func TestPublicErrorMessage(t *testing.T) {
 		{name: "invalid_request", err: usecase.ErrInvalidRequest, code: "INVALID_REQUEST", want: "invalid request"},
 		{name: "session_exists", err: usecase.ErrSessionAlreadyExists, code: "DECRYPTION_SESSION_EXISTS", want: "decryption session already exists"},
 		{name: "result_published", err: usecase.ErrResultAlreadyPublished, code: "RESULT_ALREADY_PUBLISHED", want: "tally result already published"},
+		{name: "unauthorized", err: usecase.ErrUnauthorized, code: "UNAUTHORIZED", want: "unauthorized"},
+		{name: "credential_pool_empty", err: usecase.ErrCredentialPoolEmpty, code: "CREDENTIAL_POOL_EMPTY", want: "credential pool is empty"},
 		{name: "eligibility_required", err: usecase.ErrEligibilityRequired, code: "ELIGIBILITY_REQUIRED", want: "eligibility proof is required"},
 		{name: "invalid_eligibility_proof", err: usecase.ErrInvalidEligibilityProof, code: "INVALID_ELIGIBILITY_PROOF", want: "invalid eligibility proof"},
 		{name: "eligibility_already_used", err: usecase.ErrEligibilityAlreadyUsed, code: "ELIGIBILITY_ALREADY_USED", want: "this eligibility has already been used"},

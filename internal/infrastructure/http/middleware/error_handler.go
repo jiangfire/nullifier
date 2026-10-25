@@ -96,6 +96,9 @@ func publicErrorMessage(err error, code string) string {
 		return "tally result already published"
 	case "UNAUTHORIZED":
 		return "unauthorized"
+	case "CREDENTIAL_POOL_EMPTY":
+		// 凭证池领完是运营状态问题，不是服务端故障 —— 别报成 internal error。
+		return "credential pool is empty"
 	case "ELIGIBILITY_REQUIRED":
 		return "eligibility proof is required"
 	case "INVALID_ELIGIBILITY_PROOF":
