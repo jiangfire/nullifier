@@ -54,6 +54,43 @@
 > ⚠️ **tag 必须在 `VERSION` 改完之后打**，且要在**所有提交都推上去之后**打 ——
 > release workflow 用 tag 上的源码构建，tag 指向的提交少一个就少一个文件。
 
+### 2.1 发版说明正文（tag 注解，可直接用）
+
+release workflow 把**注解 tag 的说明**原样当作 GitHub Release 正文（不是提交列表）。
+下面这段就是可直接用的正文 —— 关键是三件事说清：**这版能干什么、破坏性变更、部署方必须做什么**。
+
+```text
+v0.2.0 —— 客户端证明链与一人一票
+
+选票的加密与零知识证明全部搬到客户端：服务端只见密文，拿不到明文选项。
+「一人一票」由零知识资格证明兑现 —— 服务端只见名单根，不见名单，无法把资格对应到任何成员。
+
+⚠️ 破坏性变更（升级前必读）
+- 选票密文格式 v2 → v3，与 v0.1.0 完全不兼容：v0.1.0 投过的票无法解密，发版前请清库。
+- POST /api/v1/proposals/:proposal_id/ballot-draft 已删除（服务端代加密的入口整个没有了）。
+- 凭证签发改真两段式盲签名：claim（只预留）→ blind-sign → attest。
+- 投票请求体不再接受 public_witness（公开输入由服务端自行拼装）。
+- 门限分享从 kyber 的 ed25519 改为 Fr 上的 Shamir。
+
+部署必做项
+- release 模式必须配 crypto.eligibility_root 与 crypto.eligibility_vk_path（成对出现，缺一即启动失败）。
+- 门户包必须带 ballot-prover.wasm 与 wasm_exec.js（流水线已内置并校验）；两把 proving key
+  是秘密材料，默认不进发布包，需部署方自备或用 secret 注入。
+- 详见 docs/deployment-checklist.md。
+
+本版不承诺生产可用：门户无 UI 自动化回归、PG 集成测试依赖 CI 实跑、真实名单待运营方提供、
+容量数据只是压测实测，不是容量规划。
+```
+
+打 tag（注解 tag，正文从文件读，避免 shell 引号地狱）：
+
+```bash
+git tag -a v0.2.0 -F release-notes-0.2.0.txt   # 文件内容就是上面那段
+git push origin feat/v0.2.0-m2-proof-chain v0.2.0
+```
+
+> ⚠️ `release-notes-0.2.0.txt` 是**临时文件**，别提交进仓库（加进 `.gitignore` 或打完好删）。
+
 ---
 
 ## 3. 破坏性变更（部署前必须知道）
