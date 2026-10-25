@@ -327,6 +327,20 @@ tag 推送后流水线断掉的阻断性问题**。
   `PORTAL_ELIGIBILITY_PROVING_KEY_B64` 未配置，流水线按设计只发警告。**部署方必须自行补齐**
   （见 `docs/deployment-checklist.md` §6），否则门户投不了票、领不了资格票。
 
+**校验和链路已核对**（不是只看文件在不在）：
+
+- 未认证的公开 API（`api.github.com/repos/jiangfire/nullifier/releases/tags/v0.2.0`）能读到
+  release：`draft=false`、`prerelease=false`、`published_at=2026-10-25T10:41:47Z`，
+  12 个产物全部 `state=uploaded` 且各自带 `digest`。
+- 6 个 `.sha256` 边车文件的内容与 GitHub 记录的 `digest` **6/6 全部一致**
+  —— 用户按边车文件 `sha256sum -c` 校验是有效的，不是摆设。
+- 门户包**重新下载**后本地算出的 sha256 = `3903e93a00520eb1b57881087274a6ff30aebdadfab8b822fda17f584682f915`
+  = 边车文件 = GitHub `digest`，**三方一致**。
+
+> 一处**无害的差异**：Windows 产物的边车文件是 `hash *文件名`（Git Bash 的 `sha256sum`
+> 默认二进制模式，文件名带 `*` 前缀），其余平台是 `hash 文件名`。GNU coreutils 的
+> `sha256sum -c` 两种都认，不影响校验。
+
 > 一处**预期的差异**：CI 产出的 wasm 是 11,651,679 字节，本地是 11,953,957 字节 ——
 > Go 版本不同（CI 按 `go.mod` 用 1.25.4，本地默认 1.26.6），不是构建问题。
 > 两者都通过 §8.1 里那条「本地用 1.25.4 复跑」的验证。
