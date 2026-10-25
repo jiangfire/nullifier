@@ -76,6 +76,10 @@ func NewCredentialClaimRepository(db *gorm.DB) repository.CredentialClaimReposit
 	return persistence.NewCredentialClaimRepository(db)
 }
 
+func NewEligibilityUseRepository(db *gorm.DB) repository.EligibilityUseRepository {
+	return persistence.NewEligibilityUseRepository(db)
+}
+
 func NewProposalRepository(db *gorm.DB) repository.ProposalRepository {
 	return persistence.NewProposalRepository(db)
 }
@@ -119,6 +123,14 @@ func NewCredentialIssuer(cfg *config.Config) domaincrypto.CredentialIssuer {
 	)
 }
 
+// NewEligibilityService 造资格校验服务。
+//
+// 没配置名单根与验证密钥时它返回「未开启」的服务（开发环境的降级形态）；
+// 只配一半则直接报错 —— 那等于「不校验」。
+func NewEligibilityService(cfg *config.Config) (domaincrypto.EligibilityService, error) {
+	return cryptoinfra.NewEligibilityService(cfg.EligibilityRoot, cfg.EligibilityVerifyingKeyPath)
+}
+
 func NewVotingUseCase(
 	repo repository.VoteRepository,
 	participationRepo repository.ParticipationRepository,
@@ -148,9 +160,19 @@ func NewRegisterUseCase(
 	proposalRepo repository.ProposalRepository,
 	issuer domaincrypto.CredentialIssuer,
 	claimRepo repository.CredentialClaimRepository,
+	eligibilityUseRepo repository.EligibilityUseRepository,
+	eligibility domaincrypto.EligibilityService,
 	logger *zap.Logger,
 ) *usecase.RegisterUseCase {
-	return usecase.NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, logger)
+	return usecase.NewRegisterUseCaseWithEligibility(
+		repo,
+		proposalRepo,
+		issuer,
+		claimRepo,
+		eligibilityUseRepo,
+		eligibility,
+		logger,
+	)
 }
 
 func NewProposalUseCase(

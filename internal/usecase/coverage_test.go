@@ -78,7 +78,7 @@ func TestRegisterUseCase_ReserveCredential_InvalidAndMissingDeps(t *testing.T) {
 	require.Error(t, err)
 
 	uc = NewRegisterUseCaseWithPool(repo, nil, nil, nil, nil)
-	_, err = uc.ReserveCredential(context.Background(), "p1")
+	_, err = uc.ReserveCredential(context.Background(), "p1", nil)
 	require.Error(t, err)
 }
 

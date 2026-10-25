@@ -3,12 +3,10 @@ package ballot
 import (
 	"crypto/sha256"
 
-	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
-	"github.com/consensys/gnark-crypto/ecc/bn254/fr/mimc"
-)
+	"anonvote/internal/infrastructure/crypto/mimc"
 
-// mimcConstants 缓存 MiMC 的轮常量，避免每次推导都重新构造。
-var mimcConstants = mimc.GetConstants()
+	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+)
 
 // DeriveProposalField 把提案 ID 映射成标量域元素。
 //
@@ -26,32 +24,5 @@ func DeriveProposalField(proposalID string) fr.Element {
 // nullifier 必须是秘密的一向函数：它要公开在票表里做防重投，又不能让
 // 服务端反推出秘密（否则就能伪造别人的 nullifier 抢占他们的投票机会）。
 func DeriveNullifier(nullifierSecret fr.Element, proposalField fr.Element) fr.Element {
-	return mimcHash(nullifierSecret, proposalField)
-}
-
-// mimcHash 是与电路侧 std/hash/mimc 完全一致的 MiMC 实现。
-//
-// 轮函数是 x = (x + h + c)^5，外层是 Miyaguchi–Preneel：
-// h = h + E(x) + x。两侧必须逐位一致，电路里的 nullifier 约束才有意义，
-// 因此这份实现与 gnark 的 std/hash/mimc 保持同一套常量与同一套轮次。
-func mimcHash(elements ...fr.Element) fr.Element {
-	var h fr.Element
-	for _, element := range elements {
-		m := element
-		for i := range mimcConstants {
-			var constant, sum fr.Element
-			constant.SetBigInt(&mimcConstants[i])
-			sum.Add(&m, &h)
-			sum.Add(&sum, &constant)
-
-			var square, fourth fr.Element
-			square.Square(&sum)
-			fourth.Square(&square)
-			m.Mul(&fourth, &sum)
-		}
-		m.Add(&m, &h)
-		h.Add(&h, &m)
-		h.Add(&h, &element)
-	}
-	return h
+	return mimc.Hash(nullifierSecret, proposalField)
 }

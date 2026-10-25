@@ -30,6 +30,10 @@ func TestMapError(t *testing.T) {
 		{name: "result_published", err: usecase.ErrResultAlreadyPublished, status: http.StatusConflict, code: "RESULT_ALREADY_PUBLISHED"},
 		{name: "unauthorized", err: usecase.ErrUnauthorized, status: http.StatusUnauthorized, code: "UNAUTHORIZED"},
 		{name: "credential_pool_empty", err: usecase.ErrCredentialPoolEmpty, status: http.StatusConflict, code: "CREDENTIAL_POOL_EMPTY"},
+		{name: "eligibility_required", err: usecase.ErrEligibilityRequired, status: http.StatusBadRequest, code: "ELIGIBILITY_REQUIRED"},
+		{name: "invalid_eligibility_proof", err: usecase.ErrInvalidEligibilityProof, status: http.StatusForbidden, code: "INVALID_ELIGIBILITY_PROOF"},
+		{name: "eligibility_already_used", err: usecase.ErrEligibilityAlreadyUsed, status: http.StatusConflict, code: "ELIGIBILITY_ALREADY_USED"},
+		{name: "eligibility_not_enabled", err: usecase.ErrEligibilityNotEnabled, status: http.StatusConflict, code: "ELIGIBILITY_NOT_ENABLED"},
 		{name: "not_found", err: repository.ErrNotFound, status: http.StatusNotFound, code: "NOT_FOUND"},
 		{name: "unknown", err: errors.New("x"), status: http.StatusInternalServerError, code: "INTERNAL_ERROR"},
 	}
@@ -53,6 +57,10 @@ func TestPublicErrorMessage(t *testing.T) {
 		{name: "invalid_request", err: usecase.ErrInvalidRequest, code: "INVALID_REQUEST", want: "invalid request"},
 		{name: "session_exists", err: usecase.ErrSessionAlreadyExists, code: "DECRYPTION_SESSION_EXISTS", want: "decryption session already exists"},
 		{name: "result_published", err: usecase.ErrResultAlreadyPublished, code: "RESULT_ALREADY_PUBLISHED", want: "tally result already published"},
+		{name: "eligibility_required", err: usecase.ErrEligibilityRequired, code: "ELIGIBILITY_REQUIRED", want: "eligibility proof is required"},
+		{name: "invalid_eligibility_proof", err: usecase.ErrInvalidEligibilityProof, code: "INVALID_ELIGIBILITY_PROOF", want: "invalid eligibility proof"},
+		{name: "eligibility_already_used", err: usecase.ErrEligibilityAlreadyUsed, code: "ELIGIBILITY_ALREADY_USED", want: "this eligibility has already been used"},
+		{name: "eligibility_not_enabled", err: usecase.ErrEligibilityNotEnabled, code: "ELIGIBILITY_NOT_ENABLED", want: "eligibility verification is not enabled on this server"},
 		{name: "unknown", err: errors.New("sql: connection refused"), code: "INTERNAL_ERROR", want: "internal server error"},
 	}
 

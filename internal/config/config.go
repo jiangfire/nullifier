@@ -31,6 +31,16 @@ type Config struct {
 	VerifyingKeyPath            string
 	CredentialIssuerKeyPath     string
 	CredentialIssuerRotateAfter time.Duration
+	// EligibilityRoot 是资格名单的 Merkle 树根（十六进制域元素）。
+	//
+	// 服务端只认这个根：它能验证「这个人的资格在树里」，却无法把资格对应到
+	// 任何成员（服务端没有名单，也没有成员包）。
+	EligibilityRoot string
+	// EligibilityVerifyingKeyPath 是资格电路的验证密钥路径。
+	//
+	// 与 crypto.vk_path 一样，它只配了根不配密钥是不允许的 —— 那等于
+	// 「不校验」，而一人一票恰恰是靠这个校验兑现的。
+	EligibilityVerifyingKeyPath string
 	DB                          *persistence.DBConfig
 	// AutoMigrate 决定启动时是否自动改表。
 	// release 模式默认关闭：多副本同时启动会争 DDL 锁，而且改表应该是
@@ -84,6 +94,8 @@ func load(forMigration bool) (*Config, error) {
 	v.SetDefault("crypto.vk_path", "")
 	v.SetDefault("crypto.issuer_key_path", "issuer_keys.json")
 	v.SetDefault("crypto.issuer_rotate_days", 90)
+	v.SetDefault("crypto.eligibility_root", "")
+	v.SetDefault("crypto.eligibility_vk_path", "")
 
 	if err := v.ReadInConfig(); err != nil {
 		var notFound viper.ConfigFileNotFoundError
@@ -141,6 +153,8 @@ func load(forMigration bool) (*Config, error) {
 		VerifyingKeyPath:            v.GetString("crypto.vk_path"),
 		CredentialIssuerKeyPath:     v.GetString("crypto.issuer_key_path"),
 		CredentialIssuerRotateAfter: time.Duration(v.GetInt("crypto.issuer_rotate_days")) * 24 * time.Hour,
+		EligibilityRoot:             strings.TrimSpace(v.GetString("crypto.eligibility_root")),
+		EligibilityVerifyingKeyPath: strings.TrimSpace(v.GetString("crypto.eligibility_vk_path")),
 		DB:                          dbCfg,
 		AutoMigrate:                 !IsReleaseMode(ginMode),
 		SourceFile:                  v.ConfigFileUsed(),
@@ -157,6 +171,14 @@ func load(forMigration bool) (*Config, error) {
 		if strings.TrimSpace(cfg.VerifyingKeyPath) == "" {
 			return nil, fmt.Errorf("crypto.vk_path is required when server.mode=%q", cfg.GinMode)
 		}
+		// 一人一票是 release 模式的硬要求：没有名单根与资格验证密钥，服务端
+		// 就无法强制「同一个人只能领一张票」—— 那时它只是个能发凭证的服务器。
+		if cfg.EligibilityRoot == "" || cfg.EligibilityVerifyingKeyPath == "" {
+			return nil, fmt.Errorf(
+				"crypto.eligibility_root and crypto.eligibility_vk_path are required when server.mode=%q",
+				cfg.GinMode,
+			)
+		}
 		// 生产模式下临时 token 每次重启都会变，多副本之间还不一样，
 		// 会让运营门户与 CLI 随机失联 —— 必须显式配置。
 		if strings.TrimSpace(cfg.AdminBearerToken) == "" {
@@ -165,6 +187,13 @@ func load(forMigration bool) (*Config, error) {
 				cfg.GinMode,
 			)
 		}
+	}
+
+	// 名单根与验证密钥必须成对出现：只配根等于「不校验」，只配密钥则无从校验。
+	if (cfg.EligibilityRoot == "") != (cfg.EligibilityVerifyingKeyPath == "") {
+		return nil, errors.New(
+			"crypto.eligibility_root and crypto.eligibility_vk_path must be configured together",
+		)
 	}
 
 	return cfg, nil

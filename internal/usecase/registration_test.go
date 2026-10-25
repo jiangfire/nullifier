@@ -130,7 +130,7 @@ func TestRegisterUseCase_ReserveCredential(t *testing.T) {
 		Once()
 	issuer.On("IssuerPublicKey", mock.Anything).Return(testIssuerKey(), nil).Once()
 
-	reservation, err := uc.ReserveCredential(context.Background(), "p-1")
+	reservation, err := uc.ReserveCredential(context.Background(), "p-1", nil)
 	require.NoError(t, err)
 	require.NotNil(t, reservation)
 	// user_id 来自池里的假名，不是领取者提供的。
@@ -152,7 +152,7 @@ func TestRegisterUseCase_ReserveCredential_PoolEmpty(t *testing.T) {
 		Return((*entity.CredentialClaim)(nil), repository.ErrNotFound).
 		Once()
 
-	reservation, err := uc.ReserveCredential(context.Background(), "p-1")
+	reservation, err := uc.ReserveCredential(context.Background(), "p-1", nil)
 	assert.ErrorIs(t, err, ErrCredentialPoolEmpty)
 	assert.Nil(t, reservation)
 }

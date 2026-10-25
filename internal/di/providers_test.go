@@ -81,6 +81,8 @@ func TestProviders_WiringSmoke(t *testing.T) {
 		proposalRepo,
 		credentialIssuer,
 		NewCredentialClaimRepository(db),
+		NewEligibilityUseRepository(db),
+		nil,
 		logger,
 	)
 	proposalUC := NewProposalUseCase(proposalRepo, logger)

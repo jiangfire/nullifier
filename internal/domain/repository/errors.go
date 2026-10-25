@@ -11,4 +11,6 @@ var (
 	ErrDuplicateParticipation = errors.New("duplicate participation")
 	// ErrDuplicateCredential 表示命中凭证唯一约束（同一提案下的 user_id 已发过）。
 	ErrDuplicateCredential = errors.New("duplicate credential")
+	// ErrDuplicateEligibilityUse 表示命中资格唯一约束（同一提案下的资格已用过）。
+	ErrDuplicateEligibilityUse = errors.New("duplicate eligibility use")
 )

@@ -122,7 +122,7 @@ func TestServe_ServesHealthzAndShutsDown(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	require.JSONEq(t, `{"status":"ok","debug":true}`, string(body))
+	require.JSONEq(t, `{"status":"ok","debug":true,"eligibility":false}`, string(body))
 
 	close(stopCh)
 	select {

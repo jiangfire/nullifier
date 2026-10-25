@@ -40,7 +40,14 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 	engine.GET("/healthz", func(c *gin.Context) {
 		// debug 标志只报运行状态：服务端是否处于开发联调模式本来就是公开事实。
 		// 两种模式的行为完全一致 —— 服务端没有「替用户选票」的调试能力。
-		c.JSON(200, gin.H{"status": "ok", "debug": cfg.DebugMode})
+		//
+		// eligibility 报出服务端**是否在强制一人一票**：没开的话任何人都能
+		// 反复领票，这是运营必须能一眼看到的运行状态。
+		c.JSON(200, gin.H{
+			"status":      "ok",
+			"debug":       cfg.DebugMode,
+			"eligibility": cfg.EligibilityRoot != "",
+		})
 	})
 
 	v1 := engine.Group("/api/v1")

@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -67,6 +69,10 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	//   ② blind-sign —— 服务端对**盲化后**的消息做盲签名
 	//   ③ attest     —— 客户端交回解盲后的签名，服务端验签并落库
 	// 请求体里刻意没有任何身份字段：服务端一旦知道公钥，盲化当场失效。
+	//
+	// 开启资格校验时，claim 之前多一步：先拿一次性的领取挑战（④ eligibility-
+	// challenge），把资格证明钉在本次会话上。
+	r.POST("/proposals/:proposal_id/credentials/eligibility-challenge", h.IssueEligibilityChallenge)
 	r.POST("/proposals/:proposal_id/credentials/claim", h.ReserveCredential)
 	r.POST("/proposals/:proposal_id/credentials/blind-sign", h.BlindSignCredential)
 	r.POST("/proposals/:proposal_id/credentials/attest", h.AttestCredential)
@@ -172,6 +178,22 @@ type attestCredentialPayload struct {
 	Signature  string `json:"signature" validate:"required,base64"`
 }
 
+// claimCredentialPayload 是匿名领取凭证的请求体。
+//
+// 开启资格校验时三件材料必填；没开启时整个请求体可以为空（既有客户端就是
+// 这么发的）。
+//
+// ⚠️ 这里**不能**出现真人身份字段（工号、姓名、证件号……）：资格材料里只有
+// 零知识证明与两个公开输入，服务端从头到尾不知道领票的是谁。
+type claimCredentialPayload struct {
+	// EligibilityProof 是资格证明（base64 编码的 Groth16 证明）。
+	EligibilityProof string `json:"eligibility_proof"`
+	// QualificationID 是去重键（十六进制的域元素）。
+	QualificationID string `json:"qualification_id"`
+	// Challenge 是服务端签发的领取挑战（十六进制的域元素）。
+	Challenge string `json:"challenge"`
+}
+
 // reservationResponse 是「预留签发权」的响应。
 //
 // 它带出签发方公钥：客户端要拿它把凭证消息盲化。公钥本来就是公开值。
@@ -241,21 +263,16 @@ type fillCredentialPoolPayload struct {
 	Count int `json:"count" validate:"required,min=1,max=10000"`
 }
 
-// ReserveCredential 匿名预留一个凭证池槽位。
+// IssueEligibilityChallenge 签发一次领取挑战。
 //
-// **请求体里刻意没有任何字段**（旧版的 `user_pub_key` 一律忽略）：服务端
-// 一旦知道公钥，就能算出凭证消息的原文，盲化当场失效。user_id 由服务端从
-// 凭证池里随机分配 —— 服务端因此无法把凭证和投票人对应起来。
-//
-// 这一步**不签名**：客户端拿 user_id 与签发方公钥后本地盲化，再走盲签名与
-// attest 两步。
-func (h *Handler) ReserveCredential(c *gin.Context) {
+// 客户端拿它把资格证明钉在本次会话上。服务端不记账 —— 重放由去重键挡住。
+func (h *Handler) IssueEligibilityChallenge(c *gin.Context) {
 	if h.registerUC == nil {
 		c.Error(fmt.Errorf("register usecase is not configured"))
 		return
 	}
 
-	reservation, err := h.registerUC.ReserveCredential(
+	challenge, err := h.registerUC.IssueEligibilityChallenge(
 		c.Request.Context(),
 		c.Param("proposal_id"),
 	)
@@ -263,7 +280,78 @@ func (h *Handler) ReserveCredential(c *gin.Context) {
 		c.Error(err)
 		return
 	}
+	c.JSON(http.StatusOK, gin.H{
+		"proposal_id": challenge.ProposalID,
+		"root":        challenge.Root,
+		"depth":       challenge.Depth,
+		"challenge":   challenge.Challenge,
+	})
+}
+
+// ReserveCredential 匿名预留一个凭证池槽位。
+//
+// **请求体里刻意没有任何身份字段**（旧版的 `user_pub_key` 一律忽略）：服务端
+// 一旦知道公钥，就能算出凭证消息的原文，盲化当场失效。user_id 由服务端从
+// 凭证池里随机分配 —— 服务端因此无法把凭证和投票人对应起来。
+//
+// 这一步**不签名**：客户端拿 user_id 与签发方公钥后本地盲化，再走盲签名与
+// attest 两步。
+//
+// 开启资格校验时，请求体里必须带资格材料（证明 + 去重键 + 挑战）：服务端
+// 先验资格、再记一次「资格已用过」，然后才给槽位 —— **资格不过不消耗槽位**。
+func (h *Handler) ReserveCredential(c *gin.Context) {
+	if h.registerUC == nil {
+		c.Error(fmt.Errorf("register usecase is not configured"))
+		return
+	}
+
+	var payload claimCredentialPayload
+	// 空请求体是合法的（没开启资格校验时的既有形态）：EOF 不算错误。
+	if err := c.ShouldBindJSON(&payload); err != nil && !errors.Is(err, io.EOF) {
+		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		return
+	}
+	material, err := parseEligibilityMaterial(payload)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+
+	reservation, err := h.registerUC.ReserveCredential(
+		c.Request.Context(),
+		c.Param("proposal_id"),
+		material,
+	)
+	if err != nil {
+		c.Error(err)
+		return
+	}
 	c.JSON(http.StatusCreated, reservationResponse(reservation))
+}
+
+// parseEligibilityMaterial 从请求体里解析资格材料。
+//
+// 三件材料要么都给、要么都不给：只给一半（例如只带去重键）说明客户端出了错 ——
+// 那种情况下不能当成「没带资格」放行。
+func parseEligibilityMaterial(payload claimCredentialPayload) (*usecase.EligibilityMaterial, error) {
+	if payload.EligibilityProof == "" && payload.QualificationID == "" && payload.Challenge == "" {
+		return nil, nil
+	}
+	if payload.EligibilityProof == "" || payload.QualificationID == "" || payload.Challenge == "" {
+		return nil, fmt.Errorf(
+			"%w: eligibility_proof, qualification_id and challenge must be provided together",
+			usecase.ErrInvalidRequest,
+		)
+	}
+	proof, err := base64.StdEncoding.DecodeString(payload.EligibilityProof)
+	if err != nil {
+		return nil, fmt.Errorf("%w: eligibility_proof must be base64", usecase.ErrInvalidRequest)
+	}
+	return &usecase.EligibilityMaterial{
+		Proof:           proof,
+		QualificationID: payload.QualificationID,
+		Challenge:       payload.Challenge,
+	}, nil
 }
 
 // BlindSignCredential 公开端点的盲签名。
