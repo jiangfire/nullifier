@@ -208,7 +208,8 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 
 **状态**：**进行中**（2026-10-25 起）。已完成 T22（资格证明 —— 能力 G 的完成定义已达成）；
 T19 已完成其可自动化的部分（CORS 的真实源仍是部署项）；T20 三项盲区各补了一部分，
-**没有一项完全闭合**（见 §4.3）。T21（发版）未开始。
+**没有一项完全闭合**（见 §4.3）。T21（发版）**准备就绪**（发版计划已成文、流水线已带 prover、
+`VERSION` 与 `CHANGELOG` 已改为 0.2.0），**推送分支 + 打 tag 等拍板**。
 
 **依赖**：M2 全部完成（资格证明要用 M2 的证明链能力）。✅ M2 已全部完成。
 
@@ -279,7 +280,7 @@ T19 已完成其可自动化的部分（CORS 的真实源仍是部署项）；T2
 | T22 | 资格证明（一人一票） | ✅ **已落地** —— 见下面的「T22 落地核对」 |
 | T19 | 生产配置落地 | 🟡 **部分落地** —— `CONFIG_FILE` 显式路径、缺文件启动失败、启动日志打印实际路径都已完成；CORS 的真实源仍是部署项 |
 | T20 | 端到端验收（三个盲区） | 🟡 **三盲区各补了一部分，没有一项完全闭合** —— 见 §4.3（盲区 2 的手工流程已固化成 `scripts/browser-acceptance.sh`） |
-| T21 | 发版（v0.2.0） | ⬜ 未开始 |
+| T21 | 发版（v0.2.0） | 🟡 **发版准备就绪** —— 发版计划已成文、流水线已带 prover、`VERSION` 与 `CHANGELOG` 已改为 0.2.0；⬜ **推送分支 + 打 tag + 发版等拍板**（见任务卡） |
 
 **T22 落地核对**（一人一票）—— 落地了什么：
 
@@ -473,7 +474,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 4 | 存在「proof 可以跨提案复用」的路径 | ✅ **已过** —— 公开输入由服务端自拼，跨提案 / 跨 nullifier 复用均验签失败 |
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
 | 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.4% |
-| 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 149 个用例全过 |
+| 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 19 个测试文件 / 156 个用例全过 |
 | 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未完全闭合（盲区 3 的「防重投」与「容量」两半已补；盲区 1 的 PG 集成测试已有 compose + `make pg-test` 可复现脚本，⚠️ 本机无 Docker 未实跑；盲区 2 已闭合「WASM 路径在真实浏览器里可用」这一半 —— **选票与资格两条浏览器路径都已在真浏览器里人工验过**（2026-10-25），**且整套手工流程已固化成 `scripts/browser-acceptance.sh`**（`setup` / `verify` / `stop`），⚠️ 但门户面板仍没有 UI 自动化回归） |
 | 9 | README / techspec / 门户三处的匿名性声明不一致 | ✅ **已过**（2026-10-25 复核）—— 三处与 §4.1 的能力表对齐。复核时**在门户里挖出一处对用户说错的陈述**：门户「术语参考」面板仍写着「**当前版本密文由服务端生成，生成时服务端能看到你选的选项**」「还没有真实的选票电路」—— 那是 v0.1.0 的口径，v0.2.0 的密文与证明都在浏览器本地生成。已改（`fix(web): tell the truth about where the ballot is encrypted`），并加了一条守卫用例钉住它（`web/src/components/panels/panels.test.ts`）：文案里再出现「服务端能看到你选的选项」这类说法就红。**服务端那条底线由 `tests/architecture/` 守，门户文案这一半现在也守了** |
 
@@ -481,7 +482,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 
 - [ ] 上述全过
 - [ ] 决策门 G1–G9 全部拍板并落到代码/文档 —— **G1 / G2 / G3 / G4 / G5 / G7 / G8 / G9 已拍板**；G6 仍待拍板
-- [ ] `VERSION` 与 tag 一致
+- [ ] `VERSION` 与 tag 一致 —— **`VERSION` 已改为 `0.2.0`**（2026-10-25），tag `v0.2.0` 未打（等拍板）；release workflow 会校验两者一致，不一致直接失败
 - [ ] 生产部署清单全勾：[`docs/deployment-checklist.md`](./deployment-checklist.md)（`SERVER_ADMIN_BEARER_TOKEN` / `SERVER_CORS_ALLOWED_ORIGINS` / `CRYPTO_VK_PATH` / `DB_DRIVER=postgres` / TLS / 门户独立部署 / 迁移步骤 / 密钥就位 / 启动日志自检）
 
 ---
@@ -716,7 +717,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 项 | 内容 |
 |---|---|
 | 动作 | ① `VERSION` 改 `0.2.0`；② `CHANGELOG.md` 写 0.2.0 条目 —— ⚠️ **本轮确实改了密文格式**（v2 → v3，见 §2.2 与 CHANGELOG 的破坏性变更），**必须写明与 v0.1.0 的密文不兼容、旧票要作废**；③ `git tag -a v0.2.0 -m "<发版说明>"`（**注解 tag** —— release workflow 用 tag 说明当 release 正文）→ release workflow 自动构建；④ 按生产部署清单逐项核对；⑤ 同步 `web/package.json` 的 version（单一版本源是仓库根的 `VERSION`，发布流水线构建前自动注入，无需手改） |
-| **落地核对** | ✅ **发版计划已成文**：[`docs/release-plan-v0.2.0.md`](./release-plan-v0.2.0.md) —— 能力口径、破坏性变更、部署必做项、验收证据、go/no-go 清单；✅ **发布流水线的门户包补上了 prover**（`release.yml` 现在自己编 `ballot-prover.wasm` + 拷 `wasm_exec.js`，并**检查 `web/dist/` 里有没有 prover，缺了直接失败** —— v0.1.0 的门户由服务端代加密所以不需要它，v0.2.0 的门户在浏览器里出证明，**没有它就投不了票**）；✅ CI 的 web job 也补了同样的构建与检查（门户构建从此在每个 PR 上都被验证，不再拖到发版那天）；⚠️ **两把 proving key 默认不进发布包**（秘密材料，且每套部署必须用与服务端配对的那对）—— 要么配仓库 secret（`PORTAL_PROVING_KEY_B64` / `PORTAL_ELIGIBILITY_PROVING_KEY_B64`），要么部署时自己补进 `web/dist/`（部署清单 §1/§6 已写明）；⬜ **推送分支 + 打 tag + 发版 —— 等用户拍板**（分支一直保持未推送） |
+| **落地核对** | ✅ **发版计划已成文**：[`docs/release-plan-v0.2.0.md`](./release-plan-v0.2.0.md) —— 能力口径、破坏性变更、部署必做项、验收证据、go/no-go 清单；✅ **发布流水线的门户包补上了 prover**（`release.yml` 现在自己编 `ballot-prover.wasm` + 拷 `wasm_exec.js`，并**检查 `web/dist/` 里有没有 prover，缺了直接失败** —— v0.1.0 的门户由服务端代加密所以不需要它，v0.2.0 的门户在浏览器里出证明，**没有它就投不了票**）；✅ CI 的 web job 也补了同样的构建与检查（门户构建从此在每个 PR 上都被验证，不再拖到发版那天）；⚠️ **两把 proving key 默认不进发布包**（秘密材料，且每套部署必须用与服务端配对的那对）—— 要么配仓库 secret（`PORTAL_PROVING_KEY_B64` / `PORTAL_ELIGIBILITY_PROVING_KEY_B64`），要么部署时自己补进 `web/dist/`（部署清单 §1/§6 已写明）；✅ **动作 ① 与 ② 已完成**（2026-10-25）：`VERSION` 改为 `0.2.0`，`CHANGELOG.md` 的 `[未发布]` 改为 `## [0.2.0] — 2026-10-25` 并写明密文 v2 → v3 不兼容、旧票作废；⚠️ **勘误表同步**：`docs/errata.md` E1 与 CHANGELOG 0.1.0 段里那句「v0.1.0 与 v0.2.0 之间没有已知的密文格式不兼容」**已被 v0.2.0 证伪**，两处都补了带日期的再勘误（不改 v0.1.0 的 tag 与产物）；⬜ **推送分支 + 打 tag + 发版 —— 等用户拍板**（分支一直保持未推送） |
 | 验收 | `gh release view v0.2.0` 有产物（5 平台二进制 + 门户包，各带 sha256）；生产部署清单全勾 |
 | 预估 | 半天 |
 | 依赖 | M1、M2 全部完成；M3 的 T19/T20/T22 已落地（T20 三个盲区本机可做的部分已闭合，PG 实跑等 CI） |
