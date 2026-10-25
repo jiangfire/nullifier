@@ -23,6 +23,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # The browser-side prover acceptance test drives the WASM module through
+      # node; without node the test skips itself.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Vet
         run: go vet ./...
 

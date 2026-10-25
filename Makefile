@@ -28,6 +28,7 @@ endif
 	test test-short cover pg-test \
 	vet fmt fmt-check \
 	web-install web-dev web-build web-test web-lint web-typecheck web-format web-format-check \
+	web-wasm web-proving-key \
 	check ci clean
 
 help: ## Show available targets
@@ -125,6 +126,22 @@ web-format: ## Format frontend sources
 
 web-format-check: ## Check frontend formatting
 	$(PNPM) --dir web exec prettier --check .
+
+web-wasm: ## Build the browser-side prover (WASM) into web/public
+	@mkdir -p web/public
+	GOOS=js GOARCH=wasm CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w" \
+		-o web/public/ballot-prover.wasm ./cmd/ballot-wasm
+	cp "$$($(GO) env GOROOT)/lib/wasm/wasm_exec.js" web/public/wasm_exec.js
+	@echo "web/public/ballot-prover.wasm and web/public/wasm_exec.js are ready"
+
+web-proving-key: ## Publish the proving key to web/public (make web-proving-key PK=<path>)
+	@if [ -z "$(PK)" ]; then \
+		echo "usage: make web-proving-key PK=<path to proving.key>"; \
+		exit 2; \
+	fi
+	@mkdir -p web/public
+	cp "$(PK)" web/public/proving.key
+	@echo "web/public/proving.key is ready (never commit it)"
 
 # ---------- 组合目标 ----------
 
