@@ -5,7 +5,8 @@
 >
 > 上下文层级：
 > - **Level 1 规则文件**：`AGENTS.md`（仓库根）、`web/AGENTS.md`
-> - **Level 2 规格文档**：`docs/techspec.md`（当前实现口径）、`README.md`（对外说明）
+> - **Level 2 规格文档**：`docs/techspec.md`（当前实现口径）、`README.md`（对外说明）、
+>   `docs/deployment-checklist.md`（上线前的逐项核对清单）
 > - **Level 3 项目地图**：本文档 —— 分层索引 + 模式 + 陷阱
 > - **Level 4 具体源码**：按需读取，本文每节都给出精确路径
 >

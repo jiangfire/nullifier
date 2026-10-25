@@ -735,6 +735,9 @@ make pg-test        # 起库 → 跑集成测试 → 关库
 
 ## 9. 当前已知限制
 
+> 上线前的逐项核对见 [`deployment-checklist.md`](./deployment-checklist.md) ——
+> 那里把配置、密钥、迁移、TLS、门户部署与投票运营流程拆成了可勾的条目。
+
 - **证明链已通，但浏览器端 prover 还没做。** 服务端能真实验签：真实 Groth16 电路 +
   `cmd/keygen` + 加载 `crypto.vk_path` 后的 Groth16 验证都落地了。但门户没有本地
   prover，**release 模式下门户依然无法完成投票**；dev 模式走的是服务端代加密的

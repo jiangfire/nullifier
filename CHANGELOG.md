@@ -102,6 +102,11 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   → 关库。集成测试同时支持**外部库模式**（设 `ANONVOTE_TEST_PG_HOST` 即连已有的
   PostgreSQL，每个测试开一个独立 schema 并在跑完时删掉）—— CI 走 testcontainers、
   本地走 compose，**两条路径共用同一份断言**。
+- **生产部署清单**（新文档 `docs/deployment-checklist.md`）：把上线前要核对的项拆成
+  可勾的条目 —— 配置来源（`CONFIG_FILE`）、必填环境变量、密钥就位与指纹、迁移先行、
+  TLS、门户独立部署、投票运营流程（**解密会话必须在投票窗口打开之前初始化**）、
+  启动日志自检与回滚。第一节就把「release 模式下任何客户端都投不出票（缺 prover）」
+  写在最前面 —— **这条不是部署能修的**。
 - `GET /healthz` 响应新增 `debug` 布尔字段（由 `server.mode` 推导）。
 - **服务现在能用 `CONFIG_FILE` 显式指定配置文件**：`CONFIG_FILE=./configs/config.production.yaml`
   启动即可加载生产配置 —— 那个文件此前**永远不会被自动加载**（viper 只找 `config.yaml`），
