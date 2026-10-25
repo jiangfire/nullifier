@@ -67,8 +67,24 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
+      # 浏览器端 prover 是**构建产物**，不入库（web/.gitignore）。CI 必须自己编一遍，
+      # 否则「发布产物里没有 prover」这种问题要到发版那天才暴露。
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
       - name: Install dependencies
         run: pnpm --dir web install --frozen-lockfile
+
+      - name: Build the browser-side prover
+        run: |
+          set -euo pipefail
+          mkdir -p web/public
+          GOOS=js GOARCH=wasm CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+            -o web/public/ballot-prover.wasm ./cmd/ballot-wasm
+          cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" web/public/wasm_exec.js
 
       - name: Lint
         run: pnpm --dir web run lint
@@ -78,3 +94,19 @@ jobs:
 
       - name: Unit tests
         run: pnpm --dir web run test
+
+      - name: Build portal
+        run: pnpm --dir web run build
+
+      # 门户必须真的带上 prover：没有它，浏览器端出不了证明，门户投不了票。
+      # 两把 proving key 是秘密材料，不在 CI 里（由运营方部署时补，见部署清单 §6）。
+      - name: Check the portal ships the prover
+        run: |
+          set -euo pipefail
+          for asset in ballot-prover.wasm wasm_exec.js; do
+            if [ ! -f "web/dist/$asset" ]; then
+              echo "web/dist/$asset is missing - the built portal could not generate proofs"
+              exit 1
+            fi
+          done
+          echo "the built portal ships ballot-prover.wasm and wasm_exec.js"

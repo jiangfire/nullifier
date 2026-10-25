@@ -70,6 +70,17 @@
 - **两把 proving key 都要在 `web/public/` 就位**（`web-proving-key` 与
   `web-eligibility-key`），否则门户的「匿名领取」（要资格证明）与「在浏览器本地
   生成选票」各缺一块。
+- **发布流水线产出的门户包里有什么**（`nullifier-web-<version>.zip`）：
+  - ✅ **有** `ballot-prover.wasm` 与 `wasm_exec.js` —— 流水线自己编（非秘密，
+    人人都能用同一份）。
+  - ⚠️ **默认没有** `proving.key` 与 `eligibility-proving.key` —— 它们是秘密材料，
+    且**每套部署必须用自己那对**（与服务端的 verifying key 配对），不能由发布
+    流水线统一发出去。两条路：① 运营方把 base64 编码的 key 配成仓库 secret
+    （`PORTAL_PROVING_KEY_B64` / `PORTAL_ELIGIBILITY_PROVING_KEY_B64`），
+    流水线会注入进门户包；② 没配 secret 的话，**部署时必须自己把两把 key 补进
+    `web/dist/`**，否则门户投不了票。
+  - 流水线会检查 `web/dist/` 里有没有 prover —— **缺了就直接失败**，不会发一个
+    投不了票的门户。
 
 ---
 
@@ -225,7 +236,7 @@
 | 同源还是跨域 | 跨域时 `SERVER_CORS_ALLOWED_ORIGINS` 必须包含门户源 | ☐ |
 | 管理令牌 | 门户把它存 `sessionStorage`（不落 `localStorage`），仍是明文 | ☐ |
 | 浏览器要求 | 需要 `crypto.getRandomValues`（所有现代浏览器都有）；**不依赖** `crypto.subtle` | ☐ |
-| **prover 资源就位** | `web/dist/` 里有 `ballot-prover.wasm`、`wasm_exec.js`、`proving.key`、`eligibility-proving.key` **四个**文件（`make web-wasm` + `make web-proving-key` + `make web-eligibility-key`），且**能被浏览器下载到** | ☐ |
+| **prover 资源就位** | `web/dist/` 里有 `ballot-prover.wasm`、`wasm_exec.js`、`proving.key`、`eligibility-proving.key` **四个**文件（`make web-wasm` + `make web-proving-key` + `make web-eligibility-key`），且**能被浏览器下载到**。⚠️ **用发布流水线的门户包时，后两把 key 默认不在包里**（秘密材料，每套部署用自己的）—— 见 §1 的说明 | ☐ |
 | **wasm 的 MIME 与体积** | `.wasm` 要以 `application/wasm` 返回（否则 `WebAssembly.instantiate` 可能失败）；体积约 11.9 MB，**建议开 gzip/brotli**（约 2.8 MB） | ☐ |
 | **静态资源路径** | 门户部署在子路径下时，资源地址按 `document.baseURI` 解析 —— 别把 `wasm_exec.js` 放在与门户不同的域名下（Worker 的 `importScripts` 受同源限制） | ☐ |
 
