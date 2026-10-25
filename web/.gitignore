@@ -7,6 +7,11 @@
 node_modules
 dist/
 
+# Browser-side prover build artifacts (see web/public/README.md)
+public/ballot-prover.wasm
+public/wasm_exec.js
+public/proving.key
+
 # Profile
 .rspack-profile-*/
 

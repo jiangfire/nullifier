@@ -14,6 +14,7 @@ import {
   parseIssuerKey,
 } from '../lib/credential';
 import { generateNullifier } from '../lib/nullifier';
+import { generateLocalBallot } from '../lib/wasm-prover';
 import { describeApiError } from '../lib/error-messages';
 import {
   buildPortalSearch,
@@ -923,6 +924,94 @@ export function useVotePortal() {
     updateBallotJson(selectedVoteOption.value);
     addNotice('success', '生成成功', '已根据选项生成可提交的投票凭据');
     return true;
+  }
+
+  /**
+   * 在浏览器本地生成选票（密文 + nullifier + 零知识证明）。
+   *
+   * 这是正式（非 debug）模式下唯一的出票入口：密文由浏览器里的 WASM prover
+   * 生成，服务端全程只看到密文、nullifier 与证明，看不到选了哪个选项。
+   *
+   * 依赖门户静态目录里的三个文件（`wasm_exec.js` / `ballot-prover.wasm` /
+   * `proving.key`），由 `make web-wasm` 与 `make web-proving-key` 准备。
+   */
+  async function generateBallotLocally(): Promise<boolean> {
+    clearErrorGroup(voteErrors);
+    if (!walletReady.value) {
+      addNotice('error', '生成失败', '请先领取或导入匿名凭证');
+      return false;
+    }
+    const proposalId = voteForm.proposalId.trim();
+    if (proposalId === '') {
+      voteErrors.proposalId = '请先选择 proposal_id';
+      addNotice('error', '生成失败', voteErrors.proposalId);
+      return false;
+    }
+    const proposal = selectedProposal.value;
+    if (!proposal || proposal.options.length === 0) {
+      voteErrors.option = '当前提案没有可选项';
+      addNotice('error', '生成失败', voteErrors.option);
+      return false;
+    }
+    const option = selectedVoteOption.value.trim();
+    const optionIndex = proposal.options.indexOf(option);
+    if (optionIndex < 0) {
+      voteErrors.option = '请选择一个投票选项';
+      addNotice('error', '生成失败', voteErrors.option);
+      return false;
+    }
+
+    voteLoading.value = true;
+    try {
+      const keyResult = await apiCall({
+        baseUrl: apiBaseUrl.value,
+        path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/election-key`,
+      });
+      if (!keyResult.ok) {
+        addNotice(
+          'error',
+          '生成失败',
+          describeApiError(
+            keyResult.error,
+            keyResult.code,
+            '该提案还没初始化解密，请先在「计票与审计」完成「初始化解密」',
+          ),
+        );
+        return false;
+      }
+      const keyPayload = toObject(keyResult.data);
+      const electionPublicKey = textOf(keyPayload, 'public_key');
+      if (electionPublicKey === '') {
+        addNotice('error', '生成失败', '服务端没有返回计票公钥');
+        return false;
+      }
+
+      const result = await generateLocalBallot({
+        proposalId,
+        electionPublicKey,
+        optionIndex,
+        numOptions: proposal.options.length,
+      });
+
+      voteForm.encryptedVote = result.ciphertext;
+      voteForm.proof = result.proof;
+      voteForm.nullifier = result.nullifier;
+      voteForm.ballotProposalId = proposalId;
+      voteForm.ballotOption = option;
+      updateBallotJson(option);
+      addNotice(
+        'success',
+        '生成成功',
+        `已在浏览器本地生成密文与证明（初始化 ${Math.round(result.initMs / 100) / 10}s，出证明 ${Math.round(result.proveMs / 100) / 10}s）；服务端看不到你选了哪个选项`,
+      );
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : '浏览器端生成选票失败';
+      addNotice('error', '生成失败', detail);
+      return false;
+    } finally {
+      voteLoading.value = false;
+    }
   }
 
   async function checkHealth(showNotice = true): Promise<void> {
@@ -1992,6 +2081,7 @@ export function useVotePortal() {
     fillBallotTemplate,
     importBallotJson,
     prepareBallotByOption,
+    generateBallotLocally,
     submitVote,
     fetchVoteStatus,
     newNullifier,

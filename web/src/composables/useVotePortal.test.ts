@@ -4,6 +4,20 @@ import { bytesToBase64 } from '../lib/credential';
 import { useVotePortal } from './useVotePortal';
 
 /**
+ * 浏览器端 prover 的桩。
+ *
+ * WASM 模块在 node 环境里跑不起来（没有 WebAssembly 胶水、也没有 Worker），
+ * 这里只验证门户这一侧的编排：取计票公钥、传选项下标、把结果写进表单。
+ */
+const { generateLocalBallotMock } = vi.hoisted(() => ({
+  generateLocalBallotMock: vi.fn(),
+}));
+
+vi.mock('../lib/wasm-prover', () => ({
+  generateLocalBallot: generateLocalBallotMock,
+}));
+
+/**
  * node 环境没有 DOM，composable 初始化时就要读 localStorage，这里补一个最小实现。
  */
 const storage = new Map<string, string>();
@@ -514,5 +528,101 @@ describe('查询投票状态', () => {
     await portal.fetchVoteStatus();
     expect(portal.voteStatusError.value).toBe('');
     expect(portal.hasVoted.value).toBe(false);
+  });
+});
+
+describe('浏览器本地出票', () => {
+  const proposalItem = {
+    id: 'p1',
+    title: '提案一',
+    description: '',
+    options: ['A', 'B'],
+    status: 'open',
+    startsAt: '',
+    endsAt: '',
+  };
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    generateLocalBallotMock.mockReset();
+    generateLocalBallotMock.mockResolvedValue({
+      ciphertext: 'cipher-local',
+      nullifier: 'null-local',
+      proof: 'proof-local',
+      initMs: 7000,
+      proveMs: 2000,
+    });
+  });
+
+  function setupPortalWithProposal() {
+    const portal = setupPortal();
+    portal.hallState.proposals = [proposalItem];
+    portal.selectedVoteOption.value = 'B';
+    return portal;
+  }
+
+  it('取计票公钥、调用 prover、把材料写进表单', async () => {
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('election-key'),
+        payload: { public_key: 'KEY-BASE64', encoding: 'uncompressed' },
+      },
+    ]);
+    const portal = setupPortalWithProposal();
+
+    const ok = await portal.generateBallotLocally();
+
+    expect(ok).toBe(true);
+    expect(
+      calls.some((call) => call.url.includes('/api/v1/proposals/p1/election-key')),
+    ).toBe(true);
+    expect(generateLocalBallotMock).toHaveBeenCalledWith({
+      proposalId: 'p1',
+      electionPublicKey: 'KEY-BASE64',
+      optionIndex: 1,
+      numOptions: 2,
+    });
+    expect(portal.voteForm.encryptedVote).toBe('cipher-local');
+    expect(portal.voteForm.proof).toBe('proof-local');
+    expect(portal.voteForm.nullifier).toBe('null-local');
+    expect(portal.voteForm.ballotOption).toBe('B');
+    expect(portal.voteForm.ballotProposalId).toBe('p1');
+  });
+
+  it('prover 失败时给出错误提示，且不写表单', async () => {
+    stubFetch([
+      {
+        match: (url) => url.includes('election-key'),
+        payload: { public_key: 'KEY-BASE64', encoding: 'uncompressed' },
+      },
+    ]);
+    generateLocalBallotMock.mockRejectedValue(
+      new Error('下载 WASM 模块失败：HTTP 404'),
+    );
+    const portal = setupPortalWithProposal();
+
+    const ok = await portal.generateBallotLocally();
+
+    expect(ok).toBe(false);
+    expect(portal.voteForm.proof).toBe('');
+    const errors = portal.notices.value.filter((item) => item.level === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0]?.detail).toContain('下载 WASM 模块失败');
+  });
+
+  it('没有选中的提案选项时不调用 prover', async () => {
+    stubFetch([
+      {
+        match: (url) => url.includes('election-key'),
+        payload: { public_key: 'KEY-BASE64', encoding: 'uncompressed' },
+      },
+    ]);
+    const portal = setupPortalWithProposal();
+    portal.selectedVoteOption.value = '不存在的选项';
+
+    const ok = await portal.generateBallotLocally();
+
+    expect(ok).toBe(false);
+    expect(generateLocalBallotMock).not.toHaveBeenCalled();
   });
 });
