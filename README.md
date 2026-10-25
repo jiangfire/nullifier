@@ -21,7 +21,7 @@
 nullifier 把这两个动作拆开:
 
 - **发资格的人看不到选谁** —— 凭证用 RSA-PSS 签名签发(基于 RFC9474 盲签名库)。签发方看得到 `user_id` 和设备公钥(本来就是投票人提供的),但看不到选票内容:凭证与选票内容完全无关。
-  ⚠️ 但要说清楚:**盲化步骤目前在服务端内部完成**(服务端自己 Blind 再 Finalize),因此**这还不是真正的盲签名** —— 签发方看得见被签的凭证内容。真正的两段式盲签名是 v0.2.0 的任务。
+  ✅ 凭证签发本身已经是**真两段式盲签名**:客户端本地盲化,签发方在**签名阶段**只见盲化消息。(最后一次 attest 时签发方会看到公钥 —— 验签必须重算凭证消息,这与「看不到被签内容」不冲突。)
 - **记选票的人看不到是谁** —— `votes` 表只有 `proposal_id`、`nullifier`、`cipher` 三列,没有用户标识。"是否参与"单独存进 `vote_participations`,且只存 `hash(user_id)`,不与票内容关联。
 - **验票真伪但不验身份** —— 服务端用 gnark 验证零知识证明,证明"这张票是按合法凭证生成的",证明本身不携带任何身份信息。
 
@@ -49,7 +49,7 @@ nullifier 把这两个动作拆开:
 
 | 能力 | 说明 |
 |---|---|
-| 凭证签名 | RSA-PSS 签名(基于 RFC9474 盲签名库);签发方看不到选票内容,因为凭证与选票无关 —— **但盲化在服务端内部完成,尚不是真盲签名**(浏览器端盲签名 client 侧已就绪,待两段式协议接线) |
+| 凭证签名 | RSA-PSS 签名(基于 RFC9474 盲签名库);**真两段式盲签名**:客户端本地盲化,签发方在签名阶段只见盲化消息,交叉攻击(拿 A 的盲签名签 B)验签失败 |
 | 零知识验票 | 真实 Groth16 电路(BN254),证明「这张票加密了某个合法选项」且不携带身份 —— **服务端已能真实验签;客户端 prover 还没有** |
 | 客户端加密 | 选票密文在**客户端本地**生成(浏览器端 TS + CLI `ballot-encrypt`),服务端只提供公开的计票公钥 —— **门户还没接上** |
 | 防重放 | 每票一个 `nullifier`,重复投票直接拒绝;nullifier 落库前归一成规范形式,变体写法绕不过唯一索引;nullifier 由秘密单向派生(浏览器端已能算出与电路一致的值) |
@@ -247,16 +247,19 @@ nullifier-server             # 再起服务
 | `POST` | `/api/v1/proposals/:id/ballot-draft` | 生成选票草稿(开发联调,**仅 debug 模式**,其余模式 404) |
 | `GET` | `/api/v1/proposals/:id/results` | 已发布的计票结果 |
 | `GET` | `/api/v1/proposals/:id/audit-anchors` | 导出审计锚点 |
-| `POST` | `/api/v1/proposals/:id/credentials/claim` | 从凭证池随机领取一张凭证 |
+| `POST` | `/api/v1/proposals/:id/credentials/claim` | **预留**一个凭证池槽位(请求体为空,不收公钥) |
+| `POST` | `/api/v1/proposals/:id/credentials/blind-sign` | 对**盲化消息**做盲签名(只覆盖池里还空着的槽位) |
+| `POST` | `/api/v1/proposals/:id/credentials/attest` | 交回解盲后的签名,服务端验签后落库 |
 
 管理端点,需 `Authorization: Bearer <admin token>`:
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `POST` | `/api/v1/credentials` | 签发匿名凭证 |
+| `POST` | `/api/v1/credentials` | 为指定的 `user_id` **预留**签发权(不收公钥) |
+| `POST` | `/api/v1/credentials/blind-sign` | 对**盲化消息**做盲签名(可覆盖任意 `user_id`) |
 | `POST` | `/api/v1/proposals` | 创建提案 |
 | `GET` | `/api/v1/proposals/:id/credentials` | 该提案下凭证的 `has_voted` 状态 |
-| `POST` | `/api/v1/proposals/:id/credentials/pool` | 往凭证池批量投放预签凭证 |
+| `POST` | `/api/v1/proposals/:id/credentials/pool` | 往凭证池批量投放待领取槽位 |
 | `POST` | `/api/v1/proposals/:id/decryption/setup` | 初始化门限解密会话 |
 | `POST` | `/api/v1/proposals/:id/results/publish` | 提交份额并发布结果 |
 
@@ -306,7 +309,7 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 - **选票密文已经能在客户端生成,门户还没接上。** 浏览器端(`web/src/lib/ballot-cipher.ts`)与 CLI(`ballot-encrypt` 命令)都能在本地加密选票,服务端只提供公开的计票公钥(`GET /api/v1/proposals/:id/election-key`),落库记录里只有密文。两边的点编码**逐字节一致**,由一组跨语言已知答案向量锁死。**但门户还没接上**(缺客户端 prover,接了也投不出去),debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径 —— 能力 A 因此尚未完全闭合。
 - **门户的 nullifier 还是随机域元素。** 浏览器端已能按 `MiMC(秘密, 提案域元素)` 算出**电路认可**的 nullifier(纯 TypeScript 实现,与 Go 侧逐位一致,跨语言向量锁死,Go 侧还真的用这组值出过证明),但门户仍在生成随机 nullifier —— 那种 nullifier 按电路约束出不了证明。与客户端 prover 一起改。
 - **凭证签名现在会被验证。** 投票落库前会调用签发方验签,伪造签名的请求返回 401。
-- **凭证签发不是真盲签名。** 用的是 RFC9474 盲签名库,但 `Prepare → Blind → BlindSign → Finalize` 全在服务端进程内完成,签发方看得见被签的凭证内容。真正的两段式盲签名(客户端提交盲化消息 → 服务端签 → 客户端解盲)是 v0.2.0 的任务。
+- **凭证签发是真两段式盲签名。** 客户端本地盲化(`sha256(user_id ‖ 0x00 ‖ user_pub_key)`),签发方在**签名阶段**只见盲化消息 —— 它没有、也不需要私钥以外的任何客户端秘密。⚠️ 口径:最后一次 attest 时服务端会看到公钥与 `user_id`,因为验签必须重算凭证消息;达成的是「签发方看不到被签内容」,不是「服务端全程不知道客户端是谁」。
 - **凭证不再由 admin 逐个分发。** 改为「凭证池 + 投票人匿名随机领取」：admin 往池里批量投放预签凭证，投票人自己随机领一张（`POST /api/v1/proposals/:id/credentials/claim`），运营方不再天然掌握「哪个凭证给了谁」。**代价：服务端无法强制一人一票** —— 随机领取意味着服务端看不出同一个人领了几次，资格证明是后续要补的。
 - **`decryption/setup` 拒绝"投票开放中"的提案**,运营上必须在 `starts_at` 之前完成初始化。
 - **生产部署必须显式设置** `SERVER_ADMIN_BEARER_TOKEN` 与 `SERVER_CORS_ALLOWED_ORIGINS`；`release` 模式下缺 admin token 会直接启动失败。`configs/config.production.yaml` **不会**被自动加载(viper 只找 `config.yaml`),用 `CONFIG_FILE=./configs/config.production.yaml` 启动即可 —— **显式指定的文件不存在时服务直接启动失败**,不会静默回退到开发配置;启动日志的 `config_file` 字段会打印实际加载的文件路径,上线先核一眼。详见该文件内的注释。

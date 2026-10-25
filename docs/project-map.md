@@ -181,7 +181,8 @@
 | `crypto/gnark_proof_verifier.go` | `GnarkProofVerifier`：实现 `domaincrypto.ProofVerifier`；`vk_path` 为空时走 `skipVerify` 分支 |
 | `crypto/ballot_threshold_crypto.go` | `BallotThresholdCrypto`：同时实现 `domaincrypto.Encrypter` 与 `usecase.ThresholdCrypto` |
 | `crypto/ballot_nullifier.go` | `BallotNullifierGenerator`：实现 `domaincrypto.NullifierGenerator` |
-| `crypto/kryptology_credential_issuer.go` | RFC9474 RSABSSA 签发、**`VerifyCredential` 验签**、密钥版本轮换、落盘 |
+| `crypto/kryptology_credential_issuer.go` | RFC9474 RSABSSA 签发（**`BlindSign` 对盲化消息签名**）、**`IssuerPublicKey` 出口公钥**、**`VerifyCredential` 验签**、密钥版本轮换、落盘 |
+| `crypto/credential_client.go` | **盲签名的客户端侧**（`CredentialBlindClient.Blind` / `Finalize`）：CLI 与端到端测试共用，只需签发方公钥 |
 | `crypto/merkle_root.go` | Merkle root（`GnarkMerkleRootBuilder`） |
 | `cmd/keygen/main.go` | 选票电路密钥生成（见 §1.1） |
 
@@ -194,8 +195,10 @@
 - `ballot/nullifier.go` 的 `mimcHash` —— 必须与 gnark `std/hash/mimc` 逐位一致（见 §3 陷阱 4）。
 - `ballot/encoding.go` 的 `ParseScalarHex` —— 与 `fr.Element.SetBytes` 的区别就在这里：后者按模归约，前者拒绝非规范编码（见 §3 陷阱 2）。
 - **密文格式 v2 → v3 与 v0.1.0 不兼容**：v2 是 ed25519 上的 DH 混合封装（HKDF-SHA256 派生），v3 是 BN254 twisted Edwards 上的指数 ElGamal。旧密文解不开，也不该再用于真实投票。`kyber_elgamal.go` 已删除。
-- `kryptology_credential_issuer.go` 的 `Issue` —— 盲签名全流程在**服务端内部**完成（服务端自己 Blind 再 Finalize），客户端不参与。
+- `kryptology_credential_issuer.go` —— **没有 `Issue` 了**：一次性签发已删除。签发方现在只做两件事：给出公钥（`IssuerPublicKey`）与对**盲化消息**签名（`BlindSign`）。轮换挂在 `IssuerPublicKey` 上（客户端每次预留槽位都要拿公钥，轮换时机跟着它）。
 - `kryptology_credential_issuer.go` 的 `VerifyCredential` —— 校验凭证签名，**按 key version 从新到旧逐个试**；投票路径落库前调用它（这是能力 E 的落点）。
+- `crypto/credential_client.go` 的 `NewCredentialBlindClient` —— **要求变体必须是 `SHA384PSSDeterministic`**，否则报错。变体不同则盲化结果不同，签名验不过。
+- `crypto/credential_client.go` 的 `BlindedCredential.valid` —— CIRCL 的 `blindrsa.State` 是**值类型**不是指针，零值无法用 `== nil` 判断，所以另加了一个 `valid` 布尔。
 
 ### 1.7 前端门户 —— `web/`
 
@@ -206,7 +209,7 @@
 | `src/components/` | `AppSidebar` `AppTopbar` `GuideOverlay` `JourneyBar` `NoticeStack` |
 | `src/components/ui/` | `EmptyState` `NoticeBanner` `StatTile` |
 | `src/composables/useVotePortal.ts` | **全部状态与 API 编排**（单文件约 1800 行，是前端的事实核心） |
-| `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `blind-rsa.ts` `datetime.ts` `error-messages.ts` `field.ts` `focus-trap.ts` `keccak.ts` `mimc.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` `sha256.ts` `sha384.ts` —— 除 `api.ts` 外都有单测 |
+| `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `blind-rsa.ts` `credential.ts` `datetime.ts` `error-messages.ts` `field.ts` `focus-trap.ts` `keccak.ts` `mimc.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` `sha256.ts` `sha384.ts` —— 除 `api.ts` 外都有单测 |
 | `src/styles/` | `tokens.css` `base.css` `components.css` `shell.css` |
 | `src/types/` | `portal.ts` `portal-api.ts` |
 
@@ -216,8 +219,9 @@
 - `useVotePortal.ts` 的 `readDebugFlag` 从 `GET /healthz` 的响应里读 `debug` 字段 → `debugMode` ref。
 - `VotePanel.vue` 的「按选项生成凭据」按钮整块包在 `v-if="portal.debugMode"` 里；非 debug 模式改为提示文案（说明这条入口会让服务端看到选项）。
 - 门户**不再发送** `selected_option`，也**不再发送** `public_witness`（服务端本来就不消费前者）。
-- `web/src/lib/nullifier.ts` —— 两类 nullifier：**`generateNullifier`（随机域元素，门户现在还在用）**与 **`deriveNullifier`（MiMC 绑定，与电路一致）**。前者生成 32 字节随机数后**按模 r 归约**，输出 64 位小写十六进制，保证是规范域元素编码；⚠️ 它**没有**做 MiMC 绑定，因此这样的 nullifier 按电路约束出不了证明。后者按 `MiMC(秘密, 提案域元素)` 派生，与 Go 侧 `ballot/nullifier.go` 逐位一致（见 §3 陷阱 21）。
-- `web/src/lib/ballot-cipher.ts` —— **浏览器端选票加密**：BN254 twisted Edwards 上的指数 ElGamal（加密选项下标），点编码与 Go 侧逐字节一致（见 §3 陷阱 19）。计票公钥以**未压缩**形式传入，因此浏览器端不需要在域内求平方根。
+- `web/src/lib/nullifier.ts` —— 两类 nullifier：**`generateNullifier`（随机域元素，门户现在还在用）**与 **`deriveNullifier`（MiMC 绑定，与电路一致）**。前者生成 32 字节随机数后**按模 r 归约**，输出 64 位小写十六进制，保证是规范域元素编码；⚠️ 它**没有**做 MiMC 绑定，因此这样的 nullifier 按电路约束出不了证明。后者按 `MiMC(秘密, 提案域元素)` 派生，与 Go 侧 `ballot/nullifier.go` 逐位一致（见 §3 陷阱 23）。
+- `web/src/lib/ballot-cipher.ts` —— **浏览器端选票加密**：BN254 twisted Edwards 上的指数 ElGamal（加密选项下标），点编码与 Go 侧逐字节一致（见 §3 陷阱 21）。计票公钥以**未压缩**形式传入，因此浏览器端不需要在域内求平方根。
+- `web/src/lib/credential.ts` —— **浏览器端凭证盲签名的客户端侧**：`credentialMessage`（`sha256(user_id ‖ 0x00 ‖ user_pub_key)`）、`parseIssuerKey`、`blindCredentialMessage`、`finalizeCredentialSignature`。与 Go 侧 `crypto.CredentialMessage` 同口径，由跨语言向量钉死。
 - `web/src/lib/{field,sha256,keccak,mimc}.ts` —— **浏览器端 nullifier 派生的底座**：域运算与标量规范编码、SHA-256、legacy Keccak-256（MiMC 轮常量由它派生）、Fr 上的 MiMC。全部是纯 TS 实现，不依赖任何外部密码学包（离线环境下装不了），也不依赖 WebCrypto（`crypto.subtle` 要求安全上下文，内网 http 部署会失效）。
 
 **陷阱**：
@@ -236,8 +240,16 @@
 
 **模式**：`-admin-token` flag 或 `NULLIFIER_ADMIN_TOKEN` 环境变量；`-base-url` 或 `NULLIFIER_BASE_URL`。
 
+**凭证命令走真两段式盲签名**：`credential-claim`（匿名，公开端点）与 `credential-issue`
+（管理端）都是「预留 → 本地盲化 → 盲签名 → 本地解盲 → attest」。Go 侧的盲签名
+客户端是 `internal/infrastructure/crypto/credential_client.go` 的 `CredentialBlindClient`
+（CLI 与端到端测试共用同一个实现）。
+
 **陷阱**：
 - CLI 输出是纯文本命令结果，**不做中文本地化**（与前端相反，是有意为之）。
+- **CLI 的 `postJSON` 返回 `*httpError`**（带 HTTP 状态码）：领取凭证时「槽位被别人
+  抢走」是 409 `CREDENTIAL_EXISTS`，客户端据此换槽位重试。409 还有另一种语义
+  `CREDENTIAL_POOL_EMPTY`（池领完了），那个**不重试**。
 - **URL 路径二次转义**：`main.go` 的 `cmdResultGet` 把已 `url.PathEscape` 过的 path 塞进 `base.Path`，`url.URL.String()` 会再转义一次（`%` → `%25`）。含空格 / `/` / `%` 的 proposal id 必然 404。实测：`result-get -proposal "a b/c"` → `/api/v1/proposals/a%2520b%252Fc/results`。
 - **CLI 不再发送 `selected_option`**（旧版本会多发这个字段，明文选项上过网）。`cmdVoteSubmit` 的 body 只有 `proposal_id` `encrypted_vote` `proof` `nullifier` `user_id` `user_pub_key` `credential_signature`。
 - **CLI 没有 `-public-witness` 入口**，服务端也不再收这个字段。CLI 只「带 proof 提交」，不本地生成 proof（路线图 G9 决策）。
@@ -339,20 +351,24 @@ publish        → 提案必须已关闭（isProposalClosed）
 8. **`internal/di/wire_gen.go` 是手工同步的。** wire 生成器在本仓库离线不可用（`go.sum` 里 `github.com/google/subcommands` 只有 `/go.mod` 哈希，缺模块内容哈希）。改 `internal/di/wire.go` 必须手工同步 `wire_gen.go`。
 9. **`ballot-draft` 是明确的妥协，且只在 debug 模式可达。** 它由**服务端拿明文选项去加密**（`usecase/tally.go` 的 `EncryptVoteOption` → `proposalOptionIndex`），所以这条链路上服务端知道每一票的明文选项。非 debug 模式按 404 处理（`handler.go` 的 `PrepareBallotDraft`），用 404 而不是 403，避免暴露端点存在性。它**不是生产能力**，客户端 prover 落地后要被删掉。
 10. **只比对签名是不够的。** 拿一张合法凭证换个 `user_id` 重放，逐字节比对签名会通过。`usecase/voting.go` 因此在落库前调 `issuer.VerifyCredential`，失败 → 401。
-11. **盲签名仍是服务端进程内完成的。** `kryptology_credential_issuer.go` 的 `Issue` 里服务端自己 Blind 再 Finalize，客户端不参与 —— **不是真盲签名**。路线图 T17 改成两段式。
-12. **凭证改为匿名随机领取后，服务端无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。路线图 T22 用资格证明补回（见 [`docs/roadmap.md`](./roadmap.md) §2.3）。
-13. **`configs/config.production.yaml` 不会被自动加载** —— viper 默认只找 `config.*`。**已给出一条明确路径**：`CONFIG_FILE=./configs/config.production.yaml` 启动即可（`internal/config/config.go` 的 `ConfigFileEnvVar`）。显式指定的文件不存在时**直接启动失败**，不会静默回退到开发配置。启动日志的 `config_file` 字段会打印实际加载的文件路径。
-14. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项 —— release 模式下留空会打一条启动告警（同源部署留空是合法的，所以不阻止启动）。
-15. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（**11 个受控包**：usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server），合计门槛见表内 `total` 行（77）。单个包回退会直接让 CI 变红。门槛本身还比各包当前水位低约 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。最低的一档是 `internal/infrastructure/persistence`（门槛 58）。
-16. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go`）和 `isProposalClosed`（`tally.go`）。改时间规则要同时改两处。
-17. **release 模式不再启动即改表** —— 必须先跑 `nullifier-server -migrate`，忘了会直接启动失败（`persistence.SchemaReady` 检查）。开发模式仍然自动迁移。
-18. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
-19. **浏览器端与 Go 侧的选票密文必须逐字节一致。** 密文点编码一旦有一处偏差，服务端就解不开客户端投的票，而且**不会报错**（只是计票结果对不上）。唯一防线是那组跨语言已知答案向量：`internal/infrastructure/crypto/ballot/kat_interop_test.go`（Go 侧断言向量并解出选项下标）与 `web/src/lib/ballot-cipher.test.ts`（TS 侧断言产出同一串密文）。**改任何一边的曲线参数或编码，都要重新生成并同步这两处。**
-20. **计票公钥以未压缩形式给客户端**：`GET /api/v1/proposals/:id/election-key` 返回 X 与 Y 各 32 字节。原因是压缩点要在标量域里求平方根才能解压（`r ≡ 1 mod 4`，走 Tonelli-Shanks），浏览器端不必背这个包；代价是接口多一种编码方式，改接口时别改回压缩形式。
-21. **浏览器端的 nullifier 派生必须与 Go 侧逐位一致。** 电路约束是 `nullifier = MiMC(秘密, 提案域元素)`：SHA-256 映射提案 ID、Keccak-256 链派生 91 个 MiMC 轮常量、轮函数 `(x+h+c)^5`、外层 Miyaguchi–Preneel。差一位，浏览器就出不了证明（而且**不会报错**，只是验签失败）。防线是同一组跨语言向量：`internal/infrastructure/crypto/ballot/nullifier_interop_test.go`（Go 侧断言向量，并真的用这组值出一份证明验过）与 `web/src/lib/mimc.test.ts` / `web/src/lib/nullifier.test.ts`（TS 侧断言同一组值）。**改任一侧的哈希、轮常量或域运算，都要重新生成并同步这几处。**
-22. **浏览器端的盲签名 client 侧必须与 CIRCL 逐字节一致。** `web/src/lib/blind-rsa.ts` 实现 RFC 9474 的 `Prepare` / `Blind` / `Finalize` 与 EMSA-PSS 编码，服务端用 CIRCL `blindsign/blindrsa`（变体 `SHA384PSSDeterministic`）。两侧对同一条消息盲化出的消息必须一模一样，否则解出来的签名验不过 —— **而且不会报错**，只是验签失败。防线是 `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧用 CIRCL 真库，固定密钥 + 固定盐 + 固定盲化因子）与 `web/src/lib/blind-rsa.test.ts`。
+11. **两段式盲签名的服务端只做两件事。** `kryptology_credential_issuer.go` 没有 `Issue` 了：签发方只给公钥（`IssuerPublicKey`）与对**盲化消息**签名（`BlindSign`）。**服务端在 attest 之前绝不能拿到 `user_pub_key`** —— 它一旦知道公钥就能算出凭证消息原文，盲化当场失效（它手上有私钥，根本不需要解盲）。因此 `credentials/claim` 的请求体是空的，旧版本收 `user_pub_key` 的字段一律忽略。
+12. **公开的盲签名端点必须绑定池槽位。** `credentials/blind-sign` 只为该提案里**还空着的** `user_id` 签名，否则签发方就是「任意消息」的签名预言机。管理端可以覆盖任意 `user_id`，走的是另一个路径 `/api/v1/credentials/blind-sign`（gin 的路由树不允许同一路径挂两套中间件）。
+13. **预留不占位 → 并发领取会抢同一个槽位。** 服务端取槽位时不改状态，所以两个客户端可能拿到同一个 `user_id`，后到 attest 的那个会撞 409 `CREDENTIAL_EXISTS`。**重试必须在客户端**（新协议下重试要重新盲化，服务端代劳不了）：换槽位重来，最多 5 次，只在 409 `CREDENTIAL_EXISTS` 时重试 —— 409 还有 `CREDENTIAL_POOL_EMPTY`（池领完了），那个不重试。
+    - 为什么不改成「预留即占位」：那会让「只预留不 attest」的客户端永久消耗池槽位，变成一个 DoS。
+14. **凭证改为匿名随机领取后，服务端无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。路线图 T22 用资格证明补回（见 [`docs/roadmap.md`](./roadmap.md) §2.3）。
+15. **`configs/config.production.yaml` 不会被自动加载** —— viper 默认只找 `config.*`。**已给出一条明确路径**：`CONFIG_FILE=./configs/config.production.yaml` 启动即可（`internal/config/config.go` 的 `ConfigFileEnvVar`）。显式指定的文件不存在时**直接启动失败**，不会静默回退到开发配置。启动日志的 `config_file` 字段会打印实际加载的文件路径。
+16. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项 —— release 模式下留空会打一条启动告警（同源部署留空是合法的，所以不阻止启动）。
+17. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（**11 个受控包**：usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server），合计门槛见表内 `total` 行（77）。单个包回退会直接让 CI 变红。门槛本身还比各包当前水位低约 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。最低的一档是 `internal/infrastructure/persistence`（门槛 58）。
+18. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go`）和 `isProposalClosed`（`tally.go`）。改时间规则要同时改两处。
+19. **release 模式不再启动即改表** —— 必须先跑 `nullifier-server -migrate`，忘了会直接启动失败（`persistence.SchemaReady` 检查）。开发模式仍然自动迁移。
+20. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
+21. **浏览器端与 Go 侧的选票密文必须逐字节一致。** 密文点编码一旦有一处偏差，服务端就解不开客户端投的票，而且**不会报错**（只是计票结果对不上）。唯一防线是那组跨语言已知答案向量：`internal/infrastructure/crypto/ballot/kat_interop_test.go`（Go 侧断言向量并解出选项下标）与 `web/src/lib/ballot-cipher.test.ts`（TS 侧断言产出同一串密文）。**改任何一边的曲线参数或编码，都要重新生成并同步这两处。**
+22. **计票公钥以未压缩形式给客户端**：`GET /api/v1/proposals/:id/election-key` 返回 X 与 Y 各 32 字节。原因是压缩点要在标量域里求平方根才能解压（`r ≡ 1 mod 4`，走 Tonelli-Shanks），浏览器端不必背这个包；代价是接口多一种编码方式，改接口时别改回压缩形式。
+23. **浏览器端的 nullifier 派生必须与 Go 侧逐位一致。** 电路约束是 `nullifier = MiMC(秘密, 提案域元素)`：SHA-256 映射提案 ID、Keccak-256 链派生 91 个 MiMC 轮常量、轮函数 `(x+h+c)^5`、外层 Miyaguchi–Preneel。差一位，浏览器就出不了证明（而且**不会报错**，只是验签失败）。防线是同一组跨语言向量：`internal/infrastructure/crypto/ballot/nullifier_interop_test.go`（Go 侧断言向量，并真的用这组值出一份证明验过）与 `web/src/lib/mimc.test.ts` / `web/src/lib/nullifier.test.ts`（TS 侧断言同一组值）。**改任一侧的哈希、轮常量或域运算，都要重新生成并同步这几处。**
+24. **浏览器端的盲签名 client 侧必须与 CIRCL 逐字节一致。** `web/src/lib/blind-rsa.ts` 实现 RFC 9474 的 `Prepare` / `Blind` / `Finalize` 与 EMSA-PSS 编码，服务端用 CIRCL `blindsign/blindrsa`（变体 `SHA384PSSDeterministic`）。两侧对同一条消息盲化出的消息必须一模一样，否则解出来的签名验不过 —— **而且不会报错**，只是验签失败。防线是 `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧用 CIRCL 真库，固定密钥 + 固定盐 + 固定盲化因子）与 `web/src/lib/blind-rsa.test.ts`。
     - 关键事实：**client 侧只需要签发方的 RSA 公钥**（`n`、`e`），不需要私钥 —— 这是两段式盲签名能落地的前提。
     - 改任一侧的 PSS 编码 / MGF1 / 哈希 / 盐长度，都要重新生成并同步这两处。
+25. **凭证消息的两端实现必须逐字节一致。** 凭证消息是 `sha256(user_id ‖ 0x00 ‖ user_pub_key)`：Go 侧 `crypto.CredentialMessage`、TS 侧 `web/src/lib/credential.ts` 的 `credentialMessage`。服务端验签时重算的是同一条消息，对不上就是验签失败 —— **而且不会报错**，只是凭证被判无效。防线是 `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧断言向量）与 `web/src/lib/credential.test.ts`（TS 侧断言同一组值）。**分隔符 `0x00` 不能省**：没有它，`(a, b)` 与 `(a‖0x00, b)` 会撞。
 
 ---
 
@@ -383,6 +399,15 @@ go test ./internal/infrastructure/crypto/ballot/ -run 'TestKAT_Nullifier|TestKAT
 
 # 盲签名 client 侧的跨语言一致性（改了 PSS 编码 / MGF1 / SHA-384 就会红）
 go test ./internal/infrastructure/crypto/ -run TestKAT_BlindRsa -v
+
+# 真两段式盲签名：验收 ①（服务端只见盲化消息）、验收 ②（交叉攻击失败）、槽位重试
+go test ./tests/e2e/ -run 'TestAPI_TwoPhaseBlindSignature|TestAPI_BlindSignature|TestAPI_ClaimRetries|TestAPI_BlindSignRequires' -v
+go test ./internal/infrastructure/crypto/ -run TestCredentialBlindClient -v   # Go 侧盲签名客户端往返
+go test ./cmd/cli/ -run TestRun_Credential -v   # CLI 的两段式与重试
+
+# 凭证消息的跨语言一致性（改了消息拼法或分隔符就会红）
+go test ./internal/infrastructure/crypto/ -run TestKAT_BlindRsa -v
+pnpm --dir web run test -- src/lib/credential.test.ts
 
 # 密钥生成（默认不覆盖已有文件；-force 才覆盖）
 go run ./cmd/keygen -dir ./keys
@@ -426,7 +451,10 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
 - **门户的 nullifier 还是随机域元素。** 浏览器端已能算出与电路一致的 nullifier
   （`lib/nullifier.ts` 的 `deriveNullifier`），但门户仍在用 `generateNullifier`；
   接线 prover 时要一起改，并把 nullifier 秘密留在本地。
-- **盲签名仍是服务端进程内完成**（T17）：服务端自己 Blind 再 Finalize，客户端不参与，等同普通签名 —— 不具备真正的盲化性质。
+- **盲签名的两段式协议已落地（T17 完成）**：客户端本地盲化，服务端在签名阶段只见盲化
+  消息，attest 阶段才拿到公钥并验签。**口径**：attest 阶段服务端仍然看得到 `user_id`
+  与 `user_pub_key`（验签必须重算凭证消息）—— 这是「签发方不知道被签内容」，不是
+  「服务端全程不知道客户端是谁」。
 - **一人一票没有强制手段**（T22）：凭证匿名随机领取，同一个人可以领两张票投两次。
 - **`ballot-draft` 返回的 proof 是开发占位常量**（`developmentProofBase64`），不是真证明；release 模式下即使端点可达也会被验签拒。
 - **门户与 CLI 的匿名性文案与实现仍有落差**（见 §1.7 陷阱）。

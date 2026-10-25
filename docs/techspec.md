@@ -201,6 +201,8 @@ web/                        # Vue 3 前端门户
 - `POST /api/v1/proposals/:proposal_id/ballot-draft`（仅 debug 模式）
 - `GET /api/v1/proposals/:proposal_id/election-key`（计票公钥，公开值）
 - `POST /api/v1/proposals/:proposal_id/credentials/claim`
+- `POST /api/v1/proposals/:proposal_id/credentials/blind-sign`
+- `POST /api/v1/proposals/:proposal_id/credentials/attest`
 - `GET /api/v1/proposals/:proposal_id/results`
 - `GET /api/v1/proposals/:proposal_id/audit-anchors`
 
@@ -209,6 +211,7 @@ web/                        # Vue 3 前端门户
 以下接口统一走 Bearer Token 鉴权中间件：
 
 - `POST /api/v1/credentials`
+- `POST /api/v1/credentials/blind-sign`
 - `POST /api/v1/proposals`
 - `GET /api/v1/proposals/:proposal_id/credentials`
 - `POST /api/v1/proposals/:proposal_id/credentials/pool`
@@ -251,6 +254,39 @@ web/                        # Vue 3 前端门户
     只是为了联调（见 §6.7）。
 - `POST /api/v1/proposals/:proposal_id/vote-status`
   - 必须带当前凭证材料，不接受裸 `user_id` 枚举
+- `POST /api/v1/proposals/:proposal_id/credentials/claim`（预留签发权，公开）
+  - 请求体是空的 —— **不接受 `user_pub_key`**。服务端一旦知道公钥就能算出凭证消息
+    的原文，盲化当场失效（它手上有私钥，根本不需要解盲）。旧版本这个端点收
+    `user_pub_key`，现在一律忽略。
+  - 响应：`proposal_id`、`user_id`（池槽位的假名）、`issuer_key_version`、`variant`、
+    `modulus`（base64）、`exponent`。
+  - **预留不占位**：服务端取槽位时不改状态，所以并发领取会抢到同一个槽位。撞车的
+    那个由**客户端**换一个槽位重来（最多 5 次，只在 attest 返回 409
+    `CREDENTIAL_EXISTS` 时重试）—— 重试要重新盲化，服务端代劳不了。
+    「预留即占位」没有采用：那会让「只预留不 attest」的客户端永久消耗池槽位，
+    变成一个 DoS。
+- `POST /api/v1/proposals/:proposal_id/credentials/blind-sign`（公开）
+  - 请求体：`user_id`、`blinded_message`（base64）、`issuer_key_version`。
+  - `issuer_key_version` 必填：服务端要用客户端盲化时那一版的私钥签，版本对不上
+    解盲结果作废。用请求携带版本，避免改 schema。
+  - **只覆盖池里还空着的槽位**（`user_id` 必须在该提案的可用槽位里），否则签发方就
+    成了「任意消息」的签名预言机。
+  - 服务端在这一步只见盲化消息，见不到被签内容。
+- `POST /api/v1/proposals/:proposal_id/credentials/attest`（公开）
+  - 请求体：`user_id`、`user_pub_key`（base64）、`signature`（base64）。
+  - **先验签再落库**：验签失败 → 401 `INVALID_CREDENTIAL`；同一 `(proposal, user_id)`
+    已有凭证 → 409 `CREDENTIAL_EXISTS`。
+  - 验签绑定的消息是 `sha256(user_id ‖ 0x00 ‖ user_pub_key)`，交叉攻击（拿 A 的盲
+    签名去签 B）必然验不过。
+- `POST /api/v1/credentials`（管理端预留，公开路径之外的 `/api/v1/credentials`）
+  - 请求体：`proposal_id`、`user_id`。同样**不收公钥**。
+  - 与公开端的区别：可以指定任意 `user_id`，且该 user_id 不必在池里（池槽位是
+    「匿名领取」的机制，管理端签发不需要它）。
+- `POST /api/v1/credentials/blind-sign`（管理端盲签名）
+  - 请求体：`proposal_id`、`user_id`、`blinded_message`（base64）、
+    `issuer_key_version`。
+  - 与公开端的区别：可以覆盖任意 `user_id`（运营方指定的人），不要求池槽位。
+  - 路径与公开端不同是因为 gin 的路由树不允许同路径挂两套中间件。
 - `POST /api/v1/proposals/:proposal_id/decryption/setup`
   - 当前实现拒绝“投票开放中”的提案
   - 同一提案重复 setup 返回 `409 DECRYPTION_SESSION_EXISTS`，不会覆盖已有会话（已有会话如果被覆盖，已投选票将无法解密）
@@ -425,26 +461,57 @@ web/                        # Vue 3 前端门户
 - **还没闭合的部分**：门户还没接上客户端加密（缺客户端 prover，接了也投不出去），
   debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径。
 
-### 6.9 凭证验签
+### 6.9 凭证验签与真两段式盲签名
 
-- `domaincrypto.CredentialIssuer.VerifyCredential`：用签发方公钥校验凭证签名。
-  投票落库前调用（`usecase.VotingUseCase.Submit`），验签失败 → `ErrInvalidCredential`
-  → HTTP 401 `INVALID_CREDENTIAL`。
-- 此前投票路径只比对「库里存的签名」与「请求里带的签名」是否逐字节相同 ——
-  拿一张合法凭证换个 user_id 重放就能过那一关。
-- **凭证签发不是真正的盲签名。** `kryptology_credential_issuer.go` 里
-  `Prepare → Blind → BlindSign → Finalize` 全在服务端进程内完成，服务端全程持有
-  被签消息 —— 等同于普通签名，签发方看得见签的是什么。
-- **浏览器端的盲签名 client 侧已经就绪**（`web/src/lib/blind-rsa.ts` + `sha384.ts`）：
-  RFC 9474 RSABSSA-PSS-Deterministic 的 `Prepare` / `Blind` / `Finalize`，
-  以及 EMSA-PSS 编码、MGF1、SHA-384。与服务端 CIRCL **逐字节一致**，由
-  `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧用 CIRCL 真库）
-  与 `web/src/lib/blind-rsa.test.ts`（TS 侧）共同锁定。
-  - 关键事实：CIRCL 的 client 侧**只需要签发方的 RSA 公钥**（`n`、`e`），
-    不需要私钥 —— 因此客户端可以自己盲化，服务端那一侧只剩
-    `Signer.BlindSign(blindedMessage)`，也就是「签发方只见盲化消息」。
-  - **还没做的**：两段式协议本身（预留槽位 → 盲签名 → attest 验签）与门户接线。
-    在那之前，门户仍走一次性的 `POST /credentials/claim`（服务端代签）。
+- `domaincrypto.CredentialIssuer` 现在是三个方法：
+  - `BlindSign(ctx, keyVersion, blindedMessage)` —— 签发方对**盲化后**的消息做盲签名，
+    这是签发方在真两段式里**唯一**的签名动作。
+  - `IssuerPublicKey(ctx)` —— 返回当前签发方公钥（公开值，客户端盲化本来就需要），
+    并顺带做密钥轮换。
+  - `VerifyCredential(userID, userPubKey, signature)` —— 校验凭证签名，返回验签通过的
+    密钥版本。
+  - 一次性 `Issue` 已删除。
+- 投票落库前调用 `VerifyCredential`（`usecase.VotingUseCase.Submit`），验签失败 →
+  `ErrInvalidCredential` → HTTP 401 `INVALID_CREDENTIAL`。此前投票路径只比对「库里
+  存的签名」与「请求里带的签名」是否逐字节相同 —— 拿一张合法凭证换个 user_id 重放
+  就能过那一关。
+- **协议是三步**（真两段式盲签名，RFC 9474 RSABSSA-PSS-Deterministic / SHA-384）：
+
+  | 步骤 | 端点 | 服务端看到什么 |
+  |---|---|---|
+  | ① 预留签发权 | `credentials/claim` | 池槽位的假名 `user_id` + 签发方公钥 |
+  | ② 盲签名 | `credentials/blind-sign` | 只有**盲化消息** |
+  | ③ attest | `credentials/attest` | `user_id`、公钥、最终签名（此时验签） |
+
+  关键：**客户端从头到尾没把公钥交给服务端**，直到第 ③ 步。服务端一旦知道公钥就能
+  算出凭证消息原文，盲化当场失效。
+- **凭证消息**是 `sha256(user_id ‖ 0x00 ‖ user_pub_key)`（Go 侧 `crypto.CredentialMessage`，
+  TS 侧 `credentialMessage`）。`0x00` 分隔符固定 user_id 与公钥的边界 —— 没有它，
+  `(a, b)` 与 `(a‖0x00, b)` 会撞。跨语言一致性由
+  `internal/infrastructure/crypto/blind_rsa_interop_test.go` 与
+  `web/src/lib/credential.test.ts` 用同一组向量锁死。
+- **验签绑定是安全锚**：消息里含 `user_id` 与公钥，所以交叉攻击（拿 A 的盲签名去签
+  B）必然验不过 —— 这是路线图 T17 的验收 ②。
+- **客户端实现**：
+  - 浏览器端：`web/src/lib/credential.ts`（`credentialMessage` / `parseIssuerKey` /
+    `blindCredentialMessage` / `finalizeCredentialSignature`）+
+    `web/src/lib/blind-rsa.ts`（Prepare / Blind / Finalize、EMSA-PSS、MGF1、SHA-384）。
+  - Go 端：`internal/infrastructure/crypto/credential_client.go`
+    （`CredentialBlindClient.Blind` / `Finalize`）—— CLI 与端到端测试共用。
+  - 两边与服务端 CIRCL **逐字节一致**，由
+    `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧用 CIRCL 真库）
+    与 `web/src/lib/blind-rsa.test.ts`（TS 侧）共同锁定。
+  - 关键事实：CIRCL 的 client 侧**只需要签发方的 RSA 公钥**（`n`、`e`），不需要私钥 ——
+    因此客户端可以自己盲化，服务端那一侧只剩 `Signer.BlindSign(blindedMessage)`。
+- **管理端也走真两段式**（与匿名领取同一套协议，只是端点不同）：运营方指定
+  `user_id` → 管理端客户端本地盲化 → 管理端 blind-sign → attest。管理端 blind-sign
+  走全局路径 `/api/v1/credentials/blind-sign`，因为 gin 的路由树不允许同一路径挂
+  两套中间件。
+- **槽位竞争的解法在客户端**：预留不占位 → 并发领取会抢同一个槽位 → attest 返回
+  409 `CREDENTIAL_EXISTS` → 客户端换一个槽位重来（最多 5 次）。409 还有另一种语义
+  `CREDENTIAL_POOL_EMPTY`（池领完了），那个**不重试**。
+- **还没做的**：浏览器端 prover 仍缺，门户因此还不能在 release 模式下投出加密票
+  （见 §9）。
 
 > 补齐上述链路的顺序与工作量评估见 [`docs/roadmap.md`](./roadmap.md)（产品路线图）。
 
@@ -475,6 +542,9 @@ web/                        # Vue 3 前端门户
   服务端看到你选了哪个选项，与匿名投票的前提冲突。debug 标志来自 `GET /healthz` 的
   `debug` 字段，读不到该字段时按 false 处理（宁可把开发入口藏起来）。
 - 门户与 CLI 都不再发送 `public_witness`；公开输入由服务端自拼。
+- **凭证领取走真两段式盲签名**（`web/src/lib/credential.ts` + `web/src/lib/blind-rsa.ts`）：
+  预留 → 本地盲化 → 盲签名 → 本地解盲 → attest。预留阶段请求体是空的 —— 公钥只在
+  attest 那一步才交给服务端。槽位被抢走时门户换一个槽位重来（最多 5 次）。
 - **浏览器端 prover 还没做**：门户不能在本地生成密文与证明，release 模式下门户
   依然无法完成投票（见 §9）。
 
@@ -530,9 +600,12 @@ web/                        # Vue 3 前端门户
   是开发用占位值，不是真实证明。
 - `ballot-encrypt` 在**客户端本地加密**选票：取公开的计票公钥 → 本地加密选项下标 →
   落盘选票文件。选票文件里的 `nullifier_secret` 只留本地，prover 需要它。
-- `credential-claim` 匿名领取凭证：请求体只有自己生成的公钥，**不需要 admin token**
-  （领取端点是公开的），服务端随机给出一个池槽位的凭证。服务端因此无法把凭证与
-  投票人对应起来。
+- `credential-claim` 匿名领取凭证：走**真两段式盲签名**（预留 → 本地盲化 → 盲签名 →
+  本地解盲 → attest），**不需要 admin token**（领取端点是公开的），服务端随机给出一个
+  池槽位的凭证。服务端因此无法把凭证与投票人对应起来。槽位被抢走时客户端换一个槽位
+  重来（最多 5 次）。
+- `credential-issue` 管理端签发：同样走真两段式，只是走管理端端点、可以指定
+  `user_id`。
 - 当前命令：
   - `health`
   - `version`
@@ -571,6 +644,12 @@ web/                        # Vue 3 前端门户
   - **盲签名 client 侧的跨语言测试**：`internal/infrastructure/crypto/blind_rsa_interop_test.go`
     与 `web/src/lib/blind-rsa.test.ts` 共用一组向量（固定密钥 + 固定盐 + 固定盲化因子）——
     浏览器端盲化出的消息与 CIRCL 逐字节一致，解盲出的签名也一样
+  - **凭证消息的跨语言测试**：`internal/infrastructure/crypto/blind_rsa_interop_test.go`
+    与 `web/src/lib/credential.test.ts` 共用同一组向量 —— `sha256(user_id ‖ 0x00 ‖
+    user_pub_key)` 两边必须一致，否则服务端验签必然失败
+  - **两段式盲签名的端到端测试**：`tests/e2e/blind_signature_test.go` —— 验收 ①
+    （服务端在签名阶段只见盲化消息）与验收 ②（交叉攻击失败），外加「公开盲签名端点
+    必须绑定池槽位」与「槽位被抢时客户端换槽位重来」
   - `cmd/keygen` 单元测试
   - `tests/integration` 集成测试
   - `tests/e2e` 端到端流程测试（含「客户端本地加密 → 落库只有密文 → 计票还原」，
@@ -631,9 +710,13 @@ web/                        # Vue 3 前端门户
   生成选票密文，服务端只提供公开的计票公钥（`GET .../election-key`），落库记录里
   只有密文。**但门户还没接上**（缺客户端 prover），debug 模式的 `ballot-draft` 仍是
   「服务端知道选项」的那条路径 —— 能力 A 因此尚未完全闭合。
-- **凭证签发仍不是盲签名。** 盲化在服务端进程内完成，签发方看得见被签内容（见 §6.9）。
-  浏览器端的盲签名 client 侧已经实现并与 CIRCL 对齐，但**两段式协议与门户接线
-  还没做** —— 门户仍走一次性的服务端代签路径。
+- **凭证签发已经是真两段式盲签名**（见 §6.9）：客户端本地盲化，服务端在签名阶段只见
+  盲化消息，attest 阶段才拿到公钥并验签。能力 F 在**签名阶段**达成。
+  - 口径要说清楚：**attest 阶段服务端仍然看得到 `user_id` 与 `user_pub_key`** —— 验签
+    必须用它们重算凭证消息。这是「签发方不知道被签内容」，不是「服务端全程不知道
+    客户端是谁」。
+  - 预留不占位 → 并发领取会抢同一个槽位，重试放在客户端（最多 5 次，只在 409
+    `CREDENTIAL_EXISTS` 时重试）。
 - **nullifier 的 MiMC 绑定：浏览器端已实现，门户还没用上。** 浏览器端
   （`web/src/lib/nullifier.ts` 的 `deriveNullifier`）已能与 Go 侧逐位一致地算出
   电路认可的 nullifier，KAT 也把它钉死了（见 §6.4）。但门户

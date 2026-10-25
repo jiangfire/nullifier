@@ -23,6 +23,18 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 - **投票请求体不再接受 `public_witness` 字段。** 公开输入改由服务端根据请求字段、提案与计票
   会话自行拼装 —— 客户端无法自选公开输入，一份 proof 因此只能用于它被生成的那份密文。
 - **门限分享从 kyber 的 ed25519 改为 Fr 上的 Shamir**（`go.dedis.ch/kyber/v3` 依赖已移除）。
+- **凭证签发从「一次性领取」改为「真两段式盲签名」，接口变了。**
+  - `POST /api/v1/proposals/:id/credentials/claim` 现在**只做预留**：请求体是空的，
+    **不再接收 `user_pub_key`**（旧字段一律忽略）。服务端一旦知道公钥就能算出凭证消息
+    的原文，盲化当场失效 —— 它手上有私钥，根本不需要解盲。
+  - 新增 `POST /api/v1/proposals/:id/credentials/blind-sign`（公开，只为池里还空着的槽位
+    签名）与 `POST /api/v1/proposals/:id/credentials/attest`（公开，先验签再落库）。
+  - 管理端新增 `POST /api/v1/credentials/blind-sign`；`POST /api/v1/credentials` 从「直接
+    签发」改为「为指定的 `user_id` 预留」。
+  - 领域接口 `domaincrypto.CredentialIssuer` 变成 `BlindSign` / `IssuerPublicKey` /
+    `VerifyCredential` 三个方法，一次性的 `Issue` **已删除**。
+  - 自建客户端（门户 / CLI / 第三方）需要跟着改：领取凭证从「一次 POST 拿到凭证」变成
+    「预留 → 本地盲化 → 盲签名 → 本地解盲 → attest」四步。
 
 ### 新增
 
@@ -60,7 +72,8 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
     一起接线。
 - **CLI 新增 `credential-claim` 命令**：匿名领取一张凭证（与门户的「领取凭证」同一个
   公开端点，**不需要 admin token**）。此前只有门户能领，脚本化领取用不了 —— 这是
-  路线图 T9 / T22 里记下的缺口。请求体只有本地生成的公钥，没有任何身份信息。
+  路线图 T9 / T22 里记下的缺口。⚠️ 领取请求里**没有任何身份信息**：连公钥都不发
+  （公钥只在最后的 attest 一步才交给服务端），服务端因此无法把凭证与投票人对应起来。
 - **并发投票压测工具**（新命令 `cmd/loadtest`）：只走 HTTP API 建提案 → 备池领凭证 →
   并发投票 → 复核防重投，输出吞吐 / 延迟分位 / 状态分布 / 防重投结论（`-json` 输出机器可读
   报告）。**防重投没守住时以非 0 退出** —— 结论能直接当门禁用。工具自身有单元测试
@@ -75,8 +88,15 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   `web/src/lib/blind-rsa.test.ts` 共同锁定）。
   - 关键事实：CIRCL 的 client 侧**只需要签发方的 RSA 公钥**，不需要私钥 ——
     这正是「两段式盲签名」能落地的前提。
-  - **还没做**：两段式协议本身（预留槽位 → 盲签名 → attest 验签）与门户接线。
-    在那之前门户仍走一次性的服务端代签路径，能力 F 尚未闭合。
+  - ✅ **两段式协议与门户 / CLI 接线已完成**（见「安全」一节）。
+- **浏览器端的凭证盲签名客户端**（新模块 `web/src/lib/credential.ts`）：`credentialMessage`
+  （`sha256(user_id ‖ 0x00 ‖ user_pub_key)`）、`parseIssuerKey`、`blindCredentialMessage`、
+  `finalizeCredentialSignature`。凭证消息与 Go 侧 `crypto.CredentialMessage` 同口径，
+  跨语言向量由 `internal/infrastructure/crypto/blind_rsa_interop_test.go` 与
+  `web/src/lib/credential.test.ts` 共同锁定。
+- **Go 侧的盲签名客户端**（新模块 `internal/infrastructure/crypto/credential_client.go`）：
+  `CredentialBlindClient.Blind` / `Finalize`，CLI 与端到端测试共用。只需签发方公钥，
+  零新依赖（同库 CIRCL）。
 - `GET /healthz` 响应新增 `debug` 布尔字段（由 `server.mode` 推导）。
 - **服务现在能用 `CONFIG_FILE` 显式指定配置文件**：`CONFIG_FILE=./configs/config.production.yaml`
   启动即可加载生产配置 —— 那个文件此前**永远不会被自动加载**（viper 只找 `config.yaml`），
@@ -86,6 +106,18 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 
 ### 安全
 
+- **凭证签发现在是真两段式盲签名：签发方在签名阶段看不到被签内容。** 此前 `Prepare` →
+  `Blind` → `BlindSign` → `Finalize` 全在服务端进程内完成 —— 服务端全程持有被签消息，
+  等同普通签名。现在客户端本地盲化，服务端只对**盲化消息**做一次 RSA 私钥运算。
+  - **口径**：达成的是「**签名阶段**服务端只见盲化消息」。attest 阶段服务端仍然看得到
+    `user_id` 与 `user_pub_key` —— 验签必须重算凭证消息
+    （`sha256(user_id ‖ 0x00 ‖ user_pub_key)`）。这不是「全程看不见」，文档按前者写。
+  - **交叉攻击被挡住**：拿 A 的盲签名去签 B，验签必然失败。
+  - **公开的盲签名端点必须绑定池槽位**，否则签发方就是「任意消息」的签名预言机。
+- **凭证池槽位的竞争由客户端解决。** 预留**不占位**（占位会让「只预留不 attest」的客户端
+  永久消耗池槽位，变成 DoS），所以并发领取会抢同一个槽位；撞车的那个由客户端换一个槽位
+  重来（最多 5 次，只在 409 `CREDENTIAL_EXISTS` 时重试 —— 409 的
+  `CREDENTIAL_POOL_EMPTY` 不重试）。
 - **投票路径现在会验证凭证签名。** 此前 `VerifyCredential` 只存在于密码学层，投票提交路径
   **从不调用** —— 任何人都能伪造凭据投票。现在落库前调用签发方验签，失败返回 **401**。
 - **nullifier 落库前归一成规范形式（64 位小写 hex）。** 票表的唯一索引建在**字符串**上：
@@ -117,6 +149,14 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   `cmd/keygen`），见 `scripts/coverage-thresholds.txt`。
 - **CLI 命令从 14 个增到 16 个**（新增 `ballot-encrypt` 与 `credential-claim`），
   **HTTP 端点从 14 个增到 15 个**（新增公开的 `GET /api/v1/proposals/:id/election-key`）。
+- **`credential-claim` 与 `credential-issue` 改走真两段式盲签名。** 命令的用法与输出格式
+  不变（`credential-claim -proposal <id>` 仍是一句话领到凭证），但内部流程变成
+  「预留 → 本地盲化 → 盲签名 → 本地解盲 → attest」。槽位被抢走时命令会换一个槽位重来
+  （最多 5 次）。
+- **CLI 的 HTTP 错误现在带状态码**（`*httpError`）：领取凭证时「槽位被别人抢走」是
+  409 `CREDENTIAL_EXISTS`，客户端据此决定重试。
+- **HTTP 端点从 15 个增到 19 个**：新增公开的 `credentials/blind-sign`、
+  `credentials/attest` 与管理端的 `credentials/blind-sign`。
 
 ### 修复
 
@@ -134,8 +174,8 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 > **release 模式下门户仍然无法完成一次投票**；明文选项对服务端不可知这条**只闭合了一半** ——
 > 客户端本地加密已可用（CLI `ballot-encrypt`、浏览器端 TS 实现），但**门户还没接上**，
 > debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径；门户的 nullifier 也还是
-> 随机域元素（浏览器端已能算出与电路一致的值，等 prover 一起接线）；盲签名仍是服务端
-> 进程内完成。详见 [`docs/roadmap.md`](./docs/roadmap.md) §4.1 的能力状态表。
+> 随机域元素（浏览器端已能算出与电路一致的值，等 prover 一起接线）。凭证签发的两段式
+> 盲签名**已闭合**。详见 [`docs/roadmap.md`](./docs/roadmap.md) §4.1 的能力状态表。
 
 ---
 

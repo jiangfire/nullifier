@@ -170,8 +170,8 @@ M2 的证明链能力，因此它属于 M3 而不是 M2。
 
 **出口标准**：能力 A–F 的完成定义逐条拿出证据；§5 的 No-Go 清单全过。
 
-**状态**：**进行中**（2026-10-21 起）。已完成 T13 / T15 / T18 / T1 / T2，
-剩余 T14 / T16 / T17。逐项状态见 §4.1 的 M2 进展表。
+**状态**：**进行中**（2026-10-21 起）。已完成 T13 / T15 / T18 / T17 / T1 / T2，
+剩余 T14 / T16（都卡在同一个前置件：浏览器端 prover）。逐项状态见 §4.1 的 M2 进展表。
 
 **依赖与顺序**（后一项依赖前一项，不要并行）：
 
@@ -190,7 +190,8 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 > prover 无关。先落 T15 的好处是：服务端的验证能力先到位，客户端 prover
 > （T14）接上来时对接的是**已经定死**的公开输入格式，不用返工。
 > T18 原本排在 T16 之后，实际可以提前：凭证验签与选票加密是否在客户端无关。
-> **T17 仍排在 T14 之后** —— 真两段式盲签名需要客户端承载 crypto。
+> **T17 原排在 T14 之后**，实际也提前了：两段式盲签名的客户端侧（纯 TS）不依赖
+> prover，只依赖签发方公钥 —— 等 T14 会把 T17 一起堵死。T17 已于 2026-10-21 落地。
 
 **预估**：周级。这是 v0.2.0 的主体，也是唯一的硬骨头。
 
@@ -242,7 +243,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | T2 | 门户「按选项生成凭据」按钮非 debug 隐藏 | ✅ 已落地 |
 | T16 | 加密移到客户端 | 🟡 **客户端加密已落地**（浏览器端 TS 实现 + CLI 命令 + 跨语言互操作测试）；门户接线与客户端 prover 待 T14 |
 | T14 | 客户端 prover（浏览器 WASM） | ⬜ 未开工（**离线不可行**：模块缓存里没有 `gnark-wasm`，也没有 JS 密码学库）。**前置件已就位**：浏览器端 nullifier 派生（MiMC + Keccak + SHA-256，纯 TS）与 Go 侧逐位一致并有跨语言 KAT 锁定 |
-| T17 | 盲签名改真两段式 | 🟡 **client 侧已就绪**（浏览器端纯 TS 实现，与 CIRCL 逐字节一致 + 跨语言 KAT）；**两段式协议与门户接线未做** |
+| T17 | 盲签名改真两段式 | ✅ **已落地**（2026-10-21）—— 真两段式协议（预留 → 本地盲化 → 盲签名 → 本地解盲 → attest）+ 门户 / CLI 接线 + 管理端同样走两段式；验收 ①（签名阶段只见盲化消息）与验收 ②（交叉攻击失败）均有 e2e 用例 |
 
 **能力 A–F 的当前状态**：
 
@@ -253,7 +254,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | C proof 与票绑定 | ✅ 已达成 | 公开输入由服务端按请求字段自拼，客户端无法自选；跨提案 / 跨 nullifier 复用均验签失败 |
 | D 客户端能投票 | ❌ 未达成 | 缺浏览器端 prover（T14）；CLI 已有本地加密命令，但同样缺 prover |
 | E 凭证不可伪造 | ✅ 已达成 | 落库前 `VerifyCredential`，伪造签名 → 401 |
-| F 签发方看不到被签内容 | ❌ 未达成 | 盲化仍在服务端进程内完成（T17 未开工；改法已细化，见 T17 任务卡的「实现要点」） |
+| F 签发方看不到被签内容 | ✅ 已达成 | 真两段式盲签名：客户端本地盲化，服务端在**签名阶段**只见盲化消息；交叉攻击（A 的盲签名签 B）→ 验签失败。**口径**：attest 阶段服务端仍看得到 `user_id` / `user_pub_key`（验签必须重算凭证消息） |
 
 **本轮的两个协议变更**（都要写进 CHANGELOG，详见 §6 决策 D2）：
 
@@ -315,13 +316,13 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 
 | # | 检查项 | 当前状态 |
 |---|---|---|
-| 1 | 能力 A–F 任一未完成 | ❌ **未过** —— A / D / F 未完成（T16 / T14 / T17） |
+| 1 | 能力 A–F 任一未完成 | ❌ **未过** —— A / D 未完成（T16 / T14，都卡在浏览器端 prover）；B / C / E / F 已达成 |
 | 2 | 能力 G 的完成定义未达成 —— 领取凭证时不需要任何资格证明（T22），意味着服务端无法强制一人一票 | ❌ **未过** —— T22 未开工 |
 | 3 | 存在「服务端能拿到明文选项」的代码路径（grep 不到才过） | ❌ **未过** —— 客户端加密已可用（CLI `ballot-encrypt`、浏览器端 TS 实现），但 debug 模式的 `ballot-draft` 仍是那条路径（release 模式已 404）；门户接上客户端加密后，grep 才能干净 |
 | 4 | 存在「proof 可以跨提案复用」的路径 | ✅ **已过** —— 公开输入由服务端自拼，跨提案 / 跨 nullifier 复用均验签失败 |
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
-| 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 79.7% |
-| 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 73 个用例全过 |
+| 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.2% |
+| 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 125 个用例全过 |
 | 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未开工（盲区 3 的「防重投」与「容量」两半已补，PG 集成测试与浏览器渲染仍未做） |
 | 9 | README / techspec / 门户三处的匿名性声明不一致 | 🟡 **本轮已同步，待复核** —— 三处与 §4.1 的能力表对齐 |
 
@@ -383,7 +384,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 |---|---|---|
 | T14 客户端 prover 未做，release 模式下门户无法投票 | v0.2.0 的能力 D 不达成，发版价值受限 | T13 的电路在服务端已可跑（证明约 20ms、验证约 1–2ms），WASM 化的可行性已验证；T14 单独成提交链，**CHANGELOG 必须如实写明 release 模式仍不可投票** |
 | T13 电路的证明生成太慢，浏览器端体验不可用 | 投票流程不可用 | ✅ **已实测**：约 7917 条约束，证明约 20ms、验证约 1–2ms，性能风险基本解除。必要时仍可换电路形状（公开输入更少）而不是硬扛 |
-| T17 真盲签名改动面大，拖垮整个 v0.2.0 | 发版无限延期 | T17 单独成提交链；D4 已拍板走真两段式，但**排在 T14 之后** —— 真做不完时退化为「改文档」，且**必须在 CHANGELOG 如实说明** |
+| T17 真盲签名改动面大，拖垮整个 v0.2.0 | 发版无限延期 | ✅ **已解除** —— T17 已于 2026-10-21 落地（协议 + 门户 / CLI 接线 + e2e 验收），改动面比预估小：领域接口拆成 `BlindSign` / `IssuerPublicKey` / `VerifyCredential` 三个方法，没有新增 schema 列 |
 | T7 KDF 换协议使 v0.1.0 之前的旧密文永久不可解 | 旧数据丢失 | 明确标注密文格式版本；v0.1.0 起格式即 v2，v0.2.0 前不要用旧数据做真实投票 |
 | **D2 密文 v2 → v3 使 v0.1.0 的选票永久不可解** | 旧数据丢失 | v0.2.0 尚未发版，本地/内测数据可弃；CHANGELOG 必须写明「与 v0.1.0 不兼容」；发版前清库 |
 | **debug 模式下服务端仍能拿到明文选项** | 能力 A 未达成 | T1 已把该端点在非 debug 模式关成 404；**release 模式必须显式设置 `server.mode`**，否则开发默认值会让能力 A 在生产失效 —— 部署清单里逐项核对 |
@@ -480,19 +481,19 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 预估 | 3–4 天 |
 | 依赖 | T13、T14、T15 |
 
-#### T17 · 盲签名改真两段式
+#### T17 · 盲签名改真两段式 ✅ 已落地
 
 | 项 | 内容 |
 |---|---|
 | 问题 | 盲签名的**盲化在服务端内部完成**：`internal/infrastructure/crypto/kryptology_credential_issuer.go:162-181` 在同一个进程里依次 `Prepare` → `Blind` → `BlindSign` → `Finalize`，服务端全程持有明文消息 —— **不具备盲化性质**，等同于普通签名。 |
 | 证据 | `kryptology_credential_issuer.go:162-181` |
-| 改法 | ① 拆成两个 HTTP 端点：客户端 → `POST /credentials/blind`（提交盲化后的消息）→ 服务端 `BlindSign` 返回盲签名 → 客户端 `Finalize` 得到最终签名 → `POST /credentials/attest`（提交最终签名 + 承诺）→ 服务端用 `Verify` 校验；② 客户端（浏览器 WASM）实现 `blindrsa` 的 client 侧；③ 协议要绑定被盲化的消息承诺，防止「拿 A 的盲签名去签 B」 |
+| 改法 | ① 拆成两个 HTTP 端点：客户端 → `POST /credentials/blind`（提交盲化后的消息）→ 服务端 `BlindSign` 返回盲签名 → 客户端 `Finalize` 得到最终签名 → `POST /credentials/attest`（提交最终签名 + 承诺）→ 服务端用 `Verify` 校验；② 客户端实现 `blindrsa` 的 client 侧 —— **纯 TypeScript 即可，不需要 WASM**（SHA-384 + EMSA-PSS 都是纯算术，BigInt 够用；Go 侧同库，零新依赖）；③ 协议要绑定被盲化的消息承诺，防止「拿 A 的盲签名去签 B」 |
 | **实现要点（本轮查证）** | ⚠️ 读完 CIRCL `blindsign/blindrsa` 的源码后确认了三件事，直接决定改法：① **client 侧不需要私钥** —— `Client.Prepare` / `Blind` / `Finalize` 全是**客户端**操作，只要签发方的 **RSA 公钥**（`n`、`e`）就够了，服务端只做 `Signer.BlindSign(blindedMessage)`。因此 **CLI 可以立刻当真正的盲签名客户端**（Go 侧同库，零新依赖），而浏览器端需要自己实现 client 侧：SHA-384 + EMSA-PSS-ENCODE + RSA 盲化运算（BigInt 可做，但必须与 CIRCL **逐字节一致**，用 `ballot-cipher` 那套 KAT 纪律锁死）。② **签名端点必须绑定池槽位** —— 公开的盲签名端点会把签发方变成「任意消息签名预言机」：必须先给客户端预留一个槽位（拿到假名 `user_id`），盲签名只对这个槽位签，attest 时再用「最终签名验签 (user_id, user_pub_key)」把两边绑上 —— 客户端若拿 A 的盲签名去签 B，验签必然失败（验收 ② 因此可测）。③ **服务端在 attest 阶段仍会看到被签内容**（它必须把 `user_id` / `user_pub_key` 存下来），所以能力 F 的准确口径是「**签名阶段**服务端只见盲化消息」，不是「全程看不见」—— 文档口径要按这个写，别写成做不到的承诺 |
-| **落地核对（部分）** | ✅ **client 侧已完成**（本轮）：`web/src/lib/blind-rsa.ts` + `sha384.ts` —— RFC 9474 RSABSSA-PSS-Deterministic 的 `Prepare` / `Blind` / `Finalize`、EMSA-PSS 编码、MGF1、SHA-384，纯 TypeScript 实现（不依赖 WebCrypto：`crypto.subtle` 要求安全上下文，内网 http 部署会失效）。与 CIRCL **逐字节一致**，跨语言向量由 `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧用 CIRCL 真库，固定密钥 + 固定盐 + 固定盲化因子）与 `web/src/lib/blind-rsa.test.ts` 共同锁定 —— 盲化消息与解盲后的签名两侧都一致。⏳ **未做**：两段式协议（预留槽位 → 盲签名 → attest 验签）、服务端 `Issue` 拆分、CLI 与门户接线 |
-| 验收 | ① 端到端：客户端拿到的凭证，服务端**在签名阶段**只见盲化消息；② 交叉攻击测试：用 A 的盲签名 finalize 出 B 的凭证 → 校验失败；③ 服务端代码里不再出现「同一个函数里 Prepare+BlindSign+Finalize」 |
-| 预估 | 5–7 天 |
-| 依赖 | T14（需要客户端承载 crypto）、T9（凭证池路径） |
-| 备注 | 代价高、收益是「签发方看不到被签内容」。**§6 决策 D4 已拍板走真两段式**（不走「只改文档」的退化路径）—— 但它排在 T14 之后，且是 M2 里最可能拖垮发版的一项；若真做不完，退化路径仍是「改文档如实说明」，且**必须在 CHANGELOG 写明** |
+| **落地核对** | ✅ **全部完成**（2026-10-21）。① **领域接口拆分**：`domaincrypto.CredentialIssuer` 变成 `BlindSign(ctx, keyVersion, blindedMessage)` / `IssuerPublicKey(ctx)` / `VerifyCredential(userID, userPubKey, signature)` 三个方法，一次性的 `Issue` 已删除 —— 签发方不再有「同时看见消息并签名」的入口。② **协议三步**：`POST /proposals/:id/credentials/claim`（只预留，请求体为空，**不收公钥**）→ `POST /proposals/:id/credentials/blind-sign`（只对**池里还空着的槽位**签名）→ `POST /proposals/:id/credentials/attest`（先验签再落库）。③ **管理端同样走真两段式**：`POST /api/v1/credentials`（指定 `user_id` 预留）+ `POST /api/v1/credentials/blind-sign`（任意 `user_id`，走全局路径是因为 gin 的路由树不允许同路径挂两套中间件）。④ **客户端实现**：浏览器端 `web/src/lib/credential.ts`（+ 已有的 `blind-rsa.ts`），Go 端 `internal/infrastructure/crypto/credential_client.go`（CLI 与 e2e 共用）；跨语言向量除盲签名本身外，**凭证消息**（`sha256(user_id ‖ 0x00 ‖ user_pub_key)`）也由 `blind_rsa_interop_test.go` 与 `web/src/lib/credential.test.ts` 锁死。⑤ **CLI 与门户接线**：`credential-claim` / `credential-issue` / 门户的「领取凭证」「签发凭证」都走完整流程。⑥ **槽位竞争**：预留不占位 → 并发领取会抢同一槽位，重试放**客户端**（最多 5 次，只在 attest 返回 409 `CREDENTIAL_EXISTS` 时重试；409 的 `CREDENTIAL_POOL_EMPTY` 不重试）。**没有新增 schema 列** —— 槽位绑定用 `CredentialClaim` 既有字段 + 新增的 `GetAvailableByUserID` 查询实现 |
+| 验收 | ① 端到端：客户端拿到的凭证，服务端**在签名阶段**只见盲化消息 —— ✅ `tests/e2e/blind_signature_test.go` 的 `TestAPI_TwoPhaseBlindSignature_E2E`（断言预留请求体里没有 `user_pub_key`，盲签名阶段收到的字节 ≠ 凭证消息原文）；② 交叉攻击测试：用 A 的盲签名 finalize 出 B 的凭证 → 校验失败 —— ✅ `TestAPI_BlindSignatureCrossAttack_E2E`（两种交叉都 401 `INVALID_CREDENTIAL`）；③ 服务端代码里不再出现「同一个函数里 Prepare+BlindSign+Finalize」 —— ✅ `Issue` 已删除，`kryptology_credential_issuer.go` 里服务端只做 `BlindSign(盲化消息)`；④ 外加「公开盲签名端点必须绑定池槽位」（`TestAPI_BlindSignRequiresPoolSlot_E2E`）与「槽位被抢时客户端换槽位重来」（`TestAPI_ClaimRetriesWhenSlotTaken_E2E`） |
+| 预估 | 5–7 天（实际约 1 个工作日 —— 客户端侧早已就位，改动集中在协议与服务端） |
+| 依赖 | T9（凭证池路径）✅；T14 **不是硬依赖** —— 两段式的客户端侧只需签发方公钥，不需 prover（实际执行顺序提前到 T14 之前，理由见 §6 决策 D3） |
+| 备注 | **口径**：能力 F 达成的是「**签名阶段**服务端只见盲化消息」。attest 阶段服务端仍然看得到 `user_id` 与 `user_pub_key`（验签必须重算凭证消息）—— 文档不能写成「全程看不见」 |
 
 #### T18 · 投票路径补 `VerifyCredential` ✅ 已落地
 
