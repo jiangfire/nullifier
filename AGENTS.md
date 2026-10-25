@@ -50,6 +50,8 @@
 - 前端用 vitest，测试文件与源码同目录（如 `web/src/lib/datetime.test.ts`）；`.vue` 面板走**服务端渲染测试**（`web/src/components/panels/panels.test.ts`），`.vue` 能在 vitest 里跑是因为 `web/vitest.config.ts` 里自写了 SFC 编译插件（`vue/compiler-sfc` + `typescript`，不新增依赖）
 - 改动涉及接口、密码学或持久化逻辑时**必须补回归测试**；合入前至少 `go test ./...` 且覆盖率脚本通过
 - `tests/e2e/wasm_prover_test.go` 会**编译 WASM 模块并用 node 驱动它**（缺 node 时跳过；CI 的 go job 装了 node，因此 CI 上会真跑）。改 `cmd/ballot-wasm` 或 `ballot.ProveBallot` 时这条用例要一起看
+- **跨语言的东西要双向锁死，字符串也算**：Go↔TS 的密码学除向量外，变体名 / 字段名 / 编码这些**字符串**也要两边各钉一条断言（如盲签名变体的线路名 `RSABSSA-SHA384-PSS-Deterministic`：`internal/infrastructure/crypto/blind_rsa_interop_test.go` 的 `TestKAT_BlindRsaVariantName` + `web/src/lib/credential.test.ts`）。两边各拿自己的常量自证是**测不出**这类问题的 —— 2026-10-25 的真实浏览器验收就是靠「真浏览器对真服务端」把它挖出来的
+- **门户的浏览器端路径没有自动化**：仓库里没有 Playwright，改完门户的密码学接线要用真浏览器人工点一遍（领凭证 → 本地生成选票 → 提交 → 计票），步骤见 `docs/deployment-checklist.md` §8
 - 覆盖率有两个口径，别混用：**门槛口径 80.4%**（`check-coverage.sh` 选中的 11 个包：usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server），**全仓口径 74.2%**（2026-10-21 实测）。门槛是**逐包分档**的（门槛值见 `scripts/coverage-thresholds.txt`），单个包回退会直接让 CI 变红；`internal/infrastructure/persistence`（63.3%）是当前最低的一档，抬门槛时它会先卡住
 - CI 实际执行：`go test ./...` + `bash ./scripts/check-coverage.sh 80 coverage.ci.out`，**另加** gofmt 检查、前端 lint / tsc / vitest（`.github/workflows/ci.yml`）
 

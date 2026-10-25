@@ -300,6 +300,17 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
    - 🟡 **已用服务端渲染补上一半**（本轮落地）：`web/src/components/panels/panels.test.ts`
      （15 个用例）把面板渲染成 HTML 字符串，模板 / setup / computed 都真跑一遍。
      ⚠️ **不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载。
+   - ✅ **浏览器端的关键路径已在真实浏览器里跑通**（2026-10-25，Chromium / Electron）：
+     门户的静态资源三件套（`wasm_exec.js` / `ballot-prover.wasm` / `proving.key`）从浏览器
+     真实加载 → WASM 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 凭证匿名领取（claim →
+     blind-sign → attest 三步全过）→ 服务端以真 verifying key 验签通过（201）→ 提案关闭后
+     解密计票，还原出浏览器端选的那个选项（`{"tally":{"candidate-B":1}}`）。
+     ⚠️ **闭合的是「WASM 路径在真实浏览器里可用」，不是「门户有 UI 自动化回归」** ——
+     仓库仍然没有 Playwright 之类的浏览器自动化，面板交互仍靠人工核对。
+   - 这次真实浏览器验收还挖出一个**只靠 node 测不出来的跨语言 bug**：门户把盲签名变体名
+     写成了 Go 的枚举标识符，服务端发的是 CIRCL 的线路名 —— 领取流程会停在 claim 之后
+     （blind-sign 从未发出）。已修（`fix(web): use the CIRCL wire name for the blind
+     signature variant`），并加了 Go/TS 两侧的跨语言锁定。
 3. **并发投票下的防重投与性能容量** —— 唯一索引兜底，但没测过
    - 🟡 **防重投这一半已补**（本轮落地）：`tests/e2e/concurrent_nullifier_test.go` ——
      8 个请求**同时**用同一个 nullifier、各自带不同凭证提交，断言恰好 1 张票入库、
@@ -328,8 +339,8 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 4 | 存在「proof 可以跨提案复用」的路径 | ✅ **已过** —— 公开输入由服务端自拼，跨提案 / 跨 nullifier 复用均验签失败 |
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
 | 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.4% |
-| 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 140 个用例全过 |
-| 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未开工（盲区 3 的「防重投」与「容量」两半已补；盲区 1 的 PG 集成测试已有 compose + `make pg-test` 可复现脚本，⚠️ 本机无 Docker 未实跑；盲区 2 的浏览器渲染仍未做） |
+| 7 | 前端 lint / tsc / vitest 任一失败 | ✅ **已过** —— 149 个用例全过 |
+| 8 | §4.3 三项盲区没有可复现输出 | ❌ **未过** —— T20 未开工（盲区 3 的「防重投」与「容量」两半已补；盲区 1 的 PG 集成测试已有 compose + `make pg-test` 可复现脚本，⚠️ 本机无 Docker 未实跑；盲区 2 已闭合「WASM 路径在真实浏览器里可用」这一半，⚠️ 但门户面板仍没有 UI 自动化回归） |
 | 9 | README / techspec / 门户三处的匿名性声明不一致 | 🟡 **本轮已同步，待复核** —— 三处与 §4.1 的能力表对齐 |
 
 **Go**
@@ -468,6 +479,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | **落地核对（部分）** | ✅ **①②已完成**（本轮补齐，路线图 T14 的前置件）：浏览器端新增 `web/src/lib/{field,sha256,keccak,mimc}.ts` 与扩展后的 `web/src/lib/nullifier.ts` —— SHA-256 映射提案 ID、legacy Keccak-256 链派生 91 个 MiMC 轮常量、Fr 上的 MiMC（轮函数 `(x+h+c)^5` + Miyaguchi–Preneel），与 Go 侧 `ballot/nullifier.go` **逐位一致**；跨语言向量由 `internal/infrastructure/crypto/ballot/nullifier_interop_test.go` 与 `web/src/lib/{mimc,nullifier}.test.ts` 共同锁定，Go 侧还真的用这组值出了一份证明并验过（**浏览器算出的 nullifier，电路认**）。✅ **③已完成**（随 prover 一起改）：nullifier 改由 `ballot.ProveBallot` 在本地随机秘密后派生（`MiMC(s, proposal_id)`），秘密不出本地；门户表单里那个可手填的 nullifier 字段只作为低频工具保留。SHA-256 没用 WebCrypto：`crypto.subtle` 要求安全上下文，门户部署在内网 http 地址下会失效 |
 | **浏览器侧补齐（2026-10-21）** | ✅ **浏览器端 prover 已落地**，但**路线与任务卡原文不同**：不是「gnark 官方 wasm 模板」（离线装不上 `gnark-wasm` / `snarkjs` / `@noble/curves`），而是**把仓库自己的 Go 侧电路编译成 WASM** —— `cmd/ballot-wasm`（`GOOS=js GOARCH=wasm`），在全局对象上注册 `nullifierProver`（`init` / `prove`）。门户侧：`web/src/workers/ballot-prover.worker.ts` 在 Worker 里加载 Go 官方胶水 `wasm_exec.js` 与 `ballot-prover.wasm`，主线程 `web/src/lib/wasm-prover.ts` 只做编排；`useVotePortal.ts` 的 `generateBallotLocally` 取计票公钥 → 调 prover → 把密文 / 证明 / nullifier 写进表单。**密码学全在 Go 侧**：加密、nullifier 派生、公开输入拼装（`ballot.BuildPublicInputs`）与出证明都在 `ballot.ProveBallot` 里一次做完，因此客户端与服务端拼出的公开输入逐字段相同。**实测**：初始化 7.6 秒（编译电路）、出证明 2.25 秒、证明 128 字节。**证据**：`tests/e2e/wasm_prover_test.go` —— node 加载**门户将要加载的那个 WASM 模块**，服务端配真 verifying key，改一个字节的证明必须 400 且不落库，计票还原出客户端选的选项。**代价**：模块约 11.9 MB（gzip 约 2.8 MB）+ proving key 1.2 MB，首次出票要下载；proving key 由运营方发布到门户静态目录（`make web-proving-key`），**不进服务端、不入库** |
 | **CLI 侧补齐（2026-10-21）** | ✅ **CLI 现在能自己出证明**（G9 拍板为「两个都要」）：新增命令 `ballot-prove -ballot-file -proving-key [-out]` —— 读选票文件 → 用本地 proving key 生成 Groth16 证明 → 写回文件。**证明全程不经过服务端**，proving key 只在客户端（服务端只拿 verifying key）。选票文件因此多存四项本地见证材料：`nonce`（电路约束 `a = r·G` 要用）、`option_index`（私有见证）、`num_options`（公开输入之一）、`election_public_key`（未压缩计票公钥）—— 它们**都不提交给服务端**。公开输入走服务端同一套拼装入口 `ballot.BuildPublicInputs`，客户端与服务端算出同一份才验得过；计票公钥客户端拿到的是未压缩形式、服务端用压缩形式，客户端用新增的 `ballot.CompressPoint` 转成同一形式。**证据**：`tests/e2e/client_prover_test.go` —— 服务端配**真的 verifying key**，证明由客户端本地生成，改一个字节的证明必须 400 且不落库，服务端以**非 debug 模式**启动（`ballot-draft` 是 404）因此这张票只可能来自客户端 |
+| **真实浏览器验收（2026-10-25）** | ✅ **浏览器端 prover 已在真实浏览器里跑通**（Chromium / Electron）：门户静态目录的三个文件（`wasm_exec.js` / `ballot-prover.wasm` / `proving.key`）由浏览器真实加载，初始化 11.8~14.3 秒、出证明 2.9 秒、证明 128 字节；产出的密文 / nullifier / proof 被服务端以**真 verifying key** 验签通过（201），提案关闭后解密计票还原出浏览器端选的那个选项（`{"tally":{"candidate-B":1}}`）。凭证的匿名领取也在同一浏览器里跑通（claim → blind-sign → attest 三步全过）。**这次验收挖出并修掉了一个跨语言 bug**：门户把盲签名变体名写成 Go 的枚举标识符（`SHA384PSSDeterministic`），而服务端发的是 CIRCL 的**线路名**（`RSABSSA-SHA384-PSS-Deterministic`）—— 领取流程会停在 claim 之后（blind-sign 从未发出）。这类字符串不一致在单测里测不出来（两边各拿自己的常量自证），只有真浏览器对真服务端才暴露；已加 Go/TS 两侧的跨语言锁定 |
 | 验收 | ① 浏览器端生成的 proof 能通过服务端 `Verify`（e2e 用例）；② proof 绑定的公开输入与服务端自拼的一致 |
 | 预估 | 5–7 天 |
 | 依赖 | T13 |
@@ -544,7 +556,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 问题 | review §5 列的三项**从未被验证**：① PostgreSQL testcontainers 集成测试；② 门户 7 个 `.vue` 面板的浏览器实际渲染；③ 并发投票下的防重投与性能容量。 |
 | 证据 | `docs/release-review-2026-10-20.md` §5 |
 | 改法 | ① Docker 环境跑通 `tests/integration`（CI 会实跑，本地补一份 compose）；② 引入 Playwright 覆盖关键路径（领凭证 → 投票 → 查询状态 → 计票）；③ 用 `hey`/`k6` 写并发投票脚本，验证防重投（唯一索引兜底）与容量 |
-| 落地核对 | ① ⏳ CI 已实跑 PG 集成测试，本机无 Docker 走跳过分支；✅ **compose 已补**（仓库根 `docker-compose.yml` + `make pg-test`：起库 → 跑 `go test ./tests/integration/ -run Postgres` → 关库），且集成测试新增**外部库路径**（设 `ANONVOTE_TEST_PG_HOST` 即连已有 PostgreSQL，每个测试开一个独立 schema 并在跑完时 `DROP SCHEMA ... CASCADE`）—— 两条路径共用同一份测试代码，本地与 CI 跑的是同一套断言；② 🟡 **Playwright 离线装不了，但盲区已用另一种方式部分补上**：门户 7 个 `.vue` 面板此前**既无类型检查也无测试**（`tsc` 不认 `.vue`），现在有**服务端渲染测试**（`web/src/components/panels/panels.test.ts`，15 个用例）—— 模板、setup、computed 都会真跑一遍，顺带覆盖了 T2 的 debug 门控（非 debug 模式下按钮不渲染）。⚠️ **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载，视觉与交互仍靠人工核对；③ 🟡 **防重投这一半已落地**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求 + 同一 nullifier + 不同凭证，断言恰好 1 张票入库、其余 409 `DOUBLE_VOTING`（本机可复现，`go test ./tests/e2e/ -run TestAPI_ConcurrentSameNullifier_E2E`）；**容量这一半也已落地**：新工具 `cmd/loadtest`（纯 HTTP API，不碰数据库）输出吞吐 / 延迟分位 / 状态分布 / 防重投结论，`-json` 可机器读，**防重投没守住时退出码非 0**；本机实测 200 票 / 并发 20 → 257 req/s、200 张全 201、同 nullifier 并发 8 次恰好放行 1 张（⚠️ SQLite 单写者 + 只能在 debug 模式跑，**不是容量规划**） |
+| 落地核对 | ① ⏳ CI 已实跑 PG 集成测试，本机无 Docker 走跳过分支；✅ **compose 已补**（仓库根 `docker-compose.yml` + `make pg-test`：起库 → 跑 `go test ./tests/integration/ -run Postgres` → 关库），且集成测试新增**外部库路径**（设 `ANONVOTE_TEST_PG_HOST` 即连已有 PostgreSQL，每个测试开一个独立 schema 并在跑完时 `DROP SCHEMA ... CASCADE`）—— 两条路径共用同一份测试代码，本地与 CI 跑的是同一套断言；② 🟡 **Playwright 离线装不了，但盲区已用另一种方式部分补上**：门户 7 个 `.vue` 面板此前**既无类型检查也无测试**（`tsc` 不认 `.vue`），现在有**服务端渲染测试**（`web/src/components/panels/panels.test.ts`，15 个用例）—— 模板、setup、computed 都会真跑一遍，顺带覆盖了 T2 的 debug 门控（非 debug 模式下按钮不渲染）。⚠️ **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载，视觉与交互仍靠人工核对；✅ **但浏览器端的关键路径已在真实浏览器里跑通**（2026-10-25）：静态资源三件套真实加载 → WASM 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 凭证匿名领取三步全过 → 服务端真验签通过（201）→ 解密计票还原出所选选项。这次验收还挖出并修掉了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而非线路名，会让领取流程停在 claim 之后）—— 这类问题单测测不出来，只有真浏览器对真服务端才暴露；③ 🟡 **防重投这一半已落地**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求 + 同一 nullifier + 不同凭证，断言恰好 1 张票入库、其余 409 `DOUBLE_VOTING`（本机可复现，`go test ./tests/e2e/ -run TestAPI_ConcurrentSameNullifier_E2E`）；**容量这一半也已落地**：新工具 `cmd/loadtest`（纯 HTTP API，不碰数据库）输出吞吐 / 延迟分位 / 状态分布 / 防重投结论，`-json` 可机器读，**防重投没守住时退出码非 0**；本机实测 200 票 / 并发 20 → 257 req/s、200 张全 201、同 nullifier 并发 8 次恰好放行 1 张（⚠️ SQLite 单写者 + 只能在 debug 模式跑，**不是容量规划**） |
 | 验收 | 三项都有**可复现的脚本 + 输出**，并把结果贴进 PR |
 | 预估 | 2–3 天 |
 | 依赖 | T14（浏览器端投票链路才完整） |

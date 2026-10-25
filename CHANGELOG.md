@@ -218,23 +218,48 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 
 ### 修复
 
+- **门户的盲签名变体名此前写错了，领取凭证这条路在真浏览器里是断的。** 服务端在
+  `issuer_key` 响应里回的 `variant` 是 CIRCL `blindsign/blindrsa` 的**线路名**
+  `RSABSSA-SHA384-PSS-Deterministic`，门户写的是 Go 侧的枚举标识符
+  `SHA384PSSDeterministic` —— 两个不同的字符串。`parseIssuerKey` 因此直接抛错，流程停在
+  预留之后（服务端只看到 claim，blind-sign 从未发出），界面上表现为「领取失败：签发方公钥
+  不可用」；**匿名领取与管理端签发两条路都走不通**。CLI 不受影响（它比的是同一个库的
+  `String()`），单测也测不出来（两边各拿自己的常量自证）—— 2026-10-25 的真实浏览器验收
+  才暴露出来。
+  - 门户改用线路名；Go 侧新增 `TestKAT_BlindRsaVariantName`、TS 侧新增一条断言，两边指向
+    同一个字符串。
+- **`result-publish -shares-file` 读不了 `decrypt-setup -out` 落盘的文件。** `decrypt-setup`
+  写的是整个会话对象（`{"proposal_id","public_key","shares":[...]}`），而 `loadShares` 只认
+  JSON 数组或纯文本行 —— 把刚生成的会话文件直接喂回去，会被当成一整行垃圾，服务端回
+  400 `share does not belong to session`。现在可以直接吃这个文件（也仍接受 JSON 数组与
+  纯文本行）。
 - Release 正文改用 tag 里的发版说明，而不是自动生成的提交列表；正文从 GitHub API 读 tag 对象，
   不依赖 checkout 把 tag 落成什么形态的引用。
 
 ### 测试
 
+- **浏览器端 prover 在真实浏览器里跑通了**（2026-10-25，Chromium / Electron）：门户静态目录的
+  三个文件（`wasm_exec.js` / `ballot-prover.wasm` / `proving.key`）由浏览器真实加载，
+  初始化 11.8~14.3 秒、出证明 2.9 秒、证明 128 字节；产出的密文 / nullifier / proof 被服务端
+  以**真 verifying key** 验签通过（201），提案关闭后解密计票还原出浏览器端选的那个选项
+  （`{"tally":{"candidate-B":1}}`）。凭证的匿名领取（claim → blind-sign → attest）也在同一
+  浏览器里跑通。
 - **并发下的防重投现在有回归测试了**（路线图 §4.3 的第三个盲区）：8 个请求**同时**用
   同一个 `nullifier`、各自带不同凭证提交，断言**恰好一张票入库**，其余全部被唯一
   索引拦成 409 `DOUBLE_VOTING`。这条覆盖的是 usecase「先查后写」查不住的那一半 ——
   真正的防线是 `votes.nullifier` 的唯一索引。
+- **修掉一个 flaky 用例**：`TestAPI_VoteFlow_ConcurrentSameUser_E2E` 打在 SQLite 共享缓存的
+  内存库上 —— 共享缓存用表级锁、`busy_timeout` 对它无效，两个并发投票会双双抛
+  `database table is locked`，「恰好一张票入库」的断言偶发失败。改用文件库 + WAL
+  （与 `concurrent_nullifier_test.go` 同一套 DSN）后连跑 5 次稳定通过。
 
-> **本轮还没有做到的事**（别把 v0.2.0 当成已完成的版本）：浏览器端 prover 未实现，
-> **release 模式下门户仍然无法完成一次投票**；明文选项对服务端不可知这条**只闭合了一半** ——
-> **CLI 侧已闭合**（`ballot-encrypt` 本地加密 + `ballot-prove` 本地出证明，服务端用真
-> verifying key 验签，票是真的），**门户还没接上**（缺浏览器端 prover），
-> debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径；门户的 nullifier 也还是
-> 随机域元素（浏览器端已能算出与电路一致的值，等 prover 一起接线）。凭证签发的两段式
-> 盲签名**已闭合**。详见 [`docs/roadmap.md`](./docs/roadmap.md) §4.1 的能力状态表。
+> **本轮还没有做到的事**（别把 v0.2.0 当成已完成的版本）：**一人一票还没有强制手段**
+> （T22 未开工 —— 凭证匿名随机领取，同一个人可以领两张票投两次）；明文选项对服务端不可知这条
+> **还差最后一步** —— 客户端加密已闭合（CLI 与门户两侧都能本地出票），但 **debug 模式的
+> `ballot-draft`**（服务端代加密）仍是「服务端知道选项」的那条路径，release 模式 404；
+> 门户面板仍**没有浏览器自动化回归**（仓库无 Playwright，交互靠人工核对）；
+> PostgreSQL 集成测试在本机（无 Docker）仍未实跑。凭证签发的两段式盲签名**已闭合**。
+> 详见 [`docs/roadmap.md`](./docs/roadmap.md) §4.1 的能力状态表。
 
 ---
 

@@ -304,6 +304,9 @@
   计票公钥）。它们**只留在本地文件里**，`vote-submit` 不提交它们。`option_index` 用指针
   存 —— 0 是合法下标，`omitempty` 会把它吞掉。
 - **`decrypt-setup` 不带 `-out` 时会把门限份额打印到 stdout**。
+- **`decrypt-setup -out` 落盘的是会话对象**（`{"proposal_id","public_key","shares":[...]}`），
+  `result-publish -shares-file` 直接吃这个文件（也接受 JSON 数组、纯文本行）。形状对不上时
+  服务端会把整份 JSON 当一个份额，回 400 `share does not belong to session`。
 - **`ballot-draft` 只在 debug 模式可用**：release 模式下服务端返回 404，CLI 拿不到草稿。
 
 ### 1.9 压测工具 —— `cmd/loadtest/main.go`
@@ -452,10 +455,13 @@ publish        → 提案必须已关闭（isProposalClosed）
 21. **浏览器端与 Go 侧的选票密文必须逐字节一致。** 密文点编码一旦有一处偏差，服务端就解不开客户端投的票，而且**不会报错**（只是计票结果对不上）。唯一防线是那组跨语言已知答案向量：`internal/infrastructure/crypto/ballot/kat_interop_test.go`（Go 侧断言向量并解出选项下标）与 `web/src/lib/ballot-cipher.test.ts`（TS 侧断言产出同一串密文）。**改任何一边的曲线参数或编码，都要重新生成并同步这两处。**
 22. **计票公钥以未压缩形式给客户端**：`GET /api/v1/proposals/:id/election-key` 返回 X 与 Y 各 32 字节。原因是压缩点要在标量域里求平方根才能解压（`r ≡ 1 mod 4`，走 Tonelli-Shanks），浏览器端不必背这个包；代价是接口多一种编码方式，改接口时别改回压缩形式。
 23. **浏览器端的 nullifier 派生必须与 Go 侧逐位一致。** 电路约束是 `nullifier = MiMC(秘密, 提案域元素)`：SHA-256 映射提案 ID、Keccak-256 链派生 91 个 MiMC 轮常量、轮函数 `(x+h+c)^5`、外层 Miyaguchi–Preneel。差一位，浏览器就出不了证明（而且**不会报错**，只是验签失败）。防线是同一组跨语言向量：`internal/infrastructure/crypto/ballot/nullifier_interop_test.go`（Go 侧断言向量，并真的用这组值出一份证明验过）与 `web/src/lib/mimc.test.ts` / `web/src/lib/nullifier.test.ts`（TS 侧断言同一组值）。**改任一侧的哈希、轮常量或域运算，都要重新生成并同步这几处。**
-24. **浏览器端的盲签名 client 侧必须与 CIRCL 逐字节一致。** `web/src/lib/blind-rsa.ts` 实现 RFC 9474 的 `Prepare` / `Blind` / `Finalize` 与 EMSA-PSS 编码，服务端用 CIRCL `blindsign/blindrsa`（变体 `SHA384PSSDeterministic`）。两侧对同一条消息盲化出的消息必须一模一样，否则解出来的签名验不过 —— **而且不会报错**，只是验签失败。防线是 `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧用 CIRCL 真库，固定密钥 + 固定盐 + 固定盲化因子）与 `web/src/lib/blind-rsa.test.ts`。
+24. **浏览器端的盲签名 client 侧必须与 CIRCL 逐字节一致。** `web/src/lib/blind-rsa.ts` 实现 RFC 9474 的 `Prepare` / `Blind` / `Finalize` 与 EMSA-PSS 编码，服务端用 CIRCL `blindsign/blindrsa`（线路变体 `RSABSSA-SHA384-PSS-Deterministic`，即 `blindrsa.SHA384PSSDeterministic.String()`）。两侧对同一条消息盲化出的消息必须一模一样，否则解出来的签名验不过 —— **而且不会报错**，只是验签失败。防线是 `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧用 CIRCL 真库，固定密钥 + 固定盐 + 固定盲化因子）与 `web/src/lib/blind-rsa.test.ts`。
     - 关键事实：**client 侧只需要签发方的 RSA 公钥**（`n`、`e`），不需要私钥 —— 这是两段式盲签名能落地的前提。
     - 改任一侧的 PSS 编码 / MGF1 / 哈希 / 盐长度，都要重新生成并同步这两处。
 25. **凭证消息的两端实现必须逐字节一致。** 凭证消息是 `sha256(user_id ‖ 0x00 ‖ user_pub_key)`：Go 侧 `crypto.CredentialMessage`、TS 侧 `web/src/lib/credential.ts` 的 `credentialMessage`。服务端验签时重算的是同一条消息，对不上就是验签失败 —— **而且不会报错**，只是凭证被判无效。防线是 `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧断言向量）与 `web/src/lib/credential.test.ts`（TS 侧断言同一组值）。**分隔符 `0x00` 不能省**：没有它，`(a, b)` 与 `(a‖0x00, b)` 会撞。
+26. **盲签名变体名要用线路名，不是 Go 的枚举名。** 服务端在 `issuer_key` 响应里回的 `variant` 是 CIRCL 的线路名 `RSABSSA-SHA384-PSS-Deterministic`；Go 侧的枚举标识符是 `SHA384PSSDeterministic`，两者**不是同一个字符串**。门户把后者写进 `supportedBlindSignatureVariant` 时，领取流程会停在第 ① 步之后（服务端只看到 claim，blind-sign 从未发出），界面上表现为「领取失败：签发方公钥不可用」—— 匿名领取与管理端签发两条路都断。**这类跨语言字符串不会自己暴露**：单测里两边都拿同一个常量自证，只有真浏览器 / 真服务端对跑才会露馅。防线：Go 侧 `TestKAT_BlindRsaVariantName` + TS 侧 `credential.test.ts` 的「变体名与服务端线路上的名字一致」。
+27. **`web/public/` 放的是构建产物，不是源码。** `wasm_exec.js`（来自 GOROOT）、`ballot-prover.wasm`（`make web-wasm` 生成）、`proving.key`（`make web-proving-key` 拷入）三个文件都不入库，eslint 也整目录忽略（否则 `make check` 会被 Go 官方胶水里的 lint 报错卡住）。构建顺序固定是 `web-wasm` → `web-proving-key` → `web-build`。
+28. **并发写要测试请用文件库 + WAL，不要用共享缓存的内存库。** SQLite 的共享缓存（`cache=shared`）用**表级锁**，`busy_timeout` 对它无效，并发写直接抛 `database table is locked` —— 表现为「两个并发请求双双失败」，而不是「恰好一个成功」。正确姿势：文件库 + `?_busy_timeout=10000&_journal_mode=WAL&_txlock=immediate`（见 `tests/e2e/concurrent_nullifier_test.go`），并记得 `t.Cleanup` 关掉句柄 —— 否则 Windows 上临时目录清不掉。
 
 ---
 
@@ -505,6 +511,15 @@ go run ./cmd/keygen -dir ./keys
 go run ./cmd/keygen -dir ./keys -force
 go test ./cmd/keygen/ -v
 
+# 浏览器里的真实出票验收（真浏览器 + 真服务端，人工跑一次）：
+#   1) make web-wasm && make web-proving-key PK=<proving.key 路径>
+#   2) release 模式起服务端（CRYPTO_VK_PATH 指向配对的 verifying.key）
+#   3) 门户「连接配置」填后端地址 → 投票大厅选提案 → 我的身份「匿名领取」
+#   4) 参与投票 → 选选项 →「在浏览器本地生成选票」（首次约 12~14 秒）→ 提交
+#   5) 服务端日志出现 vote submitted 201；提案关闭后 result-publish → result-get
+#      应当看到所选选项的票数
+#   跨语言字符串（盲签名变体名）只有这样对跑才会暴露 —— 见陷阱 26
+
 # 并发投票压测（需要一个本地 debug 服务；SQLite 建议用带 busy_timeout 的 DSN）
 go test ./cmd/loadtest/ -v        # 工具自身的测试（httptest 模拟服务端）
 go run ./cmd/loadtest -admin-token dev-admin-token -votes 200 -concurrency 20
@@ -540,11 +555,14 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
 
 ## 5. 尚未完成的部分（不要写成生产能力）
 
-- **浏览器端 prover 已落地，但「浏览器真实渲染」仍未验证。** WASM 模块
-  （`cmd/ballot-wasm`）在 node 下端到端跑通了（`tests/e2e/wasm_prover_test.go`：
-  init → prove → 提交 → 计票还原），门户侧也有编排测试；但**门户面板仍然不是浏览器
-  渲染**（见 §1.7），Worker 里的 WASM 加载路径**没有在真实浏览器里跑过**。
-  路线图 §4.3 的盲区 2 仍未闭合。
+- **浏览器端 prover 已在真实浏览器里跑通，但门户面板仍不是「浏览器渲染」回归。** WASM 模块
+  （`cmd/ballot-wasm`）在 node 下端到端跑通（`tests/e2e/wasm_prover_test.go`：
+  init → prove → 提交 → 计票还原），并在 2026-10-25 于**真实浏览器**（Chromium / Electron）
+  里跑通同一套链路：`wasm_exec.js` + `ballot-prover.wasm` + `proving.key` 三个静态资源从门户
+  目录加载，init 11.8~14.3 秒、prove 2.9 秒，产出的密文 / nullifier / proof 被服务端以真
+  verifying key 验签通过（201），计票还原出浏览器端选的那个选项。
+  但**门户面板仍没有浏览器自动化回归**（仓库无 Playwright，见 §1.7）—— 盲区 2 闭合的是
+  「WASM 路径在真实浏览器里可用」，不是「门户有端到端 UI 回归」。
 - **「一人一票」还缺资格证明（T22）。** 凭证是匿名随机领取的，服务端无法强制一人一票；
   补回这一条要靠零知识资格证明，依赖已落地的证明链能力。
 - **明文选项的彻底消除：debug 链路上仍有妥协。** 客户端本地加密与本地出证明都已落地

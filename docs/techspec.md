@@ -509,6 +509,12 @@ web/                        # Vue 3 前端门户
 - **实测**（node 驱动同一个 WASM 模块，见 `tests/e2e/wasm_prover_test.go`）：
   初始化 7.6 秒、出证明 2.25 秒、证明 128 字节；服务端以真 verifying key 验签通过，
   篡改一个字节的证明被 400 拒绝，计票还原出客户端选的那个选项。
+- **真实浏览器实测**（2026-10-25，Chromium / Electron）：在真浏览器里加载
+  `wasm_exec.js` + `ballot-prover.wasm` + `proving.key`，初始化 11.8~14.3 秒、出证明 2.9 秒，
+  服务端以真 verifying key 验签通过（201），计票还原出浏览器端选的那个选项
+  （`{"tally":{"candidate-B":1}}`）。这一次真实浏览器验收还挖出一个只靠 node 测不出来的
+  跨语言问题：门户把盲签名变体名写成了 Go 的枚举标识符，服务端发的是 CIRCL 的线路名 ——
+  见 §6.9。
 
 ### 6.9 凭证验签与真两段式盲签名
 
@@ -552,6 +558,14 @@ web/                        # Vue 3 前端门户
     与 `web/src/lib/blind-rsa.test.ts`（TS 侧）共同锁定。
   - 关键事实：CIRCL 的 client 侧**只需要签发方的 RSA 公钥**（`n`、`e`），不需要私钥 ——
     因此客户端可以自己盲化，服务端那一侧只剩 `Signer.BlindSign(blindedMessage)`。
+- **变体名是线路上的契约，两边必须一模一样**：`issuer_key` 响应里的 `variant` 字段是
+  CIRCL `blindsign/blindrsa` 的**线路名** `RSABSSA-SHA384-PSS-Deterministic`
+  （即 `blindrsa.SHA384PSSDeterministic.String()`），**不是** Go 侧的枚举标识符
+  `SHA384PSSDeterministic`。门户的 `supportedBlindSignatureVariant` 必须写线路名；
+  写错时 `parseIssuerKey` 直接抛错，领取流程停在 ① 之后（服务端只看到 claim，blind-sign
+  从未发出），浏览器端表现为「领取失败：签发方公钥不可用」。CLI 不受影响 —— 它比的是同一个
+  库的 `String()`。这条契约由 Go 侧 `TestKAT_BlindRsaVariantName` 与 TS 侧
+  `credential.test.ts` 的「变体名与服务端线路上的名字一致」一起钉死。
 - **管理端也走真两段式**（与匿名领取同一套协议，只是端点不同）：运营方指定
   `user_id` → 管理端客户端本地盲化 → 管理端 blind-sign → attest。管理端 blind-sign
   走全局路径 `/api/v1/credentials/blind-sign`，因为 gin 的路由树不允许同一路径挂
@@ -664,6 +678,11 @@ web/                        # Vue 3 前端门户
   重来（最多 5 次）。
 - `credential-issue` 管理端签发：同样走真两段式，只是走管理端端点、可以指定
   `user_id`。
+- **份额文件的形状**：`decrypt-setup -out` 落盘的是**整个会话对象**
+  （`{"proposal_id","public_key","shares":[...],"threshold","trustees"}`），
+  `result-publish -shares-file` 必须能直接吃这个文件（也接受 JSON 数组与纯文本行）。
+  两边对不上时，服务端会把整份 JSON 当成一个份额，回
+  `400 INVALID_REQUEST: share does not belong to session`。
 - 当前命令：
   - `health`
   - `version`

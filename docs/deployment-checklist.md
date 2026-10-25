@@ -168,9 +168,9 @@
 | 3 | 往凭证池投槽位 | `POST /api/v1/proposals/:id/credentials/pool`（管理端） | ☐ |
 | 4 | **初始化门限解密会话** | `POST /api/v1/proposals/:id/decryption/setup`。⚠️ **必须在投票窗口打开之前** —— 服务端会拒绝「投票开放中」的提案 | ☐ |
 | 5 | 开放投票窗口 | 提案的 `starts_at` / `ends_at` | ☐ |
-| 6 | 投票 | ✅ **CLI**：`ballot-encrypt` → `ballot-prove -proving-key <proving.key>` → `vote-submit`；✅ **门户**：选好选项 → 点「在浏览器本地生成选票」→ 提交（首次约 10 秒）；开发模式也可用 `ballot-draft` 的占位 proof 联调 | ☐ |
+| 6 | 投票 | ✅ **CLI**：`ballot-encrypt` → `ballot-prove -proving-key <proving.key>` → `vote-submit`；✅ **门户**：选好选项 → 点「在浏览器本地生成选票」→ 提交（首次约 12~14 秒，含编译电路）；开发模式也可用 `ballot-draft` 的占位 proof 联调 | ☐ |
 | 7 | 收集门限份额 | 每个计票方拿自己那一份 | ☐ |
-| 8 | 发布结果 | `POST /api/v1/proposals/:id/results/publish`（**仅在提案关闭后**） | ☐ |
+| 8 | 发布结果 | `POST /api/v1/proposals/:id/results/publish`（**仅在提案关闭后**）。CLI：`result-publish -proposal <id> -shares-file <decrypt-setup 落盘的文件>` —— 这个文件可以直接用 | ☐ |
 
 - 第 4 步的时机是最容易写错的一步：**会话被覆盖 = 已投的票解不开**。重复 setup
   返回 `409 DECRYPTION_SESSION_EXISTS`，不会覆盖已有会话。
@@ -203,14 +203,19 @@
 | `POST /api/v1/proposals/:id/ballot-draft` | **404**（release 模式不可达） | ☐ |
 | 领取凭证（无 admin token） | 能领到 —— 领取端点是公开的 | ☐ |
 | 管理端接口（无 token） | **401** | ☐ |
+| **浏览器里领一次凭证** | 「我的身份 → 匿名领取」成功，页面变成「已就绪」。**必须走到 attest**（服务端日志里能看到 `credential attested`）—— 停在 claim 之后说明浏览器端与服务端的盲签名参数对不上 | ☐ |
+| **浏览器里出一张票** | 「参与投票 → 在浏览器本地生成选票」（首次约 12~14 秒）→ 提交成功，服务端日志出现 `vote submitted` | ☐ |
 
 ---
 
 ## 9. 已知边界（写给用的人，不是给部署的）
 
-- **门户的浏览器端 prover 只在 node 下验过**（`tests/e2e/wasm_prover_test.go` 驱动同一个
-  WASM 模块）：仓库里没有浏览器自动化环境，真实浏览器里的 Worker + WASM 路径**没有
-  实跑过**。首次上线建议人工点一次「在浏览器本地生成选票」并提交一票。
+- **门户的浏览器端 prover 已在真实浏览器里跑通**（2026-10-25，Chromium / Electron）：
+  静态目录的三个文件由浏览器真实加载 → 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 服务端
+  以真 verifying key 验签通过（201）→ 提案关闭后计票还原出所选选项。
+  但**仓库里仍没有浏览器自动化**（无 Playwright），这条链路**每次上线仍要人工点一次**
+  「在浏览器本地生成选票」并提交一票 —— 而且这一步能抓到自动化抓不到的东西：跨语言字符串
+  对不上（例如盲签名变体名）时，流程会停在半路，服务端只看到 claim、收不到 blind-sign。
 - **服务端无法强制一人一票**：凭证是匿名随机领取的，同一个人可以领两张票投两次。
   资格证明（路线图 T22）尚未实现。
 - **防重投靠 `votes.nullifier` 的唯一索引**。数据库层要真的有唯一约束 ——
