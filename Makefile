@@ -25,7 +25,7 @@ endif
 
 .PHONY: help \
 	deps tidy build run cli loadtest \
-	test test-short cover \
+	test test-short cover pg-test \
 	vet fmt fmt-check \
 	web-install web-dev web-build web-test web-lint web-typecheck web-format web-format-check \
 	check ci clean
@@ -68,6 +68,21 @@ test-short: ## Run tests, skipping container-backed integration tests
 
 cover: ## Coverage gate (per-package floors in scripts/coverage-thresholds.txt)
 	bash ./scripts/check-coverage.sh $(or $(THRESHOLD),80) coverage.out
+
+pg-test: ## Run the PostgreSQL integration tests against a local compose database
+	@echo "starting postgres (docker compose) ..."; \
+	docker compose up -d --wait postgres; \
+	echo "running the postgres integration tests ..."; \
+	status=0; \
+	ANONVOTE_TEST_PG_HOST=127.0.0.1 \
+	ANONVOTE_TEST_PG_PORT=5432 \
+	ANONVOTE_TEST_PG_USER=test \
+	ANONVOTE_TEST_PG_PASSWORD=test \
+	ANONVOTE_TEST_PG_DATABASE=anonvote \
+	$(GO) test -count=1 -v ./tests/integration/ -run Postgres || status=$$?; \
+	echo "stopping postgres ..."; \
+	docker compose down -v || true; \
+	exit $$status
 
 # ---------- 静态检查 ----------
 
