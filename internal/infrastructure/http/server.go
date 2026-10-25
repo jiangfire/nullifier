@@ -33,9 +33,23 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 	gin.DebugPrintRouteFunc = func(string, string, string, int) {}
 	engine := gin.New()
 	engine.Use(middleware.CORS(cfg.CORSAllowedOrigins))
+	// 指标中间件必须排在错误处理器**之前**：gin 的中间件先进后出，越早注册的
+	// 回程越晚 —— 这样它拿得到最终状态码。
+	engine.Use(middleware.MetricsMiddleware(handler.Metrics()))
 	engine.Use(middleware.RequestLogger(logger))
 	engine.Use(middleware.Recovery(logger))
 	engine.Use(middleware.ErrorHandler(logger))
+
+	// Prometheus 指标端点。
+	//
+	// 它要管理员令牌：指标里虽然只有计数与耗时（没有任何选票内容或身份），
+	// 但「多少人投了票」「多少次资格证明没验过」本身就是运营状态 ——
+	// 按仓库的一贯口径，管理面接口一律要 Bearer 令牌。
+	engine.GET(
+		middleware.MetricsEndpointPath,
+		middleware.RequireAdminBearerToken(cfg.AdminBearerToken),
+		gin.WrapH(handler.Metrics().Handler()),
+	)
 
 	engine.GET("/healthz", func(c *gin.Context) {
 		// debug 标志只报运行状态：服务端是否处于开发联调模式本来就是公开事实。

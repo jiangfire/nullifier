@@ -29,7 +29,7 @@ func ErrorHandler(logger *zap.Logger) gin.HandlerFunc {
 		err := c.Errors.Last().Err
 		logger.Error("request failed", zap.Error(err))
 
-		status, code := mapError(err)
+		status, code := MapError(err)
 		message := publicErrorMessage(err, code)
 		c.JSON(status, gin.H{
 			"error": message,
@@ -38,7 +38,12 @@ func ErrorHandler(logger *zap.Logger) gin.HandlerFunc {
 	}
 }
 
-func mapError(err error) (int, string) {
+// MapError 把领域错误映射成 HTTP 状态码与机器可读的错误码。
+//
+// 它是**唯一**的错误码口径：响应体里的 code、指标里的 code 标签都出自这里。
+// 导出它是为了让 handler 能在记录指标时拿到同一个码 —— 两处各写一份映射，
+// 早晚会漂移。
+func MapError(err error) (int, string) {
 	switch {
 	case errors.Is(err, usecase.ErrInvalidRequest):
 		return http.StatusBadRequest, "INVALID_REQUEST"

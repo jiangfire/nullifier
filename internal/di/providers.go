@@ -8,6 +8,7 @@ import (
 	"anonvote/internal/domain/repository"
 	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	httpapi "anonvote/internal/infrastructure/http"
+	"anonvote/internal/infrastructure/metrics"
 	"anonvote/internal/infrastructure/persistence"
 	"anonvote/internal/usecase"
 
@@ -116,6 +117,13 @@ func NewMerkleRootBuilder() usecase.MerkleRootBuilder {
 	return cryptoinfra.NewGnarkMerkleRootBuilder()
 }
 
+// NewMetrics 造一个带独立注册表的指标实例。
+//
+// 全进程只有这一个实例：业务事件写进它，GET /metrics 端点从它读出来。
+func NewMetrics() *metrics.Metrics {
+	return metrics.New()
+}
+
 func NewCredentialIssuer(cfg *config.Config) domaincrypto.CredentialIssuer {
 	return cryptoinfra.NewKryptologyCredentialIssuerWithFile(
 		cfg.CredentialIssuerKeyPath,
@@ -218,6 +226,7 @@ func NewHTTPHandler(
 	proposalUC *usecase.ProposalUseCase,
 	participationUC *usecase.ParticipationUseCase,
 	tallyUC *usecase.TallyUseCase,
+	m *metrics.Metrics,
 	logger *zap.Logger,
 ) *httpapi.Handler {
 	return httpapi.NewHandlerWithTally(
@@ -227,7 +236,7 @@ func NewHTTPHandler(
 		participationUC,
 		tallyUC,
 		logger,
-	)
+	).WithMetrics(m)
 }
 
 func NewHTTPServer(cfg *config.Config, handler *httpapi.Handler, logger *zap.Logger) *httpapi.Server {
