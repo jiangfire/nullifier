@@ -30,7 +30,7 @@
 
 ## Project layout
 
-- `cmd/server` — HTTP 服务入口；`cmd/cli` — 命令行客户端（复用 HTTP API，不绕过服务端校验）；`cmd/loadtest` — 并发投票压测工具（只走 HTTP API，防重投失守时退出码非 0）；`cmd/ballot-wasm` — **浏览器端 prover**（`GOOS=js GOARCH=wasm` 构建，暴露 `nullifierProver` 全局对象；**四个 API**：`init` / `prove` / `initEligibility` / `proveEligibility`，同一个 WASM 模块；非 js/wasm 平台有 stub）；`cmd/eligibility-list` — **离线资格名单工具**（一人一票的名单生成器，不联网、不连服务端）；`cmd/keygen` — 出两套密钥（`-circuit ballot` 默认 / `-circuit eligibility`）
+- `cmd/server` — HTTP 服务入口；`cmd/cli` — 命令行客户端（复用 HTTP API，不绕过服务端校验）；`cmd/loadtest` — 并发投票压测工具（只走 HTTP API，防重投失守时退出码非 0；**凭证领取走真两段式盲签名，与门户/CLI 同一条链路** —— 改服务端协议时记得一起改它，见 project-map 陷阱 38）；`cmd/ballot-wasm` — **浏览器端 prover**（`GOOS=js GOARCH=wasm` 构建，暴露 `nullifierProver` 全局对象；**四个 API**：`init` / `prove` / `initEligibility` / `proveEligibility`，同一个 WASM 模块；非 js/wasm 平台有 stub）；`cmd/eligibility-list` — **离线资格名单工具**（一人一票的名单生成器，不联网、不连服务端）；`cmd/keygen` — 出两套密钥（`-circuit ballot` 默认 / `-circuit eligibility`）
 - `internal/domain` — 实体、仓储接口、密码学接口、领域错误（不依赖 HTTP/GORM/具体密码学库）；资格证明相关的领域件：`domain/crypto/eligibility.go`（资格校验接口）、`domain/entity/eligibility_use.go`（去重记录）、`domain/repository/eligibility_use_repo.go`（仓储接口）
 - `internal/usecase` — 业务编排（Proposal / Register / Voting / Participation / Tally），`usecase/mocks` 为 gomock 生成物
 - `internal/infrastructure` — `http`（Gin 路由/中间件/错误映射）、`persistence`（GORM 仓储与自动迁移）、`crypto`（gnark / kyber / kryptology）；`crypto/eligibility`（Merkle 名单承诺 + 资格电路 + prover；`TreeDepth=10` 是**编译期常量**，公开输入定长 5 个（root / proposal_id / challenge / 去重键 / 会话绑定），私有见证是秘密、位置与路径，实测约 6860 条约束）、`crypto/mimc`（选票与资格**共用**的 MiMC 实现，`Constants()` 供跨语言 KAT）、`crypto/eligibility_service.go`（资格校验的领域适配层，**没有**「跳过验签」的降级模式）

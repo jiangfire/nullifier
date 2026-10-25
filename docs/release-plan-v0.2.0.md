@@ -127,7 +127,7 @@ git push origin feat/v0.2.0-m2-proof-chain v0.2.0
 | **PG 集成测试** | `tests/integration/eligibility_postgres_test.go` 等 2 个新用例（一人一票的复合唯一索引在 PG 上的行为） | ✅ **已在本机真 PostgreSQL 17.7 上实跑通过**（2026-10-25：便携版 PG 起临时集群 + 集成测试的外部库路径，`go test ./tests/integration/ -run Postgres` 全过）；⏳ **testcontainers 那条路径仍要 CI 实跑** —— CI 的 go job 跑在 ubuntu-latest（自带 Docker），**缺 Docker 时测试失败而不是跳过** |
 | **浏览器路径（PG 形态）** | 同上，但服务端连的是**生产库形态**（PG + 资格校验强制）：`scripts/browser-acceptance.sh` 的 `DB_DRIVER=postgres` | ✅ **已跑通**（2026-10-25）：导入资格文件 → 匿名领取 201 → 重复领取 409 → 本地生成选票 → 提交 201 → 计票还原 `{"tally":{"beta":1},"total_votes":1}`（此前所有浏览器证据都跑在 SQLite 上） |
 | **门户 UI 自动化** | 无 | ⚠️ 仓库**没有** Playwright，门户交互只能人工点（步骤见部署清单 §8.1 / `scripts/browser-acceptance.sh`） |
-| 容量 | `cmd/loadtest`（200 票 / 并发 20 → 257 req/s，同 nullifier 并发 8 次恰好放行 1 张） | ⚠️ **不是容量规划** —— SQLite 单写者；容量规划按路线图属 v0.3.0 |
+| 容量 | `cmd/loadtest`（200 票 / 并发 20 → **164.1 req/s**，200 张全 201，同 nullifier 并发 5 次恰好放行 1 张、落库核对 201 == 预期 201） | ⚠️ **不是容量规划** —— SQLite 单写者；容量规划按路线图属 v0.3.0。⚠️ 这组数字是 2026-10-25 **按新协议重测**的（旧的那组 257 req/s 是 v0.1.0「一步式领凭证」时期测的，工具一度在新协议下完全跑不通，已修） |
 
 ---
 
@@ -202,6 +202,10 @@ git push origin feat/v0.2.0-m2-proof-chain v0.2.0
   集成测试外部库路径全过 → `scripts/browser-acceptance.sh` 的 `DB_DRIVER=postgres`
   跑完整条浏览器流程，计票还原 `{"tally":{"beta":1},"total_votes":1}`。
   **生产用的就是 PostgreSQL —— 这是本版最贴近生产形态的一条证据。**
+- ✅ **压测工具已跟上新协议**（2026-10-25）：`cmd/loadtest` 原先还在用 v0.1.0 的「一步式领凭证」，
+  在 v0.2.0 的服务端上**每张票 400、0 票入库**（报告看上去像「服务端扛不住」）——
+  已改为真两段式盲签名并补回归测试，重测 200 票 / 并发 20 → 164.1 req/s、200 张全 201、
+  同 nullifier 恰好放行 1 张、退出码 0。
 - ✅ **§2 的第 1、2 步已在分支上完成**：`VERSION` → `0.2.0`，`CHANGELOG.md` 的
   `[未发布]` → `## [0.2.0] — 2026-10-25`（并写明密文 v2 → v3 不兼容）。
   剩下的是第 3 步（打注解 tag）与第 4 步（推分支 + 推 tag）—— **等拍板**。

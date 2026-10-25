@@ -472,11 +472,16 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
      其余 7 个被唯一索引拦成 409 `DOUBLE_VOTING`。
    - ✅ **容量这一半已补**（本轮落地）：新工具 `cmd/loadtest` —— 纯 HTTP API 的并发投票压测，
      输出吞吐 / 延迟分位 / 状态分布 / 防重投结论，**防重投没守住时以非 0 退出**（结论能当门禁用）。
-     本机实测（SQLite + WAL + `_busy_timeout`，200 票 / 并发 20）：257 req/s，
-     p50=2.1ms p90=42.8ms p99=648.7ms，200 张全 201；同 nullifier 并发 8 次恰好放行 1 张、
-     其余 7 张 409 `DOUBLE_VOTING`。
+     本机实测（SQLite + WAL + `_busy_timeout`，200 票 / 并发 20）：**164.1 req/s**，
+     p50=3.56ms p90=325.6ms p99=1.107s，200 张全 201；同 nullifier 并发 5 次恰好放行 1 张、
+     其余 4 张 409 `DOUBLE_VOTING`；落库核对 201 == 预期 201。
+     ⚠️ 这组数字是 **2026-10-25 重测的**：旧的那组（257 req/s）是 v0.1.0 时期、
+     凭证签发还是「一步式」时测的 —— 协议改成真两段式盲签名后压测工具一度**跑不通**
+     （每张票 400 `INVALID_REQUEST`、0 票入库），现已修复并按新协议重测（修复记录见
+     本文附录的 T20 任务卡）。
      ⚠️ 这是**可复现脚本 + 一份实测输出**，不是容量规划：SQLite 的单写者把并发写串行化，
-     且客户端 prover 还没做（只能在 debug 模式跑）—— 容量规划按 §2.2 属 v0.3.0。
+     且**压测工具自己没有 prover**（只能在未加载 `crypto.vk_path` 的 debug 服务上跑）——
+     容量规划按 §2.2 属 v0.3.0。
 
 ---
 
@@ -727,7 +732,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 问题 | review §5 列的三项**从未被验证**：① PostgreSQL testcontainers 集成测试；② 门户 7 个 `.vue` 面板的浏览器实际渲染；③ 并发投票下的防重投与性能容量。 |
 | 证据 | `docs/release-review-2026-10-20.md` §5 |
 | 改法 | ① Docker 环境跑通 `tests/integration`（CI 会实跑，本地补一份 compose）；② 引入 Playwright 覆盖关键路径（领凭证 → 投票 → 查询状态 → 计票）；③ 用 `hey`/`k6` 写并发投票脚本，验证防重投（唯一索引兜底）与容量 |
-| 落地核对 | ① ✅ **PG 集成测试已在本机真 PostgreSQL 上实跑**（2026-10-25：用便携版 PostgreSQL 17.7 的二进制 `initdb` 起临时独立集群，走集成测试的**外部库路径** `ANONVOTE_TEST_PG_HOST`，`go test ./tests/integration/ -run Postgres` 全过 —— 含「一人一票」复合唯一索引的行为证明与并发用例）；✅ **整条浏览器验收也在 PG 上跑通**（`scripts/browser-acceptance.sh` 新增 `DB_DRIVER=postgres`，服务端连真 PG，计票还原出所选选项）；⏳ **testcontainers 那条路径仍要 CI 实跑**（CI 的 go job 跑在 ubuntu-latest，自带 Docker；缺 Docker 时集成测试**失败而不是跳过**，免得「跳过」被误读成「通过」）；✅ **compose 已补**（仓库根 `docker-compose.yml` + `make pg-test`：起库 → 跑 `go test ./tests/integration/ -run Postgres` → 关库），且集成测试新增**外部库路径**（设 `ANONVOTE_TEST_PG_HOST` 即连已有 PostgreSQL，每个测试开一个独立 schema 并在跑完时 `DROP SCHEMA ... CASCADE`）—— 两条路径共用同一份测试代码，本地与 CI 跑的是同一套断言；② 🟡 **Playwright 离线装不了，但盲区已用另一种方式部分补上**：门户 7 个 `.vue` 面板此前**既无类型检查也无测试**（`tsc` 不认 `.vue`），现在有**服务端渲染测试**（`web/src/components/panels/panels.test.ts`，16 个用例）—— 模板、setup、computed 都会真跑一遍，顺带覆盖了 T2 的 debug 门控（非 debug 模式下按钮不渲染）。⚠️ **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载，视觉与交互仍靠人工核对；✅ **但浏览器端的关键路径已在真实浏览器里跑通**（2026-10-25）：静态资源三件套真实加载 → WASM 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 凭证匿名领取三步全过 → 服务端真验签通过（201）→ 解密计票还原出所选选项。这次验收还挖出并修掉了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而非线路名，会让领取流程停在 claim 之后）—— 这类问题单测测不出来，只有真浏览器对真服务端才暴露；③ 🟡 **防重投这一半已落地**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求 + 同一 nullifier + 不同凭证，断言恰好 1 张票入库、其余 409 `DOUBLE_VOTING`（本机可复现，`go test ./tests/e2e/ -run TestAPI_ConcurrentSameNullifier_E2E`）；**容量这一半也已落地**：新工具 `cmd/loadtest`（纯 HTTP API，不碰数据库）输出吞吐 / 延迟分位 / 状态分布 / 防重投结论，`-json` 可机器读，**防重投没守住时退出码非 0**；本机实测 200 票 / 并发 20 → 257 req/s、200 张全 201、同 nullifier 并发 8 次恰好放行 1 张（⚠️ SQLite 单写者 + 只能在 debug 模式跑，**不是容量规划**） |
+| 落地核对 | ① ✅ **PG 集成测试已在本机真 PostgreSQL 上实跑**（2026-10-25：用便携版 PostgreSQL 17.7 的二进制 `initdb` 起临时独立集群，走集成测试的**外部库路径** `ANONVOTE_TEST_PG_HOST`，`go test ./tests/integration/ -run Postgres` 全过 —— 含「一人一票」复合唯一索引的行为证明与并发用例）；✅ **整条浏览器验收也在 PG 上跑通**（`scripts/browser-acceptance.sh` 新增 `DB_DRIVER=postgres`，服务端连真 PG，计票还原出所选选项）；⏳ **testcontainers 那条路径仍要 CI 实跑**（CI 的 go job 跑在 ubuntu-latest，自带 Docker；缺 Docker 时集成测试**失败而不是跳过**，免得「跳过」被误读成「通过」）；✅ **compose 已补**（仓库根 `docker-compose.yml` + `make pg-test`：起库 → 跑 `go test ./tests/integration/ -run Postgres` → 关库），且集成测试新增**外部库路径**（设 `ANONVOTE_TEST_PG_HOST` 即连已有 PostgreSQL，每个测试开一个独立 schema 并在跑完时 `DROP SCHEMA ... CASCADE`）—— 两条路径共用同一份测试代码，本地与 CI 跑的是同一套断言；② 🟡 **Playwright 离线装不了，但盲区已用另一种方式部分补上**：门户 7 个 `.vue` 面板此前**既无类型检查也无测试**（`tsc` 不认 `.vue`），现在有**服务端渲染测试**（`web/src/components/panels/panels.test.ts`，16 个用例）—— 模板、setup、computed 都会真跑一遍，顺带覆盖了 T2 的 debug 门控（非 debug 模式下按钮不渲染）。⚠️ **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载，视觉与交互仍靠人工核对；✅ **但浏览器端的关键路径已在真实浏览器里跑通**（2026-10-25）：静态资源三件套真实加载 → WASM 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 凭证匿名领取三步全过 → 服务端真验签通过（201）→ 解密计票还原出所选选项。这次验收还挖出并修掉了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而非线路名，会让领取流程停在 claim 之后）—— 这类问题单测测不出来，只有真浏览器对真服务端才暴露；③ 🟡 **防重投这一半已落地**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求 + 同一 nullifier + 不同凭证，断言恰好 1 张票入库、其余 409 `DOUBLE_VOTING`（本机可复现，`go test ./tests/e2e/ -run TestAPI_ConcurrentSameNullifier_E2E`）；**容量这一半也已落地**：新工具 `cmd/loadtest`（纯 HTTP API，不碰数据库）输出吞吐 / 延迟分位 / 状态分布 / 防重投结论，`-json` 可机器读，**防重投没守住时退出码非 0**；✅ **2026-10-25 修复**：工具此前还在用 v0.1.0 的「一步式领凭证」，协议改成真两段式盲签名后**每张票都 400 `INVALID_REQUEST`、0 票入库**（工具自己也会以非 0 退出）—— 现已改为走真实的 claim → blind-sign → attest 三步（与门户、CLI 同一条链路），并补了回归测试（假服务端按 v0.2.0 协议实现，断言**领取请求体里不许出现公钥**）；本机重测 200 票 / 并发 20 → **164.1 req/s**、200 张全 201、同 nullifier 并发 5 次恰好放行 1 张、落库核对 201 == 预期 201（⚠️ SQLite 单写者 + 工具没有 prover，只能在 debug 模式跑，**不是容量规划**） |
 | 验收 | 三项都有**可复现的脚本 + 输出**，并把结果贴进 PR |
 | 预估 | 2–3 天 |
 | 依赖 | T14（浏览器端投票链路才完整） |

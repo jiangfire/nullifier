@@ -16,6 +16,10 @@
 //  4. 再用**同一个 nullifier** 并发提交若干次，验证只有一张票能入库
 //  5. 输出吞吐、延迟分位、状态分布与防重投结论
 //
+// 领取凭证走的是**真两段式盲签名**（claim 预留 → 本地盲化 + 服务端盲签名 →
+// 交回解盲后的签名由服务端验签落库），与门户、CLI 完全同一条链路 —— 压测用的
+// 就是真实协议，不会因为「服务端给个假凭证」而把并发写路径测歪。
+//
 // ⚠️ 客户端还没有 prover，这个工具只能跑在**开发模式**（服务端未加载
 // crypto.vk_path，只要求 proof 非空）的服务上。release 模式下所有请求都会
 // 因验签失败被拒 —— 报告里的状态分布会如实反映这一点。
@@ -43,6 +47,8 @@ import (
 	"sync"
 	"time"
 
+	domaincrypto "anonvote/internal/domain/crypto"
+	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	"anonvote/internal/infrastructure/crypto/ballot"
 )
 
@@ -94,6 +100,11 @@ type report struct {
 	DuplicateCodes  []string       `json:"duplicate_codes"`
 	VotedCredential int            `json:"voted_credentials"`
 	ExpectedVoted   int            `json:"expected_voted_credentials"`
+	// TimingResolutionLimited 表示这一轮比计时器的分辨率还快，耗时与吞吐都测不准。
+	//
+	// 真实压测（几百个请求）不会触发；但拿它测个位数请求时会出现 —— 那时报告
+	// 里写「0 req/s」会被误读成「没跑」，所以单独标出来而不是假装测到了 0。
+	TimingResolutionLimited bool `json:"timing_resolution_limited"`
 }
 
 func main() {
@@ -269,26 +280,170 @@ func prepareCredentials(client *http.Client, opts *options, proposalID string) (
 		if err != nil {
 			return nil, err
 		}
-		var claimed struct {
-			UserID     string `json:"user_id"`
-			UserPubKey string `json:"user_pub_key"`
-			Signature  string `json:"signature"`
-		}
-		if err := postJSON(
-			client, opts,
-			"/api/v1/proposals/"+url.PathEscape(proposalID)+"/credentials/claim",
-			map[string]any{"user_pub_key": pubKey},
-			false, &claimed,
-		); err != nil {
+		cred, err := claimCredential(client, opts, proposalID, pubKey)
+		if err != nil {
 			return nil, fmt.Errorf("领取凭证: %w", err)
 		}
-		credentials = append(credentials, credential{
-			userID:    claimed.UserID,
-			pubKey:    claimed.UserPubKey,
-			signature: claimed.Signature,
-		})
+		credentials = append(credentials, cred)
 	}
 	return credentials, nil
+}
+
+// credentialReservation 是「预留签发权」的响应。
+//
+// 它带出签发方公钥：客户端要拿它把凭证消息盲化。公钥本来就是公开值。
+type credentialReservation struct {
+	ProposalID       string `json:"proposal_id"`
+	UserID           string `json:"user_id"`
+	IssuerKeyVersion int    `json:"issuer_key_version"`
+	Variant          string `json:"variant"`
+	Modulus          string `json:"modulus"`
+	Exponent         int    `json:"exponent"`
+}
+
+// issuerPublicKey 把响应里的公钥字段还原成领域类型。
+func (r *credentialReservation) issuerPublicKey() (*domaincrypto.IssuerPublicKey, error) {
+	modulus, err := base64.StdEncoding.DecodeString(r.Modulus)
+	if err != nil {
+		return nil, fmt.Errorf("issuer modulus must be base64: %w", err)
+	}
+	return &domaincrypto.IssuerPublicKey{
+		Version:  r.IssuerKeyVersion,
+		Modulus:  modulus,
+		Exponent: r.Exponent,
+		Variant:  r.Variant,
+	}, nil
+}
+
+// blindSignatureResponse 是盲签名的响应。
+type blindSignatureResponse struct {
+	BlindSignature string `json:"blind_signature"`
+}
+
+// claimMaxAttempts 是匿名领取的重试次数。
+//
+// 预留**不占位**：服务端取槽位时不改状态，并发领取会抢到同一个槽位。抢输的那个
+// 换一个槽位重来 —— 但重试要重新盲化（新的 user_id 意味着新的消息）。
+const claimMaxAttempts = 5
+
+// claimCredential 匿名领取一张凭证，走完**真两段式盲签名**。
+//
+// v0.2.0 的领取是三步：
+// ① 预留签发权（请求体里**没有**公钥）→ ② 本地盲化 + 服务端盲签名 → ③ 交回
+// 解盲后的签名，由服务端验签落库。
+//
+// 客户端从头到尾没把公钥发给服务端 —— 服务端一旦知道公钥就能算出消息原文，
+// 盲化当场失效。
+func claimCredential(
+	client *http.Client,
+	opts *options,
+	proposalID string,
+	userPubKeyBase64 string,
+) (credential, error) {
+	userPubKey, err := base64.StdEncoding.DecodeString(userPubKeyBase64)
+	if err != nil {
+		return credential{}, fmt.Errorf("user pub key must be base64: %w", err)
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < claimMaxAttempts; attempt++ {
+		cred, err := claimCredentialOnce(client, opts, proposalID, userPubKey)
+		if err == nil {
+			return cred, nil
+		}
+		if !isSlotTaken(err) {
+			return credential{}, err
+		}
+		lastErr = err
+	}
+	return credential{}, lastErr
+}
+
+// claimCredentialOnce 走一遍领取流程（不重试）。
+func claimCredentialOnce(
+	client *http.Client,
+	opts *options,
+	proposalID string,
+	userPubKey []byte,
+) (credential, error) {
+	escaped := url.PathEscape(proposalID)
+
+	// ① 预留签发权。请求体是空的：服务端只给 user_id 与签发方公钥。
+	var reservation credentialReservation
+	if err := postJSON(
+		client, opts,
+		"/api/v1/proposals/"+escaped+"/credentials/claim",
+		map[string]any{},
+		false,
+		&reservation,
+	); err != nil {
+		return credential{}, err
+	}
+	issuerKey, err := reservation.issuerPublicKey()
+	if err != nil {
+		return credential{}, err
+	}
+
+	// ② 本地盲化凭证消息。
+	blindClient, err := cryptoinfra.NewCredentialBlindClient(issuerKey)
+	if err != nil {
+		return credential{}, err
+	}
+	blinded, err := blindClient.Blind(reservation.UserID, userPubKey)
+	if err != nil {
+		return credential{}, err
+	}
+
+	// ③ 把盲化消息送去盲签名。
+	var blindResponse blindSignatureResponse
+	if err := postJSON(
+		client, opts,
+		"/api/v1/proposals/"+escaped+"/credentials/blind-sign",
+		map[string]any{
+			"user_id":            reservation.UserID,
+			"blinded_message":    base64.StdEncoding.EncodeToString(blinded.BlindedMessage),
+			"issuer_key_version": reservation.IssuerKeyVersion,
+		},
+		false,
+		&blindResponse,
+	); err != nil {
+		return credential{}, err
+	}
+	blindSignature, err := base64.StdEncoding.DecodeString(blindResponse.BlindSignature)
+	if err != nil {
+		return credential{}, fmt.Errorf("blind signature must be base64: %w", err)
+	}
+
+	// ④ 本地解盲，得到最终签名。
+	signature, err := blindClient.Finalize(blinded, blindSignature)
+	if err != nil {
+		return credential{}, err
+	}
+
+	// ⑤ 交回最终签名，服务端验签后落库 —— 公钥到这一步才第一次发出去。
+	var attested struct {
+		UserID     string `json:"user_id"`
+		UserPubKey string `json:"user_pub_key"`
+		Signature  string `json:"signature"`
+	}
+	if err := postJSON(
+		client, opts,
+		"/api/v1/proposals/"+escaped+"/credentials/attest",
+		map[string]any{
+			"user_id":      reservation.UserID,
+			"user_pub_key": base64.StdEncoding.EncodeToString(userPubKey),
+			"signature":    base64.StdEncoding.EncodeToString(signature),
+		},
+		false,
+		&attested,
+	); err != nil {
+		return credential{}, err
+	}
+	return credential{
+		userID:    attested.UserID,
+		pubKey:    attested.UserPubKey,
+		signature: attested.Signature,
+	}, nil
 }
 
 func fetchElectionKey(client *http.Client, opts *options, proposalID string) ([]byte, error) {
@@ -477,7 +632,8 @@ func buildReport(
 	}
 
 	throughput := 0.0
-	if votePhase.elapsed > 0 {
+	timingLimited := votePhase.elapsed <= 0
+	if !timingLimited {
 		throughput = float64(len(votePhase.outcomes)) / votePhase.elapsed.Seconds()
 	}
 
@@ -497,7 +653,8 @@ func buildReport(
 		DuplicateCodes:  duplicateCodes,
 		VotedCredential: voted,
 		// 第一轮每张票一个凭证，第二轮恰好再放行一张 → 期望的已投票凭证数。
-		ExpectedVoted: len(votePhase.outcomes) + duplicateAccepted,
+		ExpectedVoted:           len(votePhase.outcomes) + duplicateAccepted,
+		TimingResolutionLimited: timingLimited,
 	}
 }
 
@@ -530,7 +687,11 @@ func printReport(result report) {
 	fmt.Printf("提案:        %s\n", result.ProposalID)
 	fmt.Printf("请求:        %d 张票，并发度 %d\n", result.Votes, result.Concurrency)
 	fmt.Printf("总耗时:      %s\n", result.Duration)
-	fmt.Printf("吞吐:        %.1f req/s\n", result.ThroughputPerS)
+	if result.TimingResolutionLimited {
+		fmt.Printf("吞吐:        低于计时分辨率（这一轮太快，耗时与吞吐都测不准）\n")
+	} else {
+		fmt.Printf("吞吐:        %.1f req/s\n", result.ThroughputPerS)
+	}
 	fmt.Printf(
 		"延迟:        p50=%s p90=%s p99=%s max=%s\n",
 		result.LatencyP50, result.LatencyP90, result.LatencyP99, result.LatencyMax,
@@ -603,6 +764,34 @@ func getJSON(client *http.Client, opts *options, path string, out any) error {
 	return doRequest(client, request, out)
 }
 
+// httpError 是带状态码与错误码的失败。
+//
+// 状态码是必需的：领取凭证遇到「槽位被别人抢走」时客户端要换个槽位重来，
+// 判断依据就是 409 + CREDENTIAL_EXISTS。
+type httpError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *httpError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("%s (%s)", e.Message, e.Code)
+	}
+	return e.Message
+}
+
+// isSlotTaken 判断错误是不是「槽位被别人抢走」—— 只有这种情况值得重试。
+//
+// 409 有两种：槽位被抢（换个槽位重来就行）与凭证池已空（重试也没用）。
+func isSlotTaken(err error) bool {
+	var httpErr *httpError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	return httpErr.Status == http.StatusConflict && httpErr.Code == "CREDENTIAL_EXISTS"
+}
+
 func doRequest(client *http.Client, request *http.Request, out any) error {
 	response, err := client.Do(request)
 	if err != nil {
@@ -623,7 +812,11 @@ func doRequest(client *http.Client, request *http.Request, out any) error {
 		if failure.Code == "" {
 			failure.Code = http.StatusText(response.StatusCode)
 		}
-		return fmt.Errorf("%s (%s)", failure.Code, strings.TrimSpace(failure.Error))
+		return &httpError{
+			Status:  response.StatusCode,
+			Code:    failure.Code,
+			Message: strings.TrimSpace(failure.Error),
+		}
 	}
 	if out == nil {
 		return nil
