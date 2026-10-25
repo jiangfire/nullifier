@@ -715,10 +715,11 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 
 | 项 | 内容 |
 |---|---|
-| 动作 | ① `VERSION` 改 `0.2.0`；② `CHANGELOG.md` 写 0.2.0 条目（**若本轮改了密文格式，必须写明与 v0.1.0 的密文不兼容**；T7 的格式变更已含在 v0.1.0 之内，v0.2.0 默认不改格式）；③ `git tag v0.2.0` → release workflow 自动构建；④ 按 v0.1.0 的生产部署清单逐项核对；⑤ 同步 `web/package.json` 的 version（单一版本源是仓库根的 `VERSION`，发布流水线构建前自动注入，无需手改） |
-| 验收 | `gh release view v0.2.0` 有产物；生产部署清单全勾 |
+| 动作 | ① `VERSION` 改 `0.2.0`；② `CHANGELOG.md` 写 0.2.0 条目 —— ⚠️ **本轮确实改了密文格式**（v2 → v3，见 §2.2 与 CHANGELOG 的破坏性变更），**必须写明与 v0.1.0 的密文不兼容、旧票要作废**；③ `git tag -a v0.2.0 -m "<发版说明>"`（**注解 tag** —— release workflow 用 tag 说明当 release 正文）→ release workflow 自动构建；④ 按生产部署清单逐项核对；⑤ 同步 `web/package.json` 的 version（单一版本源是仓库根的 `VERSION`，发布流水线构建前自动注入，无需手改） |
+| **落地核对** | ✅ **发版计划已成文**：[`docs/release-plan-v0.2.0.md`](./release-plan-v0.2.0.md) —— 能力口径、破坏性变更、部署必做项、验收证据、go/no-go 清单；✅ **发布流水线的门户包补上了 prover**（`release.yml` 现在自己编 `ballot-prover.wasm` + 拷 `wasm_exec.js`，并**检查 `web/dist/` 里有没有 prover，缺了直接失败** —— v0.1.0 的门户由服务端代加密所以不需要它，v0.2.0 的门户在浏览器里出证明，**没有它就投不了票**）；✅ CI 的 web job 也补了同样的构建与检查（门户构建从此在每个 PR 上都被验证，不再拖到发版那天）；⚠️ **两把 proving key 默认不进发布包**（秘密材料，且每套部署必须用与服务端配对的那对）—— 要么配仓库 secret（`PORTAL_PROVING_KEY_B64` / `PORTAL_ELIGIBILITY_PROVING_KEY_B64`），要么部署时自己补进 `web/dist/`（部署清单 §1/§6 已写明）；⬜ **推送分支 + 打 tag + 发版 —— 等用户拍板**（分支一直保持未推送） |
+| 验收 | `gh release view v0.2.0` 有产物（5 平台二进制 + 门户包，各带 sha256）；生产部署清单全勾 |
 | 预估 | 半天 |
-| 依赖 | M1、M2、M3 全部完成 |
+| 依赖 | M1、M2 全部完成；M3 的 T19/T20/T22 已落地（T20 三个盲区本机可做的部分已闭合，PG 实跑等 CI） |
 
 #### T22 · 资格证明：把一人一票补回来（T9 留下的缺口）✅ 已落地
 
@@ -798,7 +799,8 @@ feat(cli,web): let the CLI and the portal prove eligibility before claiming
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/release-plan-v0.1.0.md`](./release-plan-v0.1.0.md) | v0.1.0 发版计划与落地状态（**当前发版**） |
+| [`docs/release-plan-v0.2.0.md`](./release-plan-v0.2.0.md) | v0.2.0 发版计划与落地状态（**当前发版**：能力口径、破坏性变更、部署必做项、验收证据、go/no-go 清单） |
+| [`docs/release-plan-v0.1.0.md`](./release-plan-v0.1.0.md) | v0.1.0 发版计划与落地状态（上一版） |
 | [`docs/release-review-2026-10-20.md`](./release-review-2026-10-20.md) | 发版前整体 review：6 个 CRITICAL + 29 个 REQUIRED + 20 个 NIT 的完整证据 |
 | [`docs/errata.md`](./errata.md) | 勘误表：已发布版本里的错误陈述 |
 | [`docs/techspec.md`](./techspec.md) | 当前实现的接口与流程口径 |
