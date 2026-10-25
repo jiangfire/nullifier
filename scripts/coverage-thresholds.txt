@@ -20,5 +20,6 @@ internal/infrastructure/crypto/ballot 80
 internal/infrastructure/persistence 58
 cmd/cli 81
 cmd/keygen 79
+cmd/eligibility-list 82
 cmd/server 75
 total 77
