@@ -273,3 +273,35 @@ func TestRegisterUseCase_ReserveCredential_RejectsMaterialWhenDisabled(t *testin
 	assert.ErrorIs(t, err, ErrEligibilityNotEnabled)
 	assert.Nil(t, reservation)
 }
+
+// TestRegisterUseCase_ReserveCredential_RequiresUseRepository 验证「开了资格
+// 校验却没有去重仓储」时直接报错 —— 那样等于一人一票没生效。
+func TestRegisterUseCase_ReserveCredential_RequiresUseRepository(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	eligibility := new(eligibilityServiceMock)
+
+	uc := NewRegisterUseCaseWithEligibility(
+		repo, proposalRepo, issuer, claimRepo, nil, eligibility, zap.NewNop(),
+	)
+
+	material := &EligibilityMaterial{
+		Proof:           []byte("proof"),
+		QualificationID: testQualificationID,
+		Challenge:       testEligibilityChallenge,
+	}
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	eligibility.On("Enabled").Return(true).Once()
+	eligibility.On("Root").Return(testEligibilityRoot, 10, nil).Once()
+	eligibility.On("Verify", mock.Anything, mock.Anything).Return(nil).Once()
+	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
+		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
+		Once()
+
+	reservation, err := uc.ReserveCredential(context.Background(), "p-1", material)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "eligibility use repository")
+	assert.Nil(t, reservation)
+}

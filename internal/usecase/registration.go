@@ -307,7 +307,11 @@ func (uc *RegisterUseCase) ReserveCredential(
 
 	// 资格使用记录放在取槽位之后：唯一约束冲突时（同一份资格第二次来领），
 	// 槽位还没被标记领取，不会被白白消耗。
-	if eligibilityEnabled && uc.eligibilityRepo != nil {
+	if eligibilityEnabled {
+		// 少了去重仓储就等于「一人一票」没生效 —— 宁可报错，也不能悄悄放行。
+		if uc.eligibilityRepo == nil {
+			return nil, errors.New("eligibility use repository is not configured")
+		}
 		use := &entity.EligibilityUse{
 			ID:              uuid.NewString(),
 			ProposalID:      proposalID,

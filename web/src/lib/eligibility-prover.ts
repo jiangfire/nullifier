@@ -18,6 +18,7 @@
 import type {
   EligibilityMemberPackage,
   EligibilityProverResult,
+  EligibilityProveRequest,
   ProverWorkerMessage,
   ProverWorkerReply,
 } from './wasm-prover-protocol';
@@ -48,6 +49,24 @@ export interface EligibilityProofResult {
 }
 
 /**
+ * 把门户的参数拼成 WASM 模块的入参。
+ *
+ * 字段名与 Go 侧 `cmd/ballot-wasm` 的 `eligibilityProveRequest` 一一对应 ——
+ * 跨语言锁死：`tests/architecture/eligibility_wire_test.go` 会拿两边的字段名
+ * 对照，改了一边不改另一边就会红。
+ */
+export function buildEligibilityProveRequest(
+  request: EligibilityProofRequest,
+): EligibilityProveRequest {
+  return {
+    proposal_id: request.proposalId,
+    challenge: request.challenge,
+    root: request.root,
+    member_package: request.memberPackage,
+  };
+}
+
+/**
  * 在浏览器本地生成一份资格证明。
  *
  * 全程在本地完成：资格秘密、Merkle 路径与 proving key 都不出浏览器。服务端
@@ -64,12 +83,7 @@ export async function generateEligibilityProof(
       glueUrl: assetUrl('wasm_exec.js'),
       wasmUrl: assetUrl('ballot-prover.wasm'),
       provingKeyUrl: assetUrl('eligibility-proving.key'),
-      request: {
-        proposal_id: request.proposalId,
-        challenge: request.challenge,
-        root: request.root,
-        member_package: request.memberPackage,
-      },
+      request: buildEligibilityProveRequest(request),
     };
     const result = await new Promise<EligibilityProverResult>((resolve, reject) => {
       worker.onmessage = (event: MessageEvent<ProverWorkerReply<EligibilityProverResult>>) => {
