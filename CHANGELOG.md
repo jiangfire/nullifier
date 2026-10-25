@@ -14,6 +14,9 @@ v0.1.0 发布之后的变更。本版的完成定义与验收证据见
 [`docs/release-plan-v0.2.0.md`](./docs/release-plan-v0.2.0.md)，路线图见
 [`docs/roadmap.md`](./docs/roadmap.md)。
 
+**已发布**：[GitHub Release v0.2.0](https://github.com/jiangfire/nullifier/releases/tag/v0.2.0)
+（tag `v0.2.0` @ `abc86ca`；5 个平台二进制 + 门户包，各带 sha256）。
+
 > ⚠️ **升级前必读**：选票密文格式 v2 → v3 **不兼容**，用 v0.1.0 密文投过的票无法解密 ——
 > 详见下面的「破坏性变更」。
 

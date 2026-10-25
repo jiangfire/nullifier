@@ -208,7 +208,7 @@ git push origin feat/v0.2.0-m2-proof-chain v0.2.0
   同 nullifier 恰好放行 1 张、退出码 0。
 - ✅ **§2 的第 1、2 步已在分支上完成**：`VERSION` → `0.2.0`，`CHANGELOG.md` 的
   `[未发布]` → `## [0.2.0] — 2026-10-25`（并写明密文 v2 → v3 不兼容）。
-  第 3 步（打注解 tag）与第 4 步（推分支 + 推 tag）**已于 2026-10-25 拍板，本轮执行**。
+  第 3 步（打注解 tag）与第 4 步（推分支 + 推 tag）**已完成**（2026-10-25，结果见 §8.2）。
 - ✅ **G6 已决**：保留 cgo（2026-10-25），本版产物即这一版。
 - ✅ **Playwright 推到 v0.3.0**：v0.2.0 不引入，门户 UI 回归仍靠
   `scripts/browser-acceptance.sh` 人工点一遍。
@@ -293,3 +293,40 @@ tag 推送后流水线断掉的阻断性问题**。
    与 Windows 10+ 自带的 UCRT，**没有 `libgcc_s_seh-1.dll` / `libwinpthread-1.dll`** ——
    换驱动想要的「静态链接二进制」收益，Go 的内部链接器已经给了。而换驱动还要**重写
    `temp_store=MEMORY` 那个修复**（mattn 特有的 `ConnectHook`）。**G6 不阻塞发版**。
+
+### 8.2 发布结果（2026-10-25）
+
+**v0.2.0 已公开发布**：[GitHub Release v0.2.0](https://github.com/jiangfire/nullifier/releases/tag/v0.2.0)
+
+| 项 | 值 |
+|---|---|
+| tag | `v0.2.0`（**注解 tag**）@ `abc86ca3ab55d1dd08c9fbb0c31bf4d21c4971ff` |
+| 分支 | `feat/v0.2.0-m2-proof-chain` → `origin`（本地 HEAD = 远端 = tag 指向的提交，三者一致） |
+| 流水线 | release run **40185592513**，**8 个 job 全绿**（`verify` / `build` ×5 平台 / `web` / `release`） |
+| 发布时间 | 2026-10-25 10:41:47 UTC（18:41:47 CST） |
+| 产物 | **12 个**：5 个平台的 `nullifier-<os>-<arch>.zip` + 各自的 `.sha256`，外加 `nullifier-web-0.2.0.zip` + `.sha256` |
+
+**v0.2.0 相对 v0.1.0 才有的三处流水线改动，这次全部在 CI 里真跑通过了**：
+
+1. **`web` job**（v0.1.0 的门户不需要 prover，这条 job 是 v0.2.0 新增的）：自编
+   `ballot-prover.wasm` → `lint` / `tsc` / `vitest` → `rsbuild build` → **硬检查
+   `web/dist/` 里 `ballot-prover.wasm` 与 `wasm_exec.js` 都在** → 打包。✅ 51s 全过。
+2. **`release` job** 改用 `gh api` 取注解 tag 正文（`git/ref/tags/<tag>` → `object.type == "tag"`
+   → `git/tags/<sha>` → `.message`）。✅ 发布页正文与 §2.1 **逐字一致**。
+3. **`verify` job** 在 Linux + Go 1.25.4（`go-version-file: go.mod`）下跑
+   `go vet` / `gofmt` / `go test ./...` / 覆盖率门槛。✅ 全过 —— **这 78 笔提交第一次在
+   Linux 上整体执行**，§8.1 里说的「从未整体在 Linux 上运行过」这个风险面就此清零。
+
+**发布出去的门户包已下载核验**（`gh release download`，2,762,091 字节）：
+
+- `ballot-prover.wasm` —— 11,651,679 字节，magic `0061736d`（合法 WASM 模块），
+  二进制里 `init` / `prove` / **`initEligibility`** / **`proveEligibility`** 四个 API 齐全
+  → **选票与资格两条浏览器路径都真的能出证明**；
+- `wasm_exec.js` —— 16,992 字节（与 Go 1.25.4 / 1.26.6 的官方胶水一致）；
+- **两把 proving key 不在包里** —— 仓库 secret `PORTAL_PROVING_KEY_B64` /
+  `PORTAL_ELIGIBILITY_PROVING_KEY_B64` 未配置，流水线按设计只发警告。**部署方必须自行补齐**
+  （见 `docs/deployment-checklist.md` §6），否则门户投不了票、领不了资格票。
+
+> 一处**预期的差异**：CI 产出的 wasm 是 11,651,679 字节，本地是 11,953,957 字节 ——
+> Go 版本不同（CI 按 `go.mod` 用 1.25.4，本地默认 1.26.6），不是构建问题。
+> 两者都通过 §8.1 里那条「本地用 1.25.4 复跑」的验证。
