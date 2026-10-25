@@ -2,18 +2,17 @@ package usecase
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
 	"anonvote/internal/domain/entity"
 	"anonvote/internal/domain/repository"
+	"anonvote/internal/shares"
+	"anonvote/internal/tally"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -125,13 +124,13 @@ func (uc *TallyUseCase) SetupThresholdSession(
 	if err != nil {
 		return nil, fmt.Errorf("generate decryption key pair: %w", err)
 	}
-	shares, err := uc.crypto.SplitPrivateKey(privateKey, threshold, trustees)
+	splitShares, err := uc.crypto.SplitPrivateKey(privateKey, threshold, trustees)
 	if err != nil {
 		return nil, fmt.Errorf("split private key: %w", err)
 	}
 
-	encodedShares := encodeBase64List(shares)
-	sharesJSON, err := json.Marshal(hashShareList(encodedShares))
+	encodedShares := shares.EncodeList(splitShares)
+	sharesJSON, err := json.Marshal(shares.HashList(encodedShares))
 	if err != nil {
 		return nil, fmt.Errorf("marshal shares: %w", err)
 	}
@@ -200,15 +199,15 @@ func (uc *TallyUseCase) PublishResult(
 		return nil, fmt.Errorf("%w: insufficient shares", ErrInvalidRequest)
 	}
 
-	registeredShares, err := parseSharesJSON(session.SharesJSON)
+	registeredShares, err := shares.ParseRegistered(session.SharesJSON)
 	if err != nil {
 		return nil, fmt.Errorf("decode session shares: %w", err)
 	}
-	if err := ensureSharesBelongToSession(registeredShares, providedShares); err != nil {
+	if err := shares.EnsureBelongToSession(registeredShares, providedShares); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidRequest, err)
 	}
 
-	shareBytes, err := decodeBase64List(providedShares)
+	shareBytes, err := shares.DecodeList(providedShares)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid share format: %v", ErrInvalidRequest, err)
 	}
@@ -222,53 +221,47 @@ func (uc *TallyUseCase) PublishResult(
 		return nil, fmt.Errorf("load votes: %w", err)
 	}
 
-	tally := make(map[string]int)
-	leaves := make([][]byte, 0, len(votes))
+	// 计票算法只有一份：审计复算工具（cmd/audit-recompute）调的是同一个
+	// tally.Compute —— 两边各写一份算法，漂移了复算结论就没有意义。
+	ballots := make([]tally.Ballot, 0, len(votes))
 	for _, vote := range votes {
-		index, err := uc.crypto.Decrypt(privateKey, vote.Cipher, len(proposal.Options))
-		if err != nil {
-			return nil, fmt.Errorf("decrypt vote %s: %w", vote.ID, err)
-		}
-		if index < 0 || index >= len(proposal.Options) {
-			return nil, fmt.Errorf("%w: option index %d in vote %s is not defined for proposal", ErrInvalidRequest, index, vote.ID)
-		}
-		candidate := proposal.Options[index]
-		tally[candidate]++
-		leaves = append(leaves, buildVoteLeaf(vote))
+		ballots = append(ballots, tally.Ballot{
+			ID:        vote.ID,
+			Nullifier: vote.Nullifier,
+			Cipher:    vote.Cipher,
+		})
 	}
-	if len(leaves) == 0 {
-		leaves = append(leaves, []byte("empty-vote-set"))
-	}
-
-	merkleRoot, err := uc.merkleBuilder.BuildRoot(leaves)
+	computed, err := tally.Compute(tally.Input{
+		ProposalID: proposalID,
+		Options:    proposal.Options,
+		Ballots:    ballots,
+		PrivateKey: privateKey,
+	}, uc.crypto, uc.merkleBuilder)
 	if err != nil {
-		return nil, fmt.Errorf("build merkle root: %w", err)
+		var invalidOption *tally.InvalidOptionError
+		if errors.As(err, &invalidOption) {
+			return nil, fmt.Errorf(
+				"%w: option index %d in vote %s is not defined for proposal",
+				ErrInvalidRequest,
+				invalidOption.Index,
+				invalidOption.BallotID,
+			)
+		}
+		return nil, err
 	}
-	tallyJSON, err := marshalCanonicalTally(tally)
-	if err != nil {
-		return nil, fmt.Errorf("marshal tally: %w", err)
-	}
-
-	hashInput := strings.Join([]string{
-		proposalID,
-		base64.StdEncoding.EncodeToString(merkleRoot),
-		tallyJSON,
-	}, "|")
-	sum := sha256.Sum256([]byte(hashInput))
-	anchorHash := hex.EncodeToString(sum[:])
 
 	now := time.Now().UTC()
 	result := &entity.TallyResult{
 		ID:          uuid.NewString(),
 		ProposalID:  proposalID,
-		TotalVotes:  len(votes),
-		TallyJSON:   tallyJSON,
-		MerkleRoot:  append([]byte(nil), merkleRoot...),
-		AnchorHash:  anchorHash,
+		TotalVotes:  computed.TotalVotes,
+		TallyJSON:   computed.TallyJSON,
+		MerkleRoot:  append([]byte(nil), computed.MerkleRoot...),
+		AnchorHash:  computed.AnchorHash,
 		PublishedAt: now,
 		CreatedAt:   now,
 		UpdatedAt:   now,
-		Tally:       cloneTallyMap(tally),
+		Tally:       cloneTallyMap(computed.Tally),
 	}
 	if err := uc.resultRepo.Save(ctx, result); err != nil {
 		return nil, fmt.Errorf("save tally result: %w", err)
@@ -277,8 +270,8 @@ func (uc *TallyUseCase) PublishResult(
 	anchor := &entity.AuditAnchor{
 		ID:         uuid.NewString(),
 		ProposalID: proposalID,
-		MerkleRoot: append([]byte(nil), merkleRoot...),
-		AnchorHash: anchorHash,
+		MerkleRoot: append([]byte(nil), computed.MerkleRoot...),
+		AnchorHash: computed.AnchorHash,
 		CreatedAt:  now,
 	}
 	if err := uc.anchorRepo.Save(ctx, anchor); err != nil {
@@ -287,7 +280,7 @@ func (uc *TallyUseCase) PublishResult(
 
 	uc.logger.Info("tally result published",
 		zap.String("proposal_id", proposalID),
-		zap.Int("total_votes", len(votes)),
+		zap.Int("total_votes", computed.TotalVotes),
 	)
 	return result, nil
 }
@@ -305,7 +298,7 @@ func (uc *TallyUseCase) GetResult(ctx context.Context, proposalID string) (*enti
 		return nil, fmt.Errorf("get tally result: %w", err)
 	}
 	if result.Tally == nil {
-		parsed, err := unmarshalTally(result.TallyJSON)
+		parsed, err := tally.UnmarshalCanonicalTally(result.TallyJSON)
 		if err != nil {
 			return nil, fmt.Errorf("decode tally result: %w", err)
 		}
@@ -378,121 +371,6 @@ func isProposalClosed(proposal *entity.Proposal, now time.Time) bool {
 		return true
 	}
 	return !proposal.EndsAt.IsZero() && proposal.EndsAt.Before(now)
-}
-
-func encodeBase64List(values [][]byte) []string {
-	out := make([]string, 0, len(values))
-	for _, v := range values {
-		out = append(out, base64.StdEncoding.EncodeToString(v))
-	}
-	return out
-}
-
-func decodeBase64List(values []string) ([][]byte, error) {
-	out := make([][]byte, 0, len(values))
-	for _, item := range values {
-		data, err := base64.StdEncoding.DecodeString(item)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, data)
-	}
-	return out, nil
-}
-
-func parseSharesJSON(raw string) ([]string, error) {
-	if raw == "" {
-		return nil, errors.New("empty session shares")
-	}
-	var out []string
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return nil, err
-	}
-	if len(out) == 0 {
-		return nil, errors.New("no shares in session")
-	}
-	return out, nil
-}
-
-func ensureSharesBelongToSession(registered []string, provided []string) error {
-	allowed := make(map[string]struct{}, len(registered))
-	for _, item := range registered {
-		allowed[item] = struct{}{}
-	}
-	seen := make(map[string]struct{}, len(provided))
-	for _, item := range provided {
-		digest := hashShare(item)
-		if _, ok := allowed[digest]; !ok {
-			return fmt.Errorf("share does not belong to session")
-		}
-		// Repeating one share must not count towards the threshold.
-		if _, ok := seen[digest]; ok {
-			return fmt.Errorf("duplicate share submitted")
-		}
-		seen[digest] = struct{}{}
-	}
-	return nil
-}
-
-func hashShare(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])
-}
-
-func hashShareList(values []string) []string {
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		out = append(out, hashShare(value))
-	}
-	return out
-}
-
-func buildVoteLeaf(vote *entity.Vote) []byte {
-	leaf := make([]byte, 0, len(vote.Nullifier)+1+len(vote.Cipher))
-	leaf = append(leaf, []byte(vote.Nullifier)...)
-	leaf = append(leaf, '|')
-	leaf = append(leaf, vote.Cipher...)
-	return leaf
-}
-
-type tallyEntry struct {
-	Candidate string `json:"candidate"`
-	Count     int    `json:"count"`
-}
-
-func marshalCanonicalTally(tally map[string]int) (string, error) {
-	keys := make([]string, 0, len(tally))
-	for k := range tally {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	items := make([]tallyEntry, 0, len(keys))
-	for _, key := range keys {
-		items = append(items, tallyEntry{
-			Candidate: key,
-			Count:     tally[key],
-		})
-	}
-	data, err := json.Marshal(items)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
-}
-
-func unmarshalTally(raw string) (map[string]int, error) {
-	if raw == "" {
-		return map[string]int{}, nil
-	}
-	var items []tallyEntry
-	if err := json.Unmarshal([]byte(raw), &items); err != nil {
-		return nil, err
-	}
-	out := make(map[string]int, len(items))
-	for _, item := range items {
-		out[item.Candidate] = item.Count
-	}
-	return out, nil
 }
 
 func cloneTallyMap(in map[string]int) map[string]int {

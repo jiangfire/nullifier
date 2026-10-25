@@ -13,6 +13,8 @@
 internal/usecase 77
 internal/config 93
 internal/di 89
+internal/tally 85
+internal/shares 75
 internal/infrastructure/http 78
 internal/infrastructure/http/middleware 89
 internal/infrastructure/crypto 76
@@ -21,5 +23,6 @@ internal/infrastructure/persistence 58
 cmd/cli 81
 cmd/keygen 79
 cmd/eligibility-list 82
+cmd/audit-recompute 72
 cmd/server 75
 total 77

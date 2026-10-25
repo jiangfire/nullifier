@@ -24,6 +24,12 @@ type DBConfig struct {
 	Password string
 	SSLMode  string
 
+	// ReadOnly 表示这个连接只用来读。
+	//
+	// 审计复算工具用它打开票库：复算工具的结论要能被信任，就不能有改数据的
+	// 可能 —— 所以只读不是「我们保证不写」，而是「写不了」。
+	ReadOnly bool
+
 	// 连接池参数。为 0 表示不改动 database/sql 的默认值。
 	MaxOpenConns    int
 	MaxIdleConns    int
@@ -56,6 +62,11 @@ func newPostgresDB(cfg *DBConfig) (*gorm.DB, error) {
 		cfg.Database,
 		cfg.SSLMode,
 	)
+	if cfg.ReadOnly {
+		// default_transaction_read_only 是 PostgreSQL 的运行参数：连接建立后
+		// 每个事务默认只读，写语句直接被服务端拒绝。
+		dsn += " default_transaction_read_only=on"
+	}
 	gdb, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
@@ -96,6 +107,13 @@ func newSQLiteDB(cfg *DBConfig) (*gorm.DB, error) {
 		dsn = ":memory:"
 	}
 
+	if cfg.ReadOnly {
+		if dsn == ":memory:" {
+			return nil, fmt.Errorf("read-only connection cannot use an in-memory database")
+		}
+		dsn = sqliteReadOnlyDSN(dsn)
+	}
+
 	registerSQLiteMemTempDriver()
 
 	return gorm.Open(sqlite.Dialector{
@@ -104,6 +122,33 @@ func newSQLiteDB(cfg *DBConfig) (*gorm.DB, error) {
 	}, &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
+}
+
+// sqliteReadOnlyDSN 把 SQLite 的 DSN 改写成只读形式。
+//
+// 做法是把路径转成 SQLite 的 URI 文件名并加上 mode=ro：写操作在**打开时**
+// 就被挡掉，而不是等真的写了才报错。
+func sqliteReadOnlyDSN(dsn string) string {
+	base := dsn
+	query := ""
+	if idx := strings.Index(dsn, "?"); idx >= 0 {
+		base = dsn[:idx]
+		query = dsn[idx+1:]
+	}
+	if !strings.HasPrefix(base, "file:") {
+		// Windows 的反斜杠在 URI 文件名里不是路径分隔符 —— 转成正斜杠。
+		base = "file:" + strings.ReplaceAll(base, `\`, "/")
+	}
+	if !strings.Contains(query, "mode=") {
+		if query != "" {
+			query += "&"
+		}
+		query += "mode=ro"
+	}
+	if query == "" {
+		return base
+	}
+	return base + "?" + query
 }
 
 // sqliteMemTempDriverName 是本项目自用的 SQLite 驱动名。

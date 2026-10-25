@@ -568,39 +568,6 @@ func TestHelpers_WriteAndReadJSON(t *testing.T) {
 	require.Error(t, readJSON(filepath.Join(t.TempDir(), "missing.json"), &out))
 }
 
-func TestHelpers_LoadShares(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-
-	values, err := loadShares("s1, s2", "")
-	require.NoError(t, err)
-	require.Equal(t, []string{"s1", "s2"}, values)
-
-	jsonPath := filepath.Join(dir, "shares.json")
-	require.NoError(t, os.WriteFile(jsonPath, []byte(`["s1","s2"]`), 0o600))
-	values, err = loadShares("", jsonPath)
-	require.NoError(t, err)
-	require.Equal(t, []string{"s1", "s2"}, values)
-
-	textPath := filepath.Join(dir, "shares.txt")
-	require.NoError(t, os.WriteFile(textPath, []byte("s1 s2\ns3"), 0o600))
-	values, err = loadShares("", textPath)
-	require.NoError(t, err)
-	require.Equal(t, []string{"s1", "s2", "s3"}, values)
-
-	emptyPath := filepath.Join(dir, "empty.txt")
-	require.NoError(t, os.WriteFile(emptyPath, []byte("  \n "), 0o600))
-	_, err = loadShares("", emptyPath)
-	require.Error(t, err)
-
-	_, err = loadShares("", "")
-	require.Error(t, err)
-
-	_, err = loadShares("", filepath.Join(dir, "missing.txt"))
-	require.Error(t, err)
-}
-
 func TestHelpers_EnvOrDefault(t *testing.T) {
 	t.Setenv("NULLIFIER_CLI_TEST_KEY", "  ")
 	require.Equal(t, "fallback", envOrDefault("NULLIFIER_CLI_TEST_KEY", "fallback"))

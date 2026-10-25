@@ -22,6 +22,7 @@ import (
 	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	"anonvote/internal/infrastructure/crypto/ballot"
 	"anonvote/internal/infrastructure/crypto/eligibility"
+	"anonvote/internal/shares"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 )
@@ -980,15 +981,15 @@ func (c *cli) cmdPublishResult(args []string) error {
 	fs := flag.NewFlagSet("result-publish", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	proposalID := fs.String("proposal", "", "proposal id")
-	shares := fs.String("shares", "", "comma separated shares")
-	sharesFile := fs.String("shares-file", "", "json/text file containing shares")
+	sharesFlag := fs.String("shares", "", "comma separated shares")
+	sharesFileFlag := fs.String("shares-file", "", "json/text file containing shares")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*proposalID) == "" {
 		return errors.New("必须提供 -proposal")
 	}
-	values, err := loadShares(*shares, *sharesFile)
+	values, err := shares.Load(*sharesFlag, *sharesFileFlag)
 	if err != nil {
 		return err
 	}
@@ -1175,15 +1176,7 @@ func readJSON(path string, out any) error {
 }
 
 func splitCSV(raw string) []string {
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, item := range parts {
-		trimmed := strings.TrimSpace(item)
-		if trimmed != "" {
-			out = append(out, trimmed)
-		}
-	}
-	return out
+	return shares.SplitCSV(raw)
 }
 
 func stringify(v any) string {
@@ -1216,49 +1209,6 @@ func randomBase64(size int) (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(buf), nil
-}
-
-func loadShares(raw string, file string) ([]string, error) {
-	if strings.TrimSpace(raw) != "" {
-		values := splitCSV(raw)
-		if len(values) == 0 {
-			return nil, errors.New("shares 为空")
-		}
-		return values, nil
-	}
-	if strings.TrimSpace(file) == "" {
-		return nil, errors.New("必须提供 -shares 或 -shares-file")
-	}
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return nil, err
-	}
-	var list []string
-	if err := json.Unmarshal(data, &list); err == nil && len(list) > 0 {
-		return list, nil
-	}
-	// `decrypt-setup -out` 写出来的是整个会话对象（`{"shares":[...]}`）——
-	// 这是运营方最自然的用法，发布结果时必须能直接吃这个文件。
-	var session struct {
-		Shares []string `json:"shares"`
-	}
-	if err := json.Unmarshal(data, &session); err == nil && len(session.Shares) > 0 {
-		return session.Shares, nil
-	}
-	values := strings.FieldsFunc(string(data), func(r rune) bool {
-		return r == '\n' || r == '\r' || r == ',' || r == ' ' || r == '\t'
-	})
-	out := make([]string, 0, len(values))
-	for _, item := range values {
-		trimmed := strings.TrimSpace(item)
-		if trimmed != "" {
-			out = append(out, trimmed)
-		}
-	}
-	if len(out) == 0 {
-		return nil, errors.New("shares 文件为空")
-	}
-	return out, nil
 }
 
 func printRootUsage() {
