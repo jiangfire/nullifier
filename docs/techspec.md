@@ -228,6 +228,29 @@ web/                        # Vue 3 前端门户
 - 优先级与其它 `db.*` 一致：环境变量高于配置文件。
 - 启动日志打印实际生效的连接池参数。
 
+### 4.6 SQLite 的两条硬约束
+
+SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿管理面接口**，
+所以在这里写死口径：
+
+1. **批量写入必须分批**（`persistence.claimSaveBatchSize = 100` 行/条语句）。
+   - 原因：一条语句的绑定参数数量有上限（旧版 SQLite 999，新版 32766）。
+     `credential_claims` 有 7 列，一次性写 **4681 行以上**就会报
+     `too many SQL variables` —— 而 `credentials/pool` 接口允许一次投到
+     **10000** 个槽位，不分批那条路径必然失败。
+   - 批次都在**同一个事务**里：要么整池成功，要么整池回滚，不会留下半个池子。
+2. **临时表与临时索引固定放内存**（`PRAGMA temp_store=MEMORY`，通过驱动
+   的 ConnectHook 对**每条新连接**设置，见 `persistence/db.go`）。
+   - 原因：多行 INSERT 做主键去重时 SQLite 会建一个临时索引；索引撑破内存后
+     会**溢写临时文件**，而本机（Windows，用户目录下的临时目录）实测过这个
+     临时文件建不出来 —— 整条 INSERT 于是以 `SQLITE_CANTOPEN` 失败，接口报成
+     一句看不懂的 `unable to open database file: The system cannot find the
+     file specified.`（备池、投票这类批量写都会中招）。
+   - 临时索引的大小只跟**单批行数**有关（几十行），放进内存不会把内存吃穿；
+     而依赖操作系统临时目录的风险已经被实测过了。
+   - 用 ConnectHook 而不是「启动时执行一次 PRAGMA」：`database/sql` 的连接是
+     按需建立的，启动时执行只会落在当时那一条连接上。
+
 ## 5. HTTP API
 
 ### 5.1 公共接口
@@ -254,6 +277,9 @@ web/                        # Vue 3 前端门户
 - `POST /api/v1/proposals`
 - `GET /api/v1/proposals/:proposal_id/credentials`
 - `POST /api/v1/proposals/:proposal_id/credentials/pool`
+  - `count` 上限 **10000**（`usecase.maxCredentialPoolSize`）；服务端一次性把
+    `count` 个槽位写进池子（SQLite 下分批写，见 §4.6）。
+  - 池子只增不减：重复调用是**继续往池里加**槽位，不是补齐到 `count`。
 - `POST /api/v1/proposals/:proposal_id/decryption/setup`
 - `POST /api/v1/proposals/:proposal_id/results/publish`
 

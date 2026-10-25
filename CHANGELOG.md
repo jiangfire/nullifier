@@ -308,6 +308,20 @@ v0.1.0 发布之后的变更。本版的完成定义与验收证据见
 
 ### 修复
 
+- **备池接口在大批量下必然失败（SQLite）**，2026-10-25 排查「备池 500」时挖出来的两处：
+  - **一条 SQL 的绑定参数有上限**：`credential_claims` 有 7 列，一次性写 **4681 行以上**
+    就报 `too many SQL variables` —— 而 `POST /credentials/pool` 允许一次投到 **10000**
+    个槽位，**那条路径必然 500**。现在分批写（100 行一条语句，批次在同一个事务里），
+    实测 10000 个槽位 72 毫秒写完。
+  - **多行 INSERT 的主键去重会建临时索引**，索引撑破内存后溢写临时文件；本机
+    （Windows，用户目录下的临时目录）实测这个临时文件建不出来 → 整条 INSERT 以
+    `SQLITE_CANTOPEN` 失败，接口只报一句看不懂的
+    `unable to open database file: The system cannot find the file specified.`。
+    现在驱动的 ConnectHook 对**每条新连接**设 `PRAGMA temp_store=MEMORY`，临时表与
+    临时索引不再落到文件系统上。
+  - 两条各有回归测试：`internal/infrastructure/persistence/credential_claim_repository_test.go`
+    的 `TestCredentialClaimRepository_SaveLargeBatch`（**用文件库 + UUID 长度的 id** ——
+    内存库与短 id 都复现不出来）。
 - **压测工具 `cmd/loadtest` 在 v0.2.0 的协议下完全跑不通**（2026-10-25 实测发现）。
   它还在用 v0.1.0 的「一步式领凭证」（`claim` 直接带 `user_pub_key`），而 v0.2.0 的凭证
   签发是**真两段式盲签名**（claim 只预留 → 本地盲化 + 服务端盲签名 → 交回解盲后的签名

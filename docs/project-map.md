@@ -554,6 +554,10 @@ publish        → 提案必须已关闭（isProposalClosed）
 36. **发给 Worker 的东西必须是「普通对象」。** 门户里资格包存在 Vue 的 `ref` 里，读出来是**响应式 Proxy**，而 `postMessage` 的结构化克隆克隆不了 Proxy —— 浏览器直接抛 `DataCloneError: #<Object> could not be cloned.`，「匿名领取」必然失败。修法是在 `buildEligibilityProveRequest` 里把成员包**逐字段拷成普通对象**（在边界上保证可克隆，与来源是不是 Proxy 无关）。**这个坑 node 测不出来**：node 驱动的 WASM 用例不走 Worker，只有真浏览器能发现；`web/src/lib/eligibility-prover.test.ts` 有一条用例钉住它。
 37. **门户的文案也是「能力 A」的一部分，说错等于把承诺讲反了。** 门户「术语参考」面板曾经写着「当前版本密文由服务端生成，生成时服务端能看到你选的选项」—— 那是 v0.1.0 的口径，v0.2.0 的密文与证明都在浏览器本地生成。**服务端那条底线由 `tests/architecture/` 守，文案这一半由 `web/src/components/panels/panels.test.ts` 守**（文案里再出现「服务端能看到你选的选项」「密文由服务端生成」「还没有真实的选票电路」这类说法就红）。同理，README 的「当前版本边界」与 techspec §7.1 的能力清单要跟实现对齐 —— **改完实现要回头看一眼这三处**，它们都是对外承诺。
 38. **改服务端的协议，四个客户端都要一起改：门户、CLI、压测工具、测试。** 2026-10-25 实测踩过：凭证签发从「一步式领凭证」改成真两段式盲签名后，`cmd/loadtest` 没跟着改 —— 领到的凭证没有签名，每张票 400 `INVALID_REQUEST`、0 票入库，而**报告看上去像「服务端扛不住」**（数字全 400、落库 0）。压测工具是「服务端扛不扛得住」的唯一证据来源，它一坏，容量与防重投的结论就整个失真。**守法**：工具的假服务端按当前协议实现（`cmd/loadtest/main_test.go`），协议漂移会让用例红；改协议时把 `cmd/loadtest` 列进改动清单。
+39. **SQLite 的批量写入有两道坎，跨过去才算修完。** 2026-10-25 排查「备池接口 500 `unable to open database file`」查出来的：
+   - **一条语句的绑定参数有上限**：7 列 × 4681 行就超了（新版上限 32766），报 `too many SQL variables`。而 `credentials/pool` 允许一次投 **10000** 个槽位 —— 不分批必然失败。修法：`persistence/credential_claim_repository.go` 里分批（100 行/条语句），**批次在同一个事务里**。
+   - **多行 INSERT 的主键去重会建临时索引**，撑破内存就溢写临时文件；本机（Windows，用户目录下的临时目录）实测这个临时文件建不出来 → 整条 INSERT 以 `SQLITE_CANTOPEN` 失败，接口只报一句看不懂的 `unable to open database file`。修法：驱动的 ConnectHook 对**每条连接**设 `PRAGMA temp_store=MEMORY`（`persistence/db.go`）。
+   - **两条都要有回归测试**：光有分批不够（内存库的临时表天生在内存里，复现不出第二条），光有 pragma 也不够（第一条是确定性失败）。用例见 `internal/infrastructure/persistence/credential_claim_repository_test.go` 的 `TestCredentialClaimRepository_SaveLargeBatch` —— **必须用文件库 + UUID 长度的 id**，否则测不出来。
 
 ---
 
