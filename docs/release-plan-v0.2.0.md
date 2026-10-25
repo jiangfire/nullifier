@@ -5,7 +5,7 @@
 > [`docs/project-map.md`](./project-map.md)（上下文索引）、
 > [`docs/t22-eligibility-design.md`](./t22-eligibility-design.md)（一人一票的设计）
 >
-> 分支：`feat/v0.2.0-m2-proof-chain`（从 `main` 切出）
+> 分支：`feat/v0.2.0-m2-proof-chain`（从 `main` 切出）—— **已合并回 `main` @ `241989b`（merge commit），该分支已删除**；v0.2.0 的发版点由 tag `v0.2.0` 独立保留
 > 制定日期：2026-10-25
 > 状态：**发版准备完成，已拍板发布**（2026-10-25，见 §6）
 
@@ -301,7 +301,8 @@ tag 推送后流水线断掉的阻断性问题**。
 | 项 | 值 |
 |---|---|
 | tag | `v0.2.0`（**注解 tag**）@ `abc86ca3ab55d1dd08c9fbb0c31bf4d21c4971ff` |
-| 分支 | `feat/v0.2.0-m2-proof-chain` → `origin`（本地 HEAD = 远端 = tag 指向的提交，三者一致） |
+| 分支 | `feat/v0.2.0-m2-proof-chain` → `origin`（发版时本地 HEAD = 远端 = tag 指向的提交，三者一致） |
+| 合并 | PR [#4](https://github.com/jiangfire/nullifier/pull/4) → `main` @ `241989b`（**merge commit**，两个父提交 `1ec48d4` + `fa8b65d`，80 笔提交全部保留）；分支合并后已删除 |
 | 流水线 | release run **40185592513**，**8 个 job 全绿**（`verify` / `build` ×5 平台 / `web` / `release`） |
 | 发布时间 | 2026-10-25 10:41:47 UTC（18:41:47 CST） |
 | 产物 | **12 个**：5 个平台的 `nullifier-<os>-<arch>.zip` + 各自的 `.sha256`，外加 `nullifier-web-0.2.0.zip` + `.sha256` |

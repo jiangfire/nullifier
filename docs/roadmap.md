@@ -280,7 +280,7 @@ release 流水线全绿，GitHub Release 12 个产物已发布并核验）。
 | T22 | 资格证明（一人一票） | ✅ **已落地** —— 见下面的「T22 落地核对」 |
 | T19 | 生产配置落地 | 🟡 **部分落地** —— `CONFIG_FILE` 显式路径、缺文件启动失败、启动日志打印实际路径都已完成；CORS 的真实源仍是部署项 |
 | T20 | 端到端验收（三个盲区） | 🟡 **三盲区各补了一部分，没有一项完全闭合** —— 见 §4.3（盲区 2 的手工流程已固化成 `scripts/browser-acceptance.sh`） |
-| T21 | 发版（v0.2.0） | ✅ **已发版（2026-10-25）** —— tag `v0.2.0` @ `abc86ca` 已推，release 流水线 8 个 job 全绿，GitHub Release 12 个产物（5 平台二进制 + 门户包，各带 sha256）。**发布出去的门户包已下载核验：含 `ballot-prover.wasm`（11,651,679 字节，magic 合法）与 `wasm_exec.js`，四个 prover API 齐全；两把 proving key 按设计不在包里，部署方须自行补** |
+| T21 | 发版（v0.2.0） | ✅ **已发版（2026-10-25）** —— tag `v0.2.0` @ `abc86ca` 已推，release 流水线 8 个 job 全绿，GitHub Release 12 个产物（5 平台二进制 + 门户包，各带 sha256）；**已合并回 `main` @ `241989b`**（PR #4，merge commit，80 笔提交全部保留）。**发布出去的门户包已下载核验：含 `ballot-prover.wasm`（11,651,679 字节，magic 合法）与 `wasm_exec.js`，四个 prover API 齐全；两把 proving key 按设计不在包里，部署方须自行补** |
 
 **T22 落地核对**（一人一票）—— 落地了什么：
 
