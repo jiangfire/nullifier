@@ -32,6 +32,20 @@ crypto:
   vk_path: "./keys/verifying.key"
   issuer_key_path: "issuer_keys.json"
   issuer_rotate_days: 90
+  # 资格名单的树根与资格电路的验证密钥。release 模式**两个都必须配**，
+  # 缺一个服务就起不来 —— 没有它们，服务端无法强制「一人一票」。
+  #
+  # root 来自离线名单工具的 root.json；verifying key 来自
+  # `nullifier-keygen -circuit eligibility`。两者必须成对出现。
+  #
+  # 服务端只要 root：它能验证「这个人的资格在名单里」，却无法把资格对应到
+  # 任何成员 —— 成员包绝不能进服务端。
+  #
+  # 填好之后大致长这样：
+  #   eligibility_root: "16e575fde58737063900c70ffbe3480860ca3e0c73641281cdc5c7ab79ecafd0"
+  #   eligibility_vk_path: "./keys/eligibility-verifying.key"
+  eligibility_root: ""
+  eligibility_vk_path: ""
 
 db:
   driver: "postgres"
