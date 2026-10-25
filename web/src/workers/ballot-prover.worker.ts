@@ -1,15 +1,20 @@
 /**
  * 浏览器端 prover 的 Worker。
  *
- * 为什么放 Worker 里：加载 proving key 会编译一次选票电路，浏览器上大约
+ * 为什么放 Worker 里：加载 proving key 会编译一次电路，浏览器上大约
  * 7~8 秒；出证明再花 2 秒左右。这两段都在主线程上做会把界面卡死，
  * 放进 Worker 里主线程照常响应。
  *
  * 这里的密码学全部由 WASM 模块（`cmd/ballot-wasm`）完成：加密、nullifier
- * 派生、公开输入拼装、Groth16 证明。本文件只负责把资源喂进去、把结果取回来。
+ * 派生、公开输入拼装、Groth16 证明、资格证明。本文件只负责把资源喂进去、
+ * 把结果取回来。
+ *
+ * 同一个模块里有两套电路（选票与资格），密钥互相独立：走哪条路就下载哪把
+ * proving key。
  */
 
 import type {
+  EligibilityProverResult,
   ProverResult,
   ProverWorkerMessage,
   ProverWorkerReply,
@@ -28,6 +33,8 @@ declare function importScripts(urls: string): void;
 interface ProverApi {
   init(payload: string): { ok: boolean; error?: string; init_ms?: number };
   prove(payload: string): ProverResult;
+  initEligibility(payload: string): { ok: boolean; error?: string; init_ms?: number };
+  proveEligibility(payload: string): EligibilityProverResult;
 }
 
 const scope = self as unknown as {
@@ -58,7 +65,7 @@ async function waitForApi(): Promise<ProverApi> {
 }
 
 /** 跑一次完整的出票流程。 */
-async function runProver(message: ProverWorkerMessage): Promise<ProverResult> {
+async function runProver(message: ProverWorkerMessage): Promise<ProverResult | EligibilityProverResult> {
   importScripts(message.glueUrl);
 
   const go = new Go();
@@ -79,6 +86,15 @@ async function runProver(message: ProverWorkerMessage): Promise<ProverResult> {
   }
   const provingKey = toBase64(new Uint8Array(await keyResponse.arrayBuffer()));
 
+  if (message.type === 'proveEligibility') {
+    const initResult = api.initEligibility(JSON.stringify({ proving_key: provingKey }));
+    if (!initResult.ok) {
+      throw new Error(initResult.error ?? '加载资格 proving key 失败');
+    }
+    const result = api.proveEligibility(JSON.stringify(message.request));
+    return { ...result, init_ms: initResult.init_ms };
+  }
+
   const initResult = api.init(JSON.stringify({ proving_key: provingKey }));
   if (!initResult.ok) {
     throw new Error(initResult.error ?? '加载 proving key 失败');
@@ -90,7 +106,7 @@ async function runProver(message: ProverWorkerMessage): Promise<ProverResult> {
 
 scope.onmessage = (event: MessageEvent<ProverWorkerMessage>) => {
   const message = event.data;
-  if (!message || message.type !== 'prove') {
+  if (!message || (message.type !== 'prove' && message.type !== 'proveEligibility')) {
     return;
   }
   runProver(message)

@@ -18,6 +18,20 @@ vi.mock('../lib/wasm-prover', () => ({
 }));
 
 /**
+ * 浏览器端资格 prover 的桩。
+ *
+ * 资格证明在真实环境里由 WASM 模块在 Worker 里出；这里只验证门户这一侧的
+ * 编排：先取一次挑战、再把成员包与挑战交给 prover、最后把证明带进领取请求。
+ */
+const { generateEligibilityProofMock } = vi.hoisted(() => ({
+  generateEligibilityProofMock: vi.fn(),
+}));
+
+vi.mock('../lib/eligibility-prover', () => ({
+  generateEligibilityProof: generateEligibilityProofMock,
+}));
+
+/**
  * node 环境没有 DOM，composable 初始化时就要读 localStorage，这里补一个最小实现。
  */
 const storage = new Map<string, string>();
@@ -457,6 +471,105 @@ describe('匿名领取凭证', () => {
     const claimed = await portal.claimCredential();
 
     expect(claimed).toBe(false);
+    const errors = portal.notices.value.filter((item) => item.level === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('没导入资格包时，领取请求体仍然是空的', async () => {
+    const calls = stubFetch([
+      { match: (url) => url.includes('/credentials/claim'), payload: reservationPayload() },
+      { match: (url) => url.includes('/credentials/blind-sign'), payload: blindSignaturePayload() },
+      { match: (url) => url.includes('/credentials/attest'), payload: attestedCredential() },
+    ]);
+    const portal = setupPortal();
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(true);
+    const reserveCall = calls.find((item) => item.url.includes('/credentials/claim'));
+    expect(Object.keys(reserveCall?.body ?? {})).toEqual([]);
+    expect(generateEligibilityProofMock).not.toHaveBeenCalled();
+  });
+
+  it('导入了资格包时：先取挑战，再把证明带进领取请求', async () => {
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('/eligibility-challenge'),
+        payload: {
+          proposal_id: 'p1',
+          root: 'root-hex',
+          depth: 10,
+          challenge: 'challenge-hex',
+        },
+      },
+      { match: (url) => url.includes('/credentials/claim'), payload: reservationPayload() },
+      { match: (url) => url.includes('/credentials/blind-sign'), payload: blindSignaturePayload() },
+      { match: (url) => url.includes('/credentials/attest'), payload: attestedCredential() },
+    ]);
+    generateEligibilityProofMock.mockResolvedValue({
+      proof: 'eligibility-proof',
+      qualificationId: 'qualification-hex',
+      initMs: 100,
+      proveMs: 200,
+    });
+    const portal = setupPortal();
+    portal.eligibilityPackage.value = {
+      member_id: 'member-1',
+      secret: 'secret',
+      leaf: 'leaf',
+      index: 0,
+      path: ['sibling'],
+      root: 'root-hex',
+      depth: 10,
+    };
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(true);
+
+    // 挑战先到，prover 拿到的就是它与成员包。
+    const challengeCall = calls.find((item) => item.url.includes('/eligibility-challenge'));
+    expect(challengeCall).toBeDefined();
+    expect(generateEligibilityProofMock).toHaveBeenCalledWith({
+      proposalId: 'p1',
+      challenge: 'challenge-hex',
+      root: 'root-hex',
+      memberPackage: portal.eligibilityPackage.value,
+    });
+
+    // 领取请求体里只有资格材料那三样，**没有真人身份字段**。
+    const reserveCall = calls.find((item) => item.url.includes('/credentials/claim'));
+    expect(reserveCall?.body).toEqual({
+      eligibility_proof: 'eligibility-proof',
+      qualification_id: 'qualification-hex',
+      challenge: 'challenge-hex',
+    });
+  });
+
+  it('资格证明失败时不发起领取，并给出提示', async () => {
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('/eligibility-challenge'),
+        payload: { proposal_id: 'p1', root: 'root-hex', depth: 10, challenge: 'challenge-hex' },
+      },
+    ]);
+    generateEligibilityProofMock.mockRejectedValue(new Error('证明生成失败'));
+    const portal = setupPortal();
+    portal.eligibilityPackage.value = {
+      member_id: 'member-1',
+      secret: 'secret',
+      leaf: 'leaf',
+      index: 0,
+      path: ['sibling'],
+      root: 'root-hex',
+      depth: 10,
+    };
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(false);
+    // 证明没过就不该消耗池槽位：领取这一步根本没发生。
+    expect(calls.filter((item) => item.url.includes('/credentials/claim')).length).toBe(0);
     const errors = portal.notices.value.filter((item) => item.level === 'error');
     expect(errors.length).toBeGreaterThan(0);
   });

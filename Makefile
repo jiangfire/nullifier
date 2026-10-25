@@ -28,7 +28,7 @@ endif
 	test test-short cover pg-test \
 	vet fmt fmt-check \
 	web-install web-dev web-build web-test web-lint web-typecheck web-format web-format-check \
-	web-wasm web-proving-key \
+	web-wasm web-proving-key web-eligibility-key eligibility-list \
 	check ci clean
 
 help: ## Show available targets
@@ -142,6 +142,18 @@ web-proving-key: ## Publish the proving key to web/public (make web-proving-key 
 	@mkdir -p web/public
 	cp "$(PK)" web/public/proving.key
 	@echo "web/public/proving.key is ready (never commit it)"
+
+web-eligibility-key: ## Publish the eligibility proving key (make web-eligibility-key PK=<path>)
+	@if [ -z "$(PK)" ]; then \
+		echo "usage: make web-eligibility-key PK=<path to eligibility-proving.key>"; \
+		exit 2; \
+	fi
+	@mkdir -p web/public
+	cp "$(PK)" web/public/eligibility-proving.key
+	@echo "web/public/eligibility-proving.key is ready (never commit it)"
+
+eligibility-list: ## Build the offline eligibility-list tool
+	$(GO) build -o eligibility-list ./cmd/eligibility-list
 
 # ---------- 组合目标 ----------
 

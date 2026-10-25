@@ -75,6 +75,44 @@ async function claim(): Promise<void> {
           />
         </label>
 
+        <div class="field">
+          <span class="field-label">资格文件（一人一票）</span>
+          <div class="row">
+            <button
+              class="btn btn--secondary btn--sm"
+              type="button"
+              @click="portal.openEligibilityImport()"
+            >
+              导入资格文件
+            </button>
+            <button
+              v-if="portal.eligibilityPackage"
+              class="btn btn--ghost btn--sm"
+              type="button"
+              @click="portal.clearEligibilityPackage()"
+            >
+              清除
+            </button>
+            <span
+              v-if="portal.eligibilityPackage"
+              class="mono truncate grow"
+              :title="portal.eligibilityPackageName"
+            >
+              {{ portal.eligibilityPackageName }}
+            </span>
+            <span v-else class="muted">
+              未导入 —— 服务端强制资格校验时必须先导入
+            </span>
+          </div>
+          <span
+            v-if="portal.eligibilityError"
+            class="field-error"
+            role="alert"
+          >
+            {{ portal.eligibilityError }}
+          </span>
+        </div>
+
         <div class="row">
           <button
             class="btn btn--secondary btn--sm"

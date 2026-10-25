@@ -15,6 +15,8 @@ import {
 } from '../lib/credential';
 import { generateNullifier } from '../lib/nullifier';
 import { generateLocalBallot } from '../lib/wasm-prover';
+import { generateEligibilityProof } from '../lib/eligibility-prover';
+import type { EligibilityMemberPackage } from '../lib/wasm-prover-protocol';
 import { describeApiError } from '../lib/error-messages';
 import {
   buildPortalSearch,
@@ -345,6 +347,15 @@ export function useVotePortal() {
   });
   const credentialLoading = ref(false);
   const credentialFileInput = ref<HTMLInputElement | null>(null);
+
+  // 资格包：成员自己拿到的 JSON 文件（离线名单工具生成）。
+  //
+  // 导入它，领取凭证时门户就能在本地出资格证明 —— 服务端据此强制「一人一票」，
+  // 却始终不知道这份资格属于谁。没导入时能不能领，取决于服务端是否强制。
+  const eligibilityPackage = ref<EligibilityMemberPackage | null>(null);
+  const eligibilityPackageName = ref('');
+  const eligibilityFileInput = ref<HTMLInputElement | null>(null);
+  const eligibilityError = ref('');
 
   const voteForm = reactive({
     proposalId: '',
@@ -1109,11 +1120,22 @@ export function useVotePortal() {
     proposalId: string,
     userPubKey: string,
   ): Promise<CredentialFlowResult> {
+    // 资格材料在**领取之前**备好：证明不过就不该消耗池槽位。
+    let claimBody: Record<string, string> = {};
+    try {
+      const eligibility = await buildEligibilityBody(proposalId);
+      if (eligibility !== null) {
+        claimBody = eligibility;
+      }
+    } catch (error) {
+      return { ok: false, title: '资格证明失败', message: describeError(error) };
+    }
+
     const reserve = await apiCall({
       baseUrl: apiBaseUrl.value,
       path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/claim`,
       method: 'POST',
-      body: {},
+      body: claimBody,
     });
     if (!reserve.ok) {
       return {
@@ -1131,6 +1153,122 @@ export function useVotePortal() {
         issuer_key_version: issuerKeyVersion,
       }),
     });
+  }
+
+  /**
+   * 备好领取请求里的资格材料。
+   *
+   * 服务端开启了资格校验时必须带：先向服务端要一次挑战，再用资格包在本地
+   * 出零知识证明。没导入资格包时返回 null —— 服务端会回
+   * `ELIGIBILITY_REQUIRED`，门户据此提示先导入资格文件。
+   */
+  async function buildEligibilityBody(
+    proposalId: string,
+  ): Promise<Record<string, string> | null> {
+    const pack = eligibilityPackage.value;
+    if (pack === null) {
+      return null;
+    }
+
+    const challengeResult = await apiCall({
+      baseUrl: apiBaseUrl.value,
+      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/eligibility-challenge`,
+      method: 'POST',
+      body: {},
+    });
+    if (!challengeResult.ok) {
+      throw new Error(
+        describeApiError(challengeResult.error, challengeResult.code, '服务端没有签发领取挑战'),
+      );
+    }
+    const challenge = toObject(challengeResult.data);
+    const root = textOf(challenge, 'root');
+    const challengeValue = textOf(challenge, 'challenge');
+    if (root === '' || challengeValue === '') {
+      throw new Error('服务端返回的领取挑战不完整');
+    }
+
+    const proof = await generateEligibilityProof({
+      proposalId,
+      challenge: challengeValue,
+      root,
+      memberPackage: pack,
+    });
+    return {
+      eligibility_proof: proof.proof,
+      qualification_id: proof.qualificationId,
+      challenge: challengeValue,
+    };
+  }
+
+  /** 打开资格文件选择框。 */
+  function openEligibilityImport(): void {
+    eligibilityFileInput.value?.click();
+  }
+
+  /** 清掉已导入的资格包。 */
+  function clearEligibilityPackage(): void {
+    eligibilityPackage.value = null;
+    eligibilityPackageName.value = '';
+    eligibilityError.value = '';
+  }
+
+  /**
+   * 导入成员自己的资格包。
+   *
+   * 资格包是**秘密材料**：谁拿到它谁就能领这一票。因此门户只把它留在内存里
+   * （不写进 localStorage、不上传），刷新页面就要重新导入。
+   */
+  async function importEligibilityPackage(event: Event): Promise<void> {
+    const target = event.target;
+    eligibilityError.value = '';
+    if (!(target instanceof HTMLInputElement) || !target.files || target.files.length === 0) {
+      return;
+    }
+    const file = target.files[0];
+    target.value = '';
+    try {
+      const raw = await file.text();
+      const parsed: unknown = JSON.parse(raw);
+      const pack = toObject(parsed);
+      if (pack === null) {
+        throw new Error('资格文件不是 JSON 对象');
+      }
+      const secret = textOf(pack, 'secret');
+      const leaf = textOf(pack, 'leaf');
+      const root = textOf(pack, 'root');
+      const path = pack.path;
+      if (secret === '' || leaf === '' || root === '') {
+        throw new Error('资格文件缺少 secret / leaf / root');
+      }
+      if (!Array.isArray(path) || path.some((item) => typeof item !== 'string')) {
+        throw new Error('资格文件的 path 不对');
+      }
+      const depth = pack.depth;
+      if (typeof depth !== 'number' || !Number.isFinite(depth) || depth <= 0) {
+        throw new Error('资格文件的 depth 不对');
+      }
+      const index = pack.index;
+      if (typeof index !== 'number' || !Number.isFinite(index) || index < 0) {
+        throw new Error('资格文件的 index 不对');
+      }
+      eligibilityPackage.value = {
+        member_id: textOf(pack, 'member_id'),
+        secret,
+        leaf,
+        index,
+        path: path as string[],
+        root,
+        depth,
+      };
+      eligibilityPackageName.value = file.name;
+      addNotice('success', '资格文件已导入', '领凭证时会用它在本机出资格证明');
+    } catch (error) {
+      eligibilityPackage.value = null;
+      eligibilityPackageName.value = '';
+      eligibilityError.value = describeError(error);
+      addNotice('error', '资格文件无效', eligibilityError.value);
+    }
   }
 
   /**
@@ -1991,6 +2129,13 @@ export function useVotePortal() {
     openCredentialImport,
     importCredentialFile,
     exportCredentialFile,
+    eligibilityPackage,
+    eligibilityPackageName,
+    eligibilityFileInput,
+    eligibilityError,
+    openEligibilityImport,
+    importEligibilityPackage,
+    clearEligibilityPackage,
 
     voteForm,
     voteLoading,

@@ -17,6 +17,10 @@ export type PortalErrorCode =
   | 'RESULT_ALREADY_PUBLISHED'
   | 'UNAUTHORIZED'
   | 'NOT_FOUND'
+  | 'ELIGIBILITY_REQUIRED'
+  | 'INVALID_ELIGIBILITY_PROOF'
+  | 'ELIGIBILITY_ALREADY_USED'
+  | 'ELIGIBILITY_NOT_ENABLED'
   | 'INTERNAL_ERROR';
 
 /** 与具体操作无关的失败：直接用错误码的通用说法。 */
@@ -30,6 +34,10 @@ const CODE_MESSAGES: Record<PortalErrorCode, string> = {
   RESULT_ALREADY_PUBLISHED: '结果已发布，无需重复发布',
   UNAUTHORIZED: 'Admin Token 缺失或无效，请在「连接配置」里填好',
   NOT_FOUND: '需要的数据还不存在',
+  ELIGIBILITY_REQUIRED: '服务端要求先证明你有投票资格，请导入你的资格文件再领凭证',
+  INVALID_ELIGIBILITY_PROOF: '资格证明没通过校验，请确认资格文件与名单、提案是否对应',
+  ELIGIBILITY_ALREADY_USED: '这份资格已经领过票了 —— 一人一票',
+  ELIGIBILITY_NOT_ENABLED: '服务端没有开启资格校验（一人一票）',
   INTERNAL_ERROR: '服务端出错，请查看后端日志',
 };
 

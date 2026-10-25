@@ -21,6 +21,7 @@ import (
 	"anonvote/internal/domain/entity"
 	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	"anonvote/internal/infrastructure/crypto/ballot"
+	"anonvote/internal/infrastructure/crypto/eligibility"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 )
@@ -440,12 +441,18 @@ func (c *cli) cmdIssueCredential(args []string) error {
 // 领取请求里没有任何身份信息：服务端随机给出一个池槽位（user_id），运营方
 // 因此不知道谁领了哪一个。客户端本地盲化凭证消息 → 服务端盲签名 → 客户端
 // 解盲 → 服务端验签落库。
+//
+// 带 `-eligibility <成员包>` 时多一步「证明我有资格」：先向服务端要一次
+// 挑战，用成员包与资格 proving key 在本地出零知识证明，再把证明带进领取
+// 请求。服务端据此强制「一人一票」—— 它只知道「某个资格用过」，不知道是谁。
 func (c *cli) cmdClaimCredential(args []string) error {
 	fs := flag.NewFlagSet("credential-claim", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	proposalID := fs.String("proposal", "", "proposal id")
 	pubKey := fs.String("pubkey", "", "base64 public key; default random")
 	outFile := fs.String("out", "", "optional output json file")
+	eligibilityFile := fs.String("eligibility", "", "member package json (enables one-person-one-vote)")
+	provingKeyPath := fs.String("proving-key", "", "eligibility proving key (required with -eligibility)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -458,6 +465,15 @@ func (c *cli) cmdClaimCredential(args []string) error {
 		return err
 	}
 
+	// 资格材料在**领取之前**备好：证明不过就不该消耗池槽位。
+	var claimBody map[string]any
+	if strings.TrimSpace(*eligibilityFile) != "" {
+		claimBody, err = c.buildEligibilityMaterial(proposal, *eligibilityFile, *provingKeyPath)
+		if err != nil {
+			return err
+		}
+	}
+
 	credential, err := c.runBlindSignatureFlow(
 		userPubKey,
 		claimMaxAttempts,
@@ -466,7 +482,7 @@ func (c *cli) cmdClaimCredential(args []string) error {
 			path := fmt.Sprintf(
 				"/api/v1/proposals/%s/credentials/claim", url.PathEscape(proposal),
 			)
-			if err := c.postJSON(path, map[string]any{}, false, &reservation); err != nil {
+			if err := c.postJSON(path, claimBody, false, &reservation); err != nil {
 				return nil, err
 			}
 			return &reservation, nil
@@ -493,6 +509,65 @@ func (c *cli) cmdClaimCredential(args []string) error {
 	credential.Version = 1
 	credential.ExportedAt = time.Now().UTC().Format(time.RFC3339)
 	return c.writeCredential(*credential, *outFile)
+}
+
+// eligibilityChallengeResponse 是领取挑战端点的响应。
+type eligibilityChallengeResponse struct {
+	ProposalID string `json:"proposal_id"`
+	Root       string `json:"root"`
+	Depth      int    `json:"depth"`
+	Challenge  string `json:"challenge"`
+}
+
+// buildEligibilityMaterial 备好领取请求里的资格材料。
+//
+// 三步：① 向服务端要一次挑战（root 一律以服务端为准，不信成员包里的）；
+// ② 用成员包与资格 proving key 在本地出零知识证明；③ 把证明、去重键与
+// 挑战拼成请求体。
+//
+// proving key 只在客户端：它不进服务端，服务端拿到的只有证明本身。
+func (c *cli) buildEligibilityMaterial(
+	proposalID string,
+	memberPackagePath string,
+	provingKeyPath string,
+) (map[string]any, error) {
+	if strings.TrimSpace(provingKeyPath) == "" {
+		return nil, errors.New("必须提供 -proving-key（资格证明的 proving key，只在客户端）")
+	}
+
+	var pack eligibility.MemberPackage
+	if err := readJSON(memberPackagePath, &pack); err != nil {
+		return nil, fmt.Errorf("读取资格包失败: %w", err)
+	}
+
+	prover, err := eligibility.NewProver(provingKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("加载资格 proving key 失败: %w", err)
+	}
+
+	var challenge eligibilityChallengeResponse
+	path := fmt.Sprintf(
+		"/api/v1/proposals/%s/credentials/eligibility-challenge", url.PathEscape(proposalID),
+	)
+	if err := c.postJSON(path, map[string]any{}, false, &challenge); err != nil {
+		return nil, fmt.Errorf("获取领取挑战失败: %w", err)
+	}
+
+	result, err := prover.ProveEligibility(eligibility.ClientEligibilityRequest{
+		MemberPackage: pack,
+		ProposalID:    proposalID,
+		Challenge:     challenge.Challenge,
+		Root:          challenge.Root,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("生成资格证明失败: %w", err)
+	}
+
+	return map[string]any{
+		"eligibility_proof": base64.StdEncoding.EncodeToString(result.Proof),
+		"qualification_id":  result.QualificationID,
+		"challenge":         challenge.Challenge,
+	}, nil
 }
 
 // writeCredential 把凭证写到文件或标准输出。
@@ -1197,6 +1272,7 @@ func printRootUsage() {
   proposal-create   -title -description -options -start -end
   credential-issue  -proposal -user [-pubkey] [-out]  (需要 admin token)
   credential-claim  -proposal [-pubkey] [-out]         (匿名领取:凭证池随机给一张)
+                     [-eligibility 包.json -proving-key 资格.key]  (带资格证明领取:一人一票)
   credential-show   -file
   ballot-encrypt    -proposal -option [-proof] [-out]   (本地加密:服务端看不到明文选项)
   ballot-prove      -ballot-file -proving-key [-out]     (本地出证明:proving key 只在客户端)
@@ -1212,6 +1288,7 @@ func printRootUsage() {
   go run ./cmd/cli -admin-token dev-admin-token proposal-create -title "Board" -options "A,B" -start 2026-12-01T10:00:00Z -end 2026-12-01T12:00:00Z
   go run ./cmd/cli -admin-token dev-admin-token credential-issue -proposal p-1 -user u-1001 -out cred-u1001.json
   go run ./cmd/cli credential-claim -proposal p-1 -out cred.json
+  go run ./cmd/cli credential-claim -proposal p-1 -eligibility eligibility-me.json -proving-key keys/eligibility-proving.key -out cred.json
   go run ./cmd/cli ballot-encrypt -proposal p-1 -option A -out ballot.json
   go run ./cmd/cli ballot-prove -ballot-file ballot.json -proving-key keys/proving.key -out ballot.json
   go run ./cmd/cli vote-submit -credential-file cred-u1001.json -ballot-file ballot.json

@@ -51,3 +51,44 @@ func TestRunHelp(t *testing.T) {
 func TestRunRejectsBadFlag(t *testing.T) {
 	require.Equal(t, 2, run([]string{"-unknown"}))
 }
+
+// TestRunGeneratesEligibilityKeys 覆盖第二套电路：资格电路的密钥文件名与
+// 选票那套不同，两套不能互相覆盖。
+func TestRunGeneratesEligibilityKeys(t *testing.T) {
+	dir := t.TempDir()
+
+	require.Equal(t, 0, run([]string{"-circuit", "eligibility", "-dir", dir}))
+
+	verifying, err := os.ReadFile(filepath.Join(dir, eligibilityVerifyingKeyFileName))
+	require.NoError(t, err)
+	require.NotEmpty(t, verifying)
+
+	proving, err := os.ReadFile(filepath.Join(dir, eligibilityProvingKeyFileName))
+	require.NoError(t, err)
+	require.NotEmpty(t, proving)
+
+	// 选票那套的文件名不该被资格电路覆盖。
+	_, err = os.Stat(filepath.Join(dir, verifyingKeyFileName))
+	require.True(t, os.IsNotExist(err))
+}
+
+// TestRunRejectsUnknownCircuit 未知电路直接报错，不静默生成选票那套。
+func TestRunRejectsUnknownCircuit(t *testing.T) {
+	require.Equal(t, 2, run([]string{"-circuit", "nope", "-dir", t.TempDir()}))
+}
+
+// TestDefaultKeyNames 钉住两套电路的默认文件名。
+func TestDefaultKeyNames(t *testing.T) {
+	verifying, proving, err := defaultKeyNames(circuitBallot)
+	require.NoError(t, err)
+	require.Equal(t, verifyingKeyFileName, verifying)
+	require.Equal(t, provingKeyFileName, proving)
+
+	verifying, proving, err = defaultKeyNames(circuitEligibility)
+	require.NoError(t, err)
+	require.Equal(t, eligibilityVerifyingKeyFileName, verifying)
+	require.Equal(t, eligibilityProvingKeyFileName, proving)
+
+	_, _, err = defaultKeyNames("nope")
+	require.Error(t, err)
+}
