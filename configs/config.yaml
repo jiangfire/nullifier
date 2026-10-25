@@ -7,11 +7,32 @@ server:
     - "http://127.0.0.1:3000"
     - "http://localhost:5173"
     - "http://127.0.0.1:5173"
+  # 可信反向代理的网段（CIDR）。**默认空 = 不信任任何代理**：
+  # 客户端 IP 取连接来源地址，伪造 X-Forwarded-For 无效。
+  # 部署在反向代理后面时必须填，否则所有请求会被算到代理的同一个 IP 上。
+  trusted_proxies: []
 
 crypto:
   vk_path: ""
   issuer_key_path: "issuer_keys.json"
   issuer_rotate_days: 90
+
+# 限流。release 模式下默认开启，显式设成 false 会让服务启动失败。
+#
+# 额度按路由组分档（credentials 领取链路 / votes 投票提交 / read 只读），
+# 默认偏宽松：宁可放过一次攻击，也不要在真实投票窗口里把投票人挡在门外。
+# 推导过程见 docs/t25-ratelimit-design.md。
+rate_limit:
+  enabled: false
+  credentials:
+    rps: 10
+    burst: 40
+  votes:
+    rps: 10
+    burst: 40
+  read:
+    rps: 50
+    burst: 100
 
 db:
   driver: "sqlite"

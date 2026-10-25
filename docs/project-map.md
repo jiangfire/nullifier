@@ -41,7 +41,7 @@
 | `cmd/ballot-wasm/main.go` | **浏览器端 prover 的 WASM 模块**（`GOOS=js GOARCH=wasm` 构建，见 §1.10）。在全局对象上注册 `nullifierProver`（**四个** API：`init` / `prove` / `initEligibility` / `proveEligibility` —— 选票与资格两套电路在同一个模块里）；非 js/wasm 平台有同名 stub，让 `go build ./...` 照常通过 |
 | `internal/di/providers.go` | 全部 Wire provider 的实现体（logger/db/各仓储/各 usecase/handler/指标）；密码学的装配点在这里：`NewProofVerifier` `NewEncrypter` `NewThresholdCrypto` `NewNullifierGenerator` `NewCredentialIssuer` `NewEligibilityService` `NewEligibilityUseRepository` |
 | `internal/di/wire.go` + `wire_gen.go` | Wire 声明与生成产物。**生成器现在能跑了**（见陷阱） |
-| `internal/config/config.go` | viper 加载 + 运行期校验；`server.mode` 推导 `Config.DebugMode`（`isDebugMode`），release/prod/production 走 `IsReleaseMode`；`CONFIG_FILE` 显式指定配置文件路径；`crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对**，且在 release 模式下**两者都必填** |
+| `internal/config/config.go` | viper 加载 + 运行期校验；`server.mode` 推导 `Config.DebugMode`（`isDebugMode`），release/prod/production 走 `IsReleaseMode`；`CONFIG_FILE` 显式指定配置文件路径；`crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对**，且在 release 模式下**两者都必填**；`rate_limit.*` 与 `server.trusted_proxies`（T25，release 模式下限流**强制开启**） |
 | `internal/config/admin_token.go` | admin bearer token 兜底生成（32 字节随机，base64url） |
 
 **模式**：usecase 构造函数是纯 DI 传参，无全局变量；logger 允许为 nil（自动降级 `zap.NewNop()`）。
@@ -59,6 +59,9 @@
 - `go.mod` 里还留着 `go.dedis.ch/kyber/v3`，但仓库里已经**没有任何 Go 文件引用它**（`kyber_elgamal.go` 已删）；`go mod tidy` 会把它摘掉。
 - ⚠️ **`go mod tidy` 在本仓库会顺手抬 go 指令版本**（2026-10-25 实测：`go 1.25.4` → `go 1.26.0`）
   并升级一批无关依赖。**加依赖请用 `go get <包>@<版本>` 定点加**，别直接跑 tidy。
+  ⚠️ **`go get` 也会抬**：它按新依赖声明的 go 版本走 —— `golang.org/x/time@v0.16.0`
+  要求 go 1.26.0，加它就把指令抬上去了。选 **v0.15.0**（要求 go 1.25.0），
+  既能用又不抬高使用者的最低 Go 版本。
 
 ### 1.2 领域层 —— `internal/domain/`
 
@@ -141,6 +144,18 @@ merkle 根 → 锚点哈希」在 **`internal/tally`**（见 §1.11）。这么�
 | `middleware/request_logger.go` | 请求日志（只记 method/path/status/latency/ip，**不记 header 和 body**） |
 | `middleware/metrics.go` | HTTP 请求数与耗时。⚠️ **必须挂在 `ErrorHandler` 之前** —— gin 的中间件先进后出，越早注册的回程越晚，这样才拿得到最终状态码 |
 | `internal/infrastructure/metrics/metrics.go` | Prometheus 指标集。**只暴露计数与耗时** —— 允许出现的标签名被一条测试逐个钉死 |
+| `middleware/rate_limit.go` | 限流中间件（T25）：超限返回 **429** + `Retry-After` + `{"error":…,"code":"RATE_LIMITED"}`。限流是**传输层**的保护措施，**不经过 `MapError`**（那张表映射领域错误），但文案仍走 `publicErrorMessage` |
+| `internal/infrastructure/ratelimit/ratelimit.go` | 令牌桶限流器。键是**每进程随机盐**的 SHA-256 哈希（内存里没有明文来源地址）；桶有空闲清理（`StartCleanup`，由 server 随生命周期启停） |
+
+**限流的路由分组**（`handler.go` 的 `RegisterRoutes` 挂限流中间件）：
+
+| 组 | 覆盖的端点 | 默认 rps / burst |
+|---|---|---|
+| `credentials` | `eligibility-challenge` / `claim` / `blind-sign` / `attest` | 10 / 40 |
+| `votes` | `POST /proposals/:id/votes` | 10 / 40 |
+| `read` | 提案列表 / `vote-status` / `election-key` / `results` / `audit-anchors` | 50 / 100 |
+
+管理端、`/healthz`、`/metrics` **不限流**（前者有 Bearer 令牌鉴权，后两者被限会直接影响可观测性）。设计稿见 [`t25-ratelimit-design.md`](./t25-ratelimit-design.md)。
 
 **路由表**（`server.go` 的 `NewServer` + `handler.go` 的 `RegisterRoutes`）：
 
@@ -177,7 +192,7 @@ merkle 根 → 锚点哈希」在 **`internal/tally`**（见 §1.11）。这么�
 **陷阱**：
 - `middleware/admin_auth.go` 用 `!=` 做字符串比较，**不是常数时间比较**。
 - `middleware/error_handler.go` 的 `publicErrorMessage` —— `INVALID_REQUEST` 直接回 `err.Error()`，会把内部错误细节透出；其他 code 都做了归一化。改文案时注意前后端 `error-messages.ts` 的映射是按英文短语正则匹配的。
-- 错误码枚举是**前后端契约**：`INVALID_REQUEST` `NOT_FOUND` `UNAUTHORIZED` `DOUBLE_VOTING` `CREDENTIAL_EXISTS` `CREDENTIAL_POOL_EMPTY` `USER_ALREADY_VOTED` `INVALID_CREDENTIAL` `DECRYPTION_SESSION_EXISTS` `RESULT_ALREADY_PUBLISHED` `ELIGIBILITY_REQUIRED` `INVALID_ELIGIBILITY_PROOF` `ELIGIBILITY_ALREADY_USED` `ELIGIBILITY_NOT_ENABLED` `INTERNAL_ERROR`。
+- 错误码枚举是**前后端契约**：`INVALID_REQUEST` `NOT_FOUND` `UNAUTHORIZED` `DOUBLE_VOTING` `CREDENTIAL_EXISTS` `CREDENTIAL_POOL_EMPTY` `USER_ALREADY_VOTED` `INVALID_CREDENTIAL` `DECRYPTION_SESSION_EXISTS` `RESULT_ALREADY_PUBLISHED` `ELIGIBILITY_REQUIRED` `INVALID_ELIGIBILITY_PROOF` `ELIGIBILITY_ALREADY_USED` `ELIGIBILITY_NOT_ENABLED` `RATE_LIMITED` `INTERNAL_ERROR`。**两边必须一致** —— 由 `tests/architecture/error_code_test.go` 双向比对（Go 的 `MapError` 码集合 ↔ TS 的 `PortalErrorCode` 成员集合）。服务端加了码而门户不认识时，**两边各自的自测都是绿的**，用户看到的是英文原文。
 
 ### 1.5 持久化层 —— `internal/infrastructure/persistence/`
 
@@ -592,7 +607,7 @@ publish        → 提案必须已关闭（isProposalClosed）
 14. **凭证改为匿名随机领取后，服务端单靠凭证无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。**这一条已由 T22 的资格证明补回**（见 §2.4）：服务端对**去重键**去重，而不是对凭证去重；去重键由成员零知识地出示，服务端不知道它属于谁。
 15. **`configs/config.production.yaml` 不会被自动加载** —— viper 默认只找 `config.*`。**已给出一条明确路径**：`CONFIG_FILE=./configs/config.production.yaml` 启动即可（`internal/config/config.go` 的 `ConfigFileEnvVar`）。显式指定的文件不存在时**直接启动失败**，不会静默回退到开发配置。启动日志的 `config_file` 字段会打印实际加载的文件路径。
 16. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项 —— release 模式下留空会打一条启动告警（同源部署留空是合法的，所以不阻止启动）。
-17. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（**16 个受控包**：usecase / config / di / tally / shares / http / http-middleware / crypto / crypto-ballot / metrics / persistence / cmd-cli / cmd-keygen / cmd-eligibility-list / cmd-audit-recompute / cmd-server），合计门槛见表内 `total` 行（77）。单个包回退会直接让 CI 变红。门槛本身还比各包当前水位低约 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。最低的一档是 `internal/infrastructure/persistence`（门槛 58）。**新增受控包时要同步改这张表** —— 新包不入表等于不受门槛约束。
+17. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（**17 个受控包**：usecase / config / di / tally / shares / http / http-middleware / crypto / crypto-ballot / metrics / persistence / ratelimit / cmd-cli / cmd-keygen / cmd-eligibility-list / cmd-audit-recompute / cmd-server），合计门槛见表内 `total` 行（77）。单个包回退会直接让 CI 变红。门槛本身还比各包当前水位低约 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。最低的一档是 `internal/infrastructure/persistence`（门槛 58）。**新增受控包时要同步改这张表** —— 新包不入表等于不受门槛约束。
 18. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go`）和 `isProposalClosed`（`tally.go`）。改时间规则要同时改两处。
 19. **release 模式不再启动即改表** —— 必须先跑 `nullifier-server -migrate`，忘了会直接启动失败（`persistence.SchemaReady` 检查）。开发模式仍然自动迁移。
 20. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
@@ -630,6 +645,13 @@ publish        → 提案必须已关闭（isProposalClosed）
    - **为什么是「一人一票」级别的事**：资格包是「谁拿到谁就能领这一票」。运营方按 root 声称的人数分发，被覆盖掉的那个人要么拿不到包，要么拿到**别人的**包 —— 两个人就能领同一票。
    - **现在的口径**：撞名在**写盘前**就被拒（`checkMemberFileNames`），报错点名是哪两个标识撞到了哪个文件，并给出改法（用只含字母数字与 `-_.` 的标识）；**带不带 `-force` 都拒绝**。落盘顺序也改了：**成员包先写、`root.json` 最后写** —— 失败时目录里没有 root，不会留下一份可被误上线的名单。
    - **守法**：改 `sanitizeFileName` 的规则、改文件名格式、加成员标识种类时，先想「两个不同的标识会不会归一到同一个名字」；改完跑 `cmd/eligibility-list` 的测试（`TestGenerateListRejectsCollidingFileNames` / `TestGenerateListWritesOnePackagePerMember`）。
+42. **gin 默认信任所有代理 —— `c.ClientIP()` 是可以伪造的。** gin v1.12.0 的默认 `trustedProxies` 是 `["0.0.0.0/0", "::/0"]`，`ClientIP()` 会取 `X-Forwarded-For` 的**第一个**值。后果有两个：① 任何按 IP 做的限流都能被一个请求头绕过去；② `middleware/request_logger.go` 记的 `client_ip` 也是可伪造的。修法是 `server.trusted_proxies`（CIDR 列表，**默认空 = 不信任任何代理**），启动时交给 `engine.SetTrustedProxies`。
+   - **部署在反向代理后面时必须显式配置**，否则所有请求会被算到代理的同一个 IP 上 —— 限流会误伤真实投票人（fail-closed：偏严而不是偏松）。
+   - **守法**：加任何依赖来源地址的逻辑（限流、审计、限速）之前，先确认 `server.trusted_proxies` 这条链是通的；改配置时记得 `net.ParseCIDR` 校验会让服务**启动失败**（网段配错的后果是「限流按错误的来源计数」）。
+43. **限流的键是加盐哈希，内存里没有明文 IP。** 限流器状态常驻内存，比日志更容易被转储、备份或顺手 dump —— 里面存着明文来源地址是不合适的。仓库已经有一条硬规矩（匿名领取凭证时不记录来源 IP），限流器不能另开一个口子。盐每进程随机：哈希不可逆 → 内存里还原不出 IP；副本之间的键也不可关联。
+   - **守法**：往限流器里加字段时别把明文来源塞进 `digest` 的输入之外的地方（比如别拿它做日志或指标标签）。
+44. **限流是进程内的，多副本下额度按副本数放大。** 没有 Redis 等外部状态：一个副本一份计数，实际额度 = 配额的**副本数倍**。别把「多副本」当成「额度是全局的」。
+45. **压测会被限流挡住。** `cmd/loadtest` 的所有请求来自同一台机器，共享同一个来源额度 —— 测服务端容量时**先调高额度或关掉限流**，否则测出来的是限流阈值而不是服务端容量（关限流只允许在 debug 模式）。这条与陷阱 38 是一对：压测工具是「服务端扛不扛得住」的唯一证据来源，它被限流挡住，容量结论同样失真。
 
 ---
 
@@ -642,12 +664,22 @@ go vet ./...
 gofmt -l ./cmd ./internal ./tests      # 应无输出
 go test ./...                          # Windows 需 CGO_ENABLED=1
 bash ./scripts/check-coverage.sh 80 coverage.ci.out   # 用 Git Bash，不是 WSL
-#   覆盖率门槛按包分档，逐包判定；门槛值见 scripts/coverage-thresholds.txt（16 个包）
+#   覆盖率门槛按包分档，逐包判定；门槛值见 scripts/coverage-thresholds.txt（17 个包）
 
 # 冻结的接口契约门禁：Go 的 struct tag ↔ TS 的 interface 双向比对 + 密文格式定版
 #   （改了字段名 / 删字段 / 改路径 / 改密文格式而不同步另一边，就会红）
 go test ./tests/architecture/ -run TestVoteSubmitRequestFieldsMatch -v
 go test ./tests/architecture/ -run TestCiphertextFormatIsFinalized -v
+
+# 错误码集合的跨语言门禁：Go 的 MapError ↔ TS 的 PortalErrorCode 双向比对
+#   （服务端加了码而门户不认识，两边各自的自测都是绿的 —— 用户看到英文原文）
+go test ./tests/architecture/ -run TestErrorCodes -v
+
+# 限流：超限 429、不同来源互不影响、伪造 X-Forwarded-For 不能绕过
+go test ./internal/infrastructure/ratelimit/ -v
+go test ./internal/infrastructure/http/ -run TestRateLimit -v
+go test ./internal/infrastructure/http/middleware/ -run TestRateLimit -v
+go test ./internal/config/ -run 'RateLimit|TrustedProxies' -v
 
 # 计票的规范算法（锚点哈希的 KAT —— 改了公式就会红）
 go test ./internal/tally/ -run TestAnchorHash_KAT -v
@@ -823,9 +855,15 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
 - **一人一票已由资格证明强制**（T22）：服务端对去重键去重，而不是对凭证去重；
   成员零知识地出示资格，服务端不知道它属于谁。详见 §2.4 与 §3 陷阱 30–34。
 - **门户与 CLI 的匿名性文案与实现仍有落差**（见 §1.7 陷阱）。
+- **限流已落地（T25）**，但它**不是**容量结论：
+  - 限流是**进程内**的，多副本下额度按副本数放大；**没有**分布式限流。
+  - 额度是**按来源地址**计的：机构集中投票时所有人共用一个出口 IP，额度要按实际
+    规模调高（部署清单 §3.1 有推导过程）。
+  - `cmd/loadtest` 会被限流挡住 —— 测容量前先调高额度或关掉限流。
+  设计稿见 [`docs/t25-ratelimit-design.md`](./t25-ratelimit-design.md)。
 - **容量数字只有 SQLite 一份，且不是规划。** `cmd/loadtest` 能跑出可复现的吞吐与防重投结论，
   但 SQLite 的单写者模型会把并发写串行化，数字反映的是存储层；**压测工具自己没有 prover**
   （门户与 CLI 都有），所以它只能在 debug 模式跑。按路线图 §2.2，真正的容量规划
-  （阈值、限流、PG 基准）属 v0.3.0。
+  （PG 基准、资源配置建议）属 v0.3.0 的 T27，**尚未做**。
 
 > 完整的问题清单、证据与修复顺序见 `docs/release-review-2026-10-20.md`；v0.2.0 的能力矩阵与任务状态见 [`docs/roadmap.md`](./roadmap.md) §4.1。

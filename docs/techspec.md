@@ -28,6 +28,7 @@ internal/
 │   │   └── mimc/           # 选票电路与资格电路共用的 MiMC 实现
 │   ├── http/               # Gin handler / server / middleware
 │   ├── metrics/            # Prometheus 指标（只暴露计数与耗时）
+│   ├── ratelimit/          # 令牌桶限流器（键是加盐哈希，桶有空闲清理）
 │   └── persistence/        # GORM 仓储、迁移、DB 配置
 ├── shares/                 # 门限份额：哈希、归属校验、份额文件读取
 ├── tally/                  # 计票的规范算法（服务端与审计复算工具共用这一份）
@@ -71,6 +72,8 @@ web/                        # Vue 3 前端门户
     审计复算工具用它打开票库：不是「我们保证不写」，是「写不了」。
   - `http`：Gin 路由、请求校验、中间件、错误映射。
   - `metrics`：Prometheus 指标。**只暴露计数与耗时**，不出现任何选票内容或身份。
+  - `ratelimit`：令牌桶限流器。键是**每进程随机盐**的 SHA-256 哈希 —— 限流器
+    状态常驻内存，里面不该有明文来源地址。桶有空闲清理（不清理就是内存泄漏）。
   - `crypto`：gnark proof verifier、kryptology credential issuer、Merkle root builder。
   - `crypto/ballot`：选票密码学栈 —— BN254 twisted Edwards 群运算、v3 选票密文、
     Fr 上的 Shamir 门限份额、Groth16 选票电路与证明/验证器。选票密文与电路
@@ -178,11 +181,16 @@ web/                        # Vue 3 前端门户
   - `server.mode`
   - `server.cors_allowed_origins`
   - `server.admin_bearer_token`
+  - `server.trusted_proxies`（可信反向代理的网段，CIDR 列表；默认空 = 不信任任何代理）
   - `crypto.vk_path`
   - `crypto.issuer_key_path`
   - `crypto.issuer_rotate_days`
   - `crypto.eligibility_root`（资格名单的 Merkle 树根，64 位十六进制的域元素）
   - `crypto.eligibility_vk_path`（资格电路的 verifying key 路径）
+  - `rate_limit.enabled`
+  - `rate_limit.credentials.rps` / `rate_limit.credentials.burst`
+  - `rate_limit.votes.rps` / `rate_limit.votes.burst`
+  - `rate_limit.read.rps` / `rate_limit.read.burst`
   - `db.driver`
   - `db.path`
   - `db.host`
@@ -193,6 +201,9 @@ web/                        # Vue 3 前端门户
   - `db.sslmode`
 - 资格校验的两个配置项有环境变量：`CRYPTO_ELIGIBILITY_ROOT` /
   `CRYPTO_ELIGIBILITY_VK_PATH`（优先级与其它 `crypto.*` 一致：环境变量高于配置文件）。
+- 限流与可信代理的环境变量：`RATE_LIMIT_ENABLED` / `RATE_LIMIT_CREDENTIALS_RPS` /
+  `RATE_LIMIT_CREDENTIALS_BURST` / `RATE_LIMIT_VOTES_RPS` / `RATE_LIMIT_VOTES_BURST` /
+  `RATE_LIMIT_READ_RPS` / `RATE_LIMIT_READ_BURST` / `SERVER_TRUSTED_PROXIES`。
 
 ### 4.3 运行期校验
 
@@ -201,9 +212,19 @@ web/                        # Vue 3 前端门户
   - **`crypto.eligibility_root` 与 `crypto.eligibility_vk_path` 必须同时必填** ——
     没有名单根与资格验证密钥，服务端就无法强制「同一个人只能领一张票」，
     那时它只是个能发凭证的服务器。这条与 `crypto.vk_path` 是同级的硬要求。
+  - **限流在 release 模式必须开着**：`rate_limit.enabled` **不配时按模式推导** ——
+  release 默认 `true`，debug 默认 `false`；release 模式下**显式**设成 `false` 会让服务
+  **启动失败**。公开端点上最贵的操作是投票（每张票一次 Groth16 验签），
+  不设上限时一个脚本就能把验签算力打满。
+    用「默认开 + 显式关才失败」而不是「不配就失败」：漏配的后果是「没限流」，
+    而硬失败会让所有存量 release 部署升级即宕机。
 - `crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对出现**
   （任何模式都校验）：只配根等于「不校验」，只配密钥则无从校验 ——
   两者只配一个时服务**启动失败**，不静默降级。
+- **限流额度必须为正数**（任何模式，只要限流是开着的）：`rps ≤ 0` 或 `burst ≤ 0`
+  一律启动失败 —— 额度为 0 意味着「全拒」（服务直接不可用），配错比不配更危险。
+- **`server.trusted_proxies` 里的每一项都必须是合法 CIDR**，否则启动失败：
+  网段配错的后果是「限流按错误的来源计数」，宁可启动时说清楚。
 - `server.admin_bearer_token` 若为空，会在启动期自动生成并写回内存配置
 - 自动生成的 token 会通过启动日志打印到控制台，仅对当前进程实例有效
 - 启动日志会打印**实际加载的配置文件路径**（`config_file`）—— 「以为加载了生产
@@ -425,6 +446,7 @@ server 负责把它暴露成端点。
 | `anonvote_credential_blind_signs_total` | `result` | 盲签名请求数 |
 | `anonvote_credential_attests_total` | `result` | 凭证 attest 请求数 |
 | `anonvote_eligibility_checks_total` | `result` | 资格证明校验数（`valid` / `invalid`） |
+| `anonvote_rate_limited_total` | `route` | 被限流挡下的请求数 |
 | `anonvote_tally_results_published_total` | —— | 发布出去的计票结果数 |
 
 - **只暴露计数与耗时**：指标里没有任何选票内容、候选人票数、nullifier 或身份 ——
@@ -440,6 +462,73 @@ server 负责把它暴露成端点。
 - 采集端点自身的请求**不计入** HTTP 请求数（否则请求数会被采集流量本身淹没）。
 - 带标签的指标族在没有样本时整个不出现在采集结果里 —— 这是 Prometheus 的惯例，
   告警规则用 `or vector(0)` 兜底。
+
+### 5.5 限流（T25）
+
+公开端点此前零防护：一个脚本就能把凭证池领空、把投票端点打满。
+限流实现在 `internal/infrastructure/ratelimit`（令牌桶）+ `middleware/rate_limit.go`
+（gin 中间件），设计稿见 [`t25-ratelimit-design.md`](./t25-ratelimit-design.md)。
+
+**路由组**（额度按组分档，用同一套额度要么挡不住投票端点，要么把只读端点也拖死）：
+
+| 组 | 覆盖的端点 | 默认 rps | 默认 burst |
+|---|---|---|---|
+| `credentials` | `eligibility-challenge` / `claim` / `blind-sign` / `attest` | 10 | 40 |
+| `votes` | `POST /proposals/:proposal_id/votes` | 10 | 40 |
+| `read` | 提案列表 / `vote-status` / `election-key` / `results` / `audit-anchors` | 50 | 100 |
+
+- 默认额度按「500 人 / 5 分钟 / 共用一个出口 IP」推出来 —— 宁可放过一次攻击，
+  也不要在真实投票窗口里把投票人挡在门外。真实部署规模决定最终值。
+- **管理端不限流**：它们有 Bearer 令牌鉴权，128 位令牌暴力不可行。
+- **`/healthz` 与 `/metrics` 不限流**：运维端点被限会直接影响可观测性。
+
+**计数键**：
+
+```
+键 = SHA-256( 每进程随机盐 ‖ 路由组 ‖ 提案ID ‖ 客户端IP )
+```
+
+- 盐每进程随机 → 限流器的内存里**没有明文 IP**（它常驻内存，比日志更容易被转储），
+  副本之间的键也不可关联。
+- 提案 ID 在键里 → A 提案的投票人不该吃掉 B 提案的额度。
+
+**响应**：
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 3
+
+{"error":"rate limit exceeded","code":"RATE_LIMITED"}
+```
+
+- `Retry-After` 是秒数（向上取整，最小 1）。
+- 错误码 `RATE_LIMITED` **不进 `MapError`** —— 那张表映射的是领域错误，
+  限流是传输层的保护措施；但**文案**仍走 `publicErrorMessage`，客户端看到的是同一套错误体。
+- 这是**加法**：冻结端点的请求/响应字段与路径都不变，只是多了一种可能的状态码
+  （决策 V3-D8）。客户端要处理 429 与 `Retry-After`。
+
+**客户端 IP 的可信性**（最容易被跳过也最致命的一环）：
+
+- gin v1.12.0 的**默认**行为是**信任所有代理**（`0.0.0.0/0`），`c.ClientIP()` 会取
+  `X-Forwarded-For` 的**第一个**值 —— 攻击者每个请求换一个头就能完全绕过限流。
+- `server.trusted_proxies`（CIDR 列表，**默认空 = 不信任任何代理**）在启动时交给
+  `engine.SetTrustedProxies`。这同时修掉了日志里 `client_ip` 同样可伪造的既有问题。
+- 部署在反向代理后面时**必须显式配置**，否则所有请求会被算到代理的同一个 IP 上
+  （fail-closed：偏严而不是偏松，但真实投票窗口里会误伤）。
+
+**内存与清理**：
+
+- 限流器是**进程内**的：多副本部署时每个副本独立计数，**实际额度是配额的副本数倍**。
+- 桶按空闲时长定期清理（`Limiter.StartCleanup`，由 server 随生命周期启停）——
+  不清理就是内存泄漏（攻击者轮换来源地址就能把它撑大）。
+- 限流状态**不落库、不进日志、不进指标**。
+
+**已知边界**：
+
+- 不做分布式限流（不引入 Redis 等外部依赖）。
+- 限流**不是**一人一票的替代品：资格证明管「谁能领」，限流管「单个来源能打多快」。
+- 压测（`cmd/loadtest`）从单一主机发起，会被限流挡住 —— 测容量时要先把额度调高
+  或关掉限流（见 §7.7）。
 
 ## 6. 密码学实现边界
 
@@ -912,7 +1001,7 @@ server 负责把它暴露成端点。
   `CREDENTIAL_EXISTS` / `CREDENTIAL_POOL_EMPTY` / `USER_ALREADY_VOTED` /
   `INVALID_CREDENTIAL` / `DECRYPTION_SESSION_EXISTS` / `RESULT_ALREADY_PUBLISHED` /
   `ELIGIBILITY_REQUIRED` / `INVALID_ELIGIBILITY_PROOF` / `ELIGIBILITY_ALREADY_USED` /
-  `ELIGIBILITY_NOT_ENABLED` / `INTERNAL_ERROR`），
+  `ELIGIBILITY_NOT_ENABLED` / `RATE_LIMITED` / `INTERNAL_ERROR`），
   `error` 是面向开发者的英文或原始 Go error 细节。
 - 前端不再直接透传 `error`：`src/lib/api.ts` 把 `code` 一并带出，
   `src/lib/error-messages.ts` 的 `describeApiError(message, code, fallback)` 负责翻译，
@@ -924,7 +1013,12 @@ server 负责把它暴露成端点。
   - 未命中已知短语的 `INVALID_REQUEST` 去掉 `invalid request: ` 前缀后透出后端细节，
     避免吞掉真实原因。
 - 所有失败出口统一走 `describeApiError`，不再有组件内的英文硬编码特例。
-- CLI 输出保持纯文本命令结果，不做中文化。
+- **错误码集合是跨语言契约**：`tests/architecture/error_code_test.go` 把 Go 侧
+  `MapError` 的码集合与 TS 侧 `PortalErrorCode` 的成员集合**双向比对**。
+  服务端加了码而门户不认识时，**两边各自的自测都是绿的**，用户看到的是一句英文原文 ——
+  这正是「两边各拿自己的常量自证是测不出这类问题」的典型，所以要有门禁。
+- CLI 输出保持纯文本命令结果，不做中文化；`RATE_LIMITED` 单独给一句
+  「等一等就好」的话（别让它看起来像服务端坏了）。
 
 ### 7.4 CLI
 
@@ -1017,6 +1111,17 @@ go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件> -j
 - **退出码可当门禁用**：`0` 一致 / `1` 审计未通过（结论不一致）/ `2` 用法或运行错误。
 - ⚠️ **计票份额是秘密材料** —— 凑齐门限份数就能还原全部选票的明文选项。
 - Makefile 目标：`make audit-recompute ARGS="-proposal p-1 -shares-file shares.json"`。
+
+### 7.7 压测工具（`cmd/loadtest`）
+
+并发投票压测工具，**只走 HTTP API**（不绕过服务端校验），凭证领取走真两段式盲签名
+（与门户/CLI 同一条链路）。防重投失守时退出码非 0。
+
+- 报告里给出状态码分布（含 `429/RATE_LIMITED`）、延迟分位与重复投票计数。
+- ⚠️ **压测会被限流挡住**：所有请求来自同一台机器，共享同一个来源额度。
+  测服务端容量时**必须**先把额度调高（`RATE_LIMIT_*`）或把限流关掉
+  （`RATE_LIMIT_ENABLED=false`，仅 debug 模式允许），否则测出来的是限流阈值，
+  不是服务端的容量。真正的容量数字见路线图 T27。
 
 ## 8. 测试策略
 

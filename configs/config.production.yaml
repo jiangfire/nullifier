@@ -23,6 +23,16 @@ server:
   # 留空的话，门户与后端不同源时浏览器会拦掉所有请求
   # （同源部署留空是合法的；release 模式下留空会有一条启动告警）。
   cors_allowed_origins: []
+  # 可信反向代理的网段（CIDR，空格分隔）。
+  #
+  # **默认空 = 不信任任何代理**：客户端 IP 取连接来源地址，伪造
+  # X-Forwarded-For 无效。gin 的默认行为是信任所有代理 —— 那会让限流的
+  # 计数键一换就绕过去。
+  #
+  # ⚠️ **部署在反向代理后面时必须配**，否则所有请求会被算到代理的
+  # 同一个 IP 上（偏严而不是偏松，但真实投票窗口里会误伤）。
+  #   trusted_proxies: "10.0.0.0/8 172.16.0.0/12"
+  trusted_proxies: []
   # release 模式下默认不在启动时改表：先跑 `nullifier-server -migrate`，再起服务。
   # 临时想恢复旧行为时改成 true。
   auto_migrate: false
@@ -46,6 +56,29 @@ crypto:
   #   eligibility_vk_path: "./keys/eligibility-verifying.key"
   eligibility_root: ""
   eligibility_vk_path: ""
+
+# 限流。
+#
+# release 模式下**默认开启**（显式设成 false 会让服务启动失败）——
+# 公开端点上最贵的操作是投票，每张票都要验一次 Groth16 proof。
+#
+# 额度按路由组分档：credentials（领取链路）/ votes（投票提交）/ read（只读）。
+# 默认值按「500 人 / 5 分钟 / 共用一个出口 IP」推出来的（推导见
+# docs/t25-ratelimit-design.md）。真实部署规模决定最终值。
+#
+# ⚠️ 机构集中投票时所有人共用一个出口 IP，**额度要按实际规模调高**，
+#    否则会在投票窗口里把投票人挡在门外。
+rate_limit:
+  enabled: true
+  credentials:
+    rps: 10
+    burst: 40
+  votes:
+    rps: 10
+    burst: 40
+  read:
+    rps: 50
+    burst: 100
 
 db:
   driver: "postgres"

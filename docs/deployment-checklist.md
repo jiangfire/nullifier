@@ -23,6 +23,7 @@
 | **客户端生成选票证明（proof）** | ✅ **CLI 可以**（`ballot-prove`）；✅ **门户也可以**（浏览器端 WASM prover） |
 | **服务端强制一人一票（资格证明）** | ✅ **可以**（release 模式**必须**开启：`crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **成对**配置，缺一个就启动失败） |
 | release 模式下完成一次投票 | ✅ **CLI 可以**（本地加密 + 本地出证明）；✅ **门户也可以**（前提是静态资源备齐，见 §6） |
+| **公开端点限流** | ✅ **可以**（v0.3.0 的 T25；release 模式**强制开启**，额度按「来源 + 路由组」计，见 §3.1） |
 
 > ⚠️ **门户的 prover 需要四个静态资源就位**：`wasm_exec.js`、`ballot-prover.wasm`、
 > `proving.key`、`eligibility-proving.key`。少任何一个，门户点「在浏览器本地生成选票」
@@ -206,6 +207,8 @@
 | `DB_MAX_OPEN_CONNS` | 建议显式设置（默认 25） | 不限制连接数会打爆 PG 的 `max_connections` |
 | `CRYPTO_ISSUER_KEY_PATH` | 凭证签发密钥落盘位置 | 用默认 `issuer_keys.json` |
 | `CRYPTO_ISSUER_ROTATE_DAYS` | 密钥轮换周期（默认 90 天） | 长期不轮换 |
+| `SERVER_TRUSTED_PROXIES` | **部署在反向代理后面时必填**（CIDR，空格分隔） | 不填则所有请求算到代理同一个 IP —— 限流会误伤真实投票人 |
+| `RATE_LIMIT_*` | 按实际投票规模调额度（见 §3.1） | 额度太小会在投票窗口里把投票人挡在门外 |
 
 > `SERVER_CORS_ALLOWED_ORIGINS` 留空在 release 模式下**会打一条启动告警但不阻止
 > 启动** —— 同源部署留空是合法的。不同源部署留空，门户会静默地什么都发不出去。
@@ -215,6 +218,37 @@
 > （「must be configured together」）；release 模式下**两个都缺**同样启动失败
 > （一人一票是 release 的硬要求）。开发模式两个都不配 = **不启用**资格校验，
 > 此时服务端可以匿名反复领票 —— 这不是 release 该有的状态。
+
+> ⚠️ **限流在 release 模式是硬要求**：`RATE_LIMIT_ENABLED=false` 会让服务
+> **启动失败**（默认就是开的）。公开端点上最贵的操作是投票 —— 每张票都要验一次
+> Groth16 proof，不设上限时一个脚本就能把验签算力打满。
+
+### 3.1 限流额度怎么定
+
+**先理解限流是按什么计数的**：按**来源地址**（`server.trusted_proxies` 口径下的
+客户端 IP）+ **路由组**。键里还带提案 ID —— A 提案的投票人不吃掉 B 提案的额度。
+
+| 组 | 覆盖的端点 | 默认 rps | 默认 burst |
+|---|---|---|---|
+| `credentials` | 领取链路四步（challenge / claim / blind-sign / attest） | 10 | 40 |
+| `votes` | 投票提交 | 10 | 40 |
+| `read` | 提案列表 / 投票状态 / 计票公钥 / 结果 / 审计锚点 | 50 | 100 |
+
+**默认值的推导**（一次完整投票：read 2 次 + credentials 3～4 次 + votes 1 次）：
+
+- **500 人 / 5 分钟 / 共用一个出口 IP**（机构集中投票的典型形态）→
+  credentials 组需 2000 次 → 约 3.5 分钟；votes 组需 500 次 → 约 50 秒。**可行**。
+- 单人投票 → 毫秒级完成，远低于额度。
+
+**所以：调额度的唯一理由是「你的投票规模/来源形态与默认假设不同」。**
+
+- 投票人分散（各自家庭宽带）→ 默认值够用。
+- 机构/学校集中投票（几百人共用一个出口 IP）→ **调高** `RATE_LIMIT_CREDENTIALS_*`
+  与 `RATE_LIMIT_VOTES_*`。宁可放过一次攻击，也不要在投票窗口里把投票人挡在门外。
+- 多副本部署 → 限流是**进程内**的，实际额度 = 配额的**副本数倍**，不用额外调。
+
+> ⚠️ 调高额度前先看一眼 `anonvote_rate_limited_total` —— 它能告诉你
+> 真实流量长什么样，而不是靠猜。
 
 ---
 
@@ -315,6 +349,9 @@
 | `POST /api/v1/proposals/:id/ballot-draft` | **404**（端点已删除，任何模式都不可达） | ☐ |
 | `GET /metrics`（无 admin token） | **401** —— 指标端点要 Bearer 令牌 | ☐ |
 | `GET /metrics`（带 admin token） | Prometheus 文本格式；**不含**任何选票内容或身份 | ☐ |
+| **限流真的生效** | 从同一个来源连打 `GET /api/v1/proposals` 50+ 次 → 出现 **429** + `Retry-After` 头；响应体是 `{"error":"rate limit exceeded","code":"RATE_LIMITED"}` | ☐ |
+| **限流不影响正常投票** | 换个来源（或调高额度）后，同一个人的完整流程（领凭证 → 出票 → 提交）**一次都不该**撞上 429 | ☐ |
+| `GET /metrics`（带 token，看限流计数） | `anonvote_rate_limited_total` 递增 | ☐ |
 | 领取凭证（无 admin token） | 端点是公开的 —— **没有** admin token 也能调；但开启资格校验后**还必须带资格材料**，否则是 **400 `ELIGIBILITY_REQUIRED`** | ☐ |
 | 管理端接口（无 token） | **401** | ☐ |
 | **浏览器里领一次凭证** | 「我的身份 →（先导入资格文件）→ 匿名领取」成功，页面变成「已就绪」。**必须走到 attest**（服务端日志里能看到 `credential attested`）—— 停在 claim 之后说明浏览器端与服务端的盲签名参数对不上 | ☐ |
@@ -456,9 +493,16 @@ go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件> -j
 - ⚠️ **「Playwright 装不上」这个前提已不成立**（2026-10-25 实测：`pnpm exec playwright
   install chromium` 可成功下载浏览器，118.1 MiB）—— 门户 UI 自动化（T28）仍在
   v0.3.0 的范围内但**尚未做**，所以这条边界暂时不变。
-- **v0.3.0 不解决限流与容量**（路线图 T25 / T27，尚未做）：凭证领取与投票端点都是
-  公开的，**没有**任何限流；`cmd/loadtest` 给的是**吞吐与防重投的复现脚本**，**不是
-  容量数字**（它没有 prover、只能跑 debug 模式、SQLite 单写者，真 PG 上没跑过）。
+- **限流已落地（T25）**：公开端点按「来源 + 路由组」限流，release 模式下**强制开启**
+  （`RATE_LIMIT_ENABLED=false` 会让服务启动失败）。设计稿见
+  [`t25-ratelimit-design.md`](./t25-ratelimit-design.md)。两条要知道的边界：
+  - **多副本下额度按副本数放大** —— 限流是进程内的，实际额度 = 配额的副本数倍。
+  - **`cmd/loadtest` 会被限流挡住**（所有请求来自同一台机器，共享一个来源额度）。
+    压测容量时**先调高额度或关掉限流**，否则测出来的是限流阈值而不是服务端容量
+    （关限流只允许在 debug 模式）。
+- **v0.3.0 仍不解决容量问题**（路线图 T27，尚未做）：`cmd/loadtest` 给的是
+  **吞吐与防重投的复现脚本**，**不是容量数字**（它没有 prover、只能跑 debug 模式、
+  SQLite 单写者，真 PG 上没跑过）。
   ⚠️ **面向有规模的真实投票仍需 v0.4.0** —— 本版解决的是接口稳定性与可运维性。
 - **SQLite 只在开发/单机形态用**（生产是 PostgreSQL）。它有两条会打穿管理面接口的
   限制，服务端已经各自绕开（见 techspec §4.6）：备池写入按 100 行分批、临时表与
