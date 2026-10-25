@@ -400,7 +400,15 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 1. **PostgreSQL testcontainers 集成测试** —— 本机走的是跳过分支
    - 🟡 **已补可复现脚本**（本轮落地）：仓库根 `docker-compose.yml` + `make pg-test`；
      集成测试也支持外部库模式（`ANONVOTE_TEST_PG_HOST`），每个测试开独立 schema。
-     ⚠️ **本机无 Docker，仍未实跑** —— CI 会实跑。
+     ⚠️ **本机无 Docker，仍未实跑** —— CI 会实跑（CI 的 go job 跑在 ubuntu-latest，
+     自带 Docker；缺 Docker 时集成测试**失败而不是跳过**，免得「跳过」被误读成「通过」）。
+   - ✅ **「一人一票」的强制点也纳入 PG 覆盖**（`tests/integration/eligibility_postgres_test.go`）：
+     去重靠的是 AutoMigrate 建出来的**复合唯一索引** `(proposal_id, qualification_id)`，
+     而 SQLite 与 PG 的 DDL 行为不同 —— 索引没建出来或建成单列，生产上就会变成
+     「同一个人能领两次票」且**没有任何报错**。测试用行为证明索引存在：同键第二次写必须
+     失败（409 的落地点）、换提案必须仍能写（约束是复合的）、同一提案下另一份资格也必须
+     能写（约束不是单列 `proposal_id`），并发同时记同一份资格必须**恰好一个**成功。
+     ⚠️ 本机无 Docker，这两条要等 CI 实跑才算证据。
 2. **门户 7 个 `.vue` 面板的浏览器实际渲染** —— 仓库里 `.vue` 曾零测试
    - 🟡 **已用服务端渲染补上一半**（本轮落地）：`web/src/components/panels/panels.test.ts`
      （15 个用例）把面板渲染成 HTML 字符串，模板 / setup / computed 都真跑一遍。
