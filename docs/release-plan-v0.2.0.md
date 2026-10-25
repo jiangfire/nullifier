@@ -239,9 +239,30 @@ tag 推送后流水线断掉的阻断性问题**。
 - **PG 集成测试在 Linux CI 上是真跑不是跳过**：main 的 CI run `39590728582` 显示
   `ok anonvote/tests/integration 11.101s`，故 `verify` job 不会因缺 Docker 而红。
 
-剩余的唯一风险：这 71 笔提交**从未整体在 Linux 上运行过**（本机 Docker 不可用、
-WSL 无发行版，补不了本地 Linux 运行）。tag 推送后的 `verify` job 就是它们的第一次
-Linux 执行 —— 风险面很低，但不为零。
+#### Linux 专属路径逐条排查（2026-10-25 追加）
+
+这 72 笔里有几处**只在非 Windows 平台执行**的代码，它们在本机永远跑不到，因此
+专门查了一遍：
+
+- **全仓库只有一处 `runtime.GOOS` 分支**：`cmd/keygen/main_test.go:30`
+  （`if runtime.GOOS != "windows"` 才断言 proving key 的权限是 `0600`）。
+  仓库里也没有任何 `os.Symlink` / `os.Chown` / `syscall.*` 调用。
+- **那条权限断言在 Linux 上会成立**：`os.WriteFile` 建新文件时传 `0600`，
+  内核再按 umask 收敛。实测常见 umask（`022` / `002` / `077` / `027` / `000`）
+  下 `0600` 都**保持不变** —— 只有掩掉 owner 位的 umask 才会影响它，
+  而 GitHub runner 的默认 umask 是 `022`。
+- **`tests/e2e/wasm_prover_test.go` 与 `wasm_eligibility_test.go`**：这两条在
+  Linux CI 上会**真跑**（ubuntu 镜像自带 node，`exec.LookPath("node")` 找得到），
+  不是跳过。已用 CI 同款 Go 1.25.4 实测两条都 PASS（10.4s / 11.5s，
+  分别走通 7917 条约束的选票电路与 6860 条约束的资格电路）。
+  它们用 `runtime.Caller` 推导仓库根，跨平台安全。
+- **Go 1.25.4 的 `lib/wasm/wasm_exec.js` 存在且与 1.26.6 完全一致**（同为 16,992 字节），
+  所以 WASM e2e 在 CI 上不会因为找不到胶水而静默跳过。
+
+结论：Linux 专属路径只有一条权限位断言，语义已验证成立。剩余的唯一风险是
+「这 72 笔提交**从未整体在 Linux 上运行过**」（本机 Docker 不可用、WSL 无发行版，
+补不了本地 Linux 运行）—— tag 推送后的 `verify` job 就是它们的第一次 Linux 执行，
+风险面已收敛到很低，但不为零。
 
 > 两个踩过的坑，供后续复现者参考：跑 `scripts/check-coverage.sh` 时脚本内部会把
 > `GOSUMDB` 设成 `off`，这会让 `GOTOOLCHAIN` 下载工具链失败（要先在外层设
