@@ -244,6 +244,30 @@
 - **`decrypt-setup` 不带 `-out` 时会把门限份额打印到 stdout**。
 - **`ballot-draft` 只在 debug 模式可用**：release 模式下服务端返回 404，CLI 拿不到草稿。
 
+### 1.9 压测工具 —— `cmd/loadtest/main.go`
+
+纯 HTTP API 的并发投票压测工具：不碰数据库，也不绕过服务端的任何校验。
+
+**流程**：建「窗口稍后开」的提案 → 初始化门限解密会话 → 投凭证池 → 匿名领凭证 →
+等窗口开 → 并发投票（每请求一个不同凭证与不同 nullifier）→ 同 nullifier 并发复核防重投 →
+用 `GET /proposals/:id/credentials` 核对已投票凭证数。
+
+**输出**：吞吐（req/s）、延迟 p50/p90/p99/max、状态分布、防重投结论、落库核对。`-json` 输出机器可读报告。
+
+**退出码**：`0` = 防重投守住（恰好放行 1 张）且落库数对得上；`1` = 防重投失守或落库数不符；
+`2` = 用法错误。**结论能当门禁用** —— 这是它用退出码而不是只打印报告的原因。
+
+**陷阱**：
+- **只能在 debug 模式跑**：客户端没有 prover，release 模式下所有投票请求都会因验签失败被拒
+  （工具发的是 `ZGV2LXByb29m`，即 `"dev-proof"` 的 base64）。工具不会替你伪造真证明。
+- **解密会话必须在投票窗口打开之前初始化**（服务端的硬性约束），所以工具先建「窗口稍后开」
+  的提案再初始化会话，最后才等到窗口开始。
+- **服务端没有 `GET /api/v1/proposals/:id` 端点** —— 工具靠 `GET /api/v1/proposals` 列表定位提案。
+- **SQLite 并发写会撞 `database is locked`**：服务端要用带 `_busy_timeout` 的 DSN
+  （如 `anonvote.db?_busy_timeout=10000&_journal_mode=WAL`），否则压测结果里全是 500 ——
+  那是存储层的问题，不是投票逻辑的问题。
+- **吞吐按墙钟算，不按延迟求和** —— 并发请求的延迟总和不是总耗时。
+
 ---
 
 ## 2. 关键流程
@@ -365,6 +389,12 @@ go run ./cmd/keygen -dir ./keys
 go run ./cmd/keygen -dir ./keys -force
 go test ./cmd/keygen/ -v
 
+# 并发投票压测（需要一个本地 debug 服务；SQLite 建议用带 busy_timeout 的 DSN）
+go test ./cmd/loadtest/ -v        # 工具自身的测试（httptest 模拟服务端）
+go run ./cmd/loadtest -admin-token dev-admin-token -votes 200 -concurrency 20
+go run ./cmd/loadtest -admin-token dev-admin-token -votes 200 -concurrency 20 -json
+#   防重投没守住时退出码非 0 —— 可以直接当门禁用
+
 # 前端
 pnpm --dir web run test
 pnpm --dir web run test -- src/lib/nullifier.test.ts   # 只跑 nullifier 单测
@@ -400,5 +430,8 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
 - **一人一票没有强制手段**（T22）：凭证匿名随机领取，同一个人可以领两张票投两次。
 - **`ballot-draft` 返回的 proof 是开发占位常量**（`developmentProofBase64`），不是真证明；release 模式下即使端点可达也会被验签拒。
 - **门户与 CLI 的匿名性文案与实现仍有落差**（见 §1.7 陷阱）。
+- **容量数字只有 SQLite 一份，且不是规划。** `cmd/loadtest` 能跑出可复现的吞吐与防重投结论，
+  但 SQLite 的单写者模型会把并发写串行化，数字反映的是存储层；客户端 prover 还没做，
+  压测只能在 debug 模式跑。按路线图 §2.2，真正的容量规划（阈值、限流、PG 基准）属 v0.3.0。
 
 > 完整的问题清单、证据与修复顺序见 `docs/release-review-2026-10-20.md`；v0.2.0 的能力矩阵与任务状态见 [`docs/roadmap.md`](./roadmap.md) §4.1。

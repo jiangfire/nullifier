@@ -61,6 +61,12 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 - **CLI 新增 `credential-claim` 命令**：匿名领取一张凭证（与门户的「领取凭证」同一个
   公开端点，**不需要 admin token**）。此前只有门户能领，脚本化领取用不了 —— 这是
   路线图 T9 / T22 里记下的缺口。请求体只有本地生成的公钥，没有任何身份信息。
+- **并发投票压测工具**（新命令 `cmd/loadtest`）：只走 HTTP API 建提案 → 备池领凭证 →
+  并发投票 → 复核防重投，输出吞吐 / 延迟分位 / 状态分布 / 防重投结论（`-json` 输出机器可读
+  报告）。**防重投没守住时以非 0 退出** —— 结论能直接当门禁用。工具自身有单元测试
+  （`cmd/loadtest/main_test.go`，用 `httptest` 模拟服务端），并补上了路线图 §4.3
+  「并发投票下的防重投与性能容量」盲区里一直空着的**容量**那一半。
+  ⚠️ 只能在 debug 模式跑（客户端还没有 prover），且数字来自 SQLite —— **不是容量规划**。
 - **浏览器端的盲签名 client 侧已就绪**（新模块 `web/src/lib/blind-rsa.ts` + `sha384.ts`）：
   RFC 9474 RSABSSA-PSS-Deterministic 的 `Prepare` / `Blind` / `Finalize`，以及
   EMSA-PSS 编码、MGF1、SHA-384 —— 纯 TypeScript 实现，不依赖任何外部密码学包。
