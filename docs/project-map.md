@@ -543,6 +543,7 @@ publish        → 提案必须已关闭（isProposalClosed）
 34. **`eligibility.TreeDepth = 10` 是编译期常量。** 名单上限 1024 人。改它要重编电路与 WASM、重生成两套密钥，并让所有成员换新的资格包 —— 不是改个配置项那么简单。
 35. **「一人一票」只在公开领取端点上强制。** 管理端签发（`POST /api/v1/credentials`，CLI 的 `credential-issue`）**不校验资格证明** —— 运营方可以为指定 `user_id` 签发凭证。运营流程若允许管理端补发凭证，这条路径会绕过资格去重。
 36. **发给 Worker 的东西必须是「普通对象」。** 门户里资格包存在 Vue 的 `ref` 里，读出来是**响应式 Proxy**，而 `postMessage` 的结构化克隆克隆不了 Proxy —— 浏览器直接抛 `DataCloneError: #<Object> could not be cloned.`，「匿名领取」必然失败。修法是在 `buildEligibilityProveRequest` 里把成员包**逐字段拷成普通对象**（在边界上保证可克隆，与来源是不是 Proxy 无关）。**这个坑 node 测不出来**：node 驱动的 WASM 用例不走 Worker，只有真浏览器能发现；`web/src/lib/eligibility-prover.test.ts` 有一条用例钉住它。
+37. **门户的文案也是「能力 A」的一部分，说错等于把承诺讲反了。** 门户「术语参考」面板曾经写着「当前版本密文由服务端生成，生成时服务端能看到你选的选项」—— 那是 v0.1.0 的口径，v0.2.0 的密文与证明都在浏览器本地生成。**服务端那条底线由 `tests/architecture/` 守，文案这一半由 `web/src/components/panels/panels.test.ts` 守**（文案里再出现「服务端能看到你选的选项」「密文由服务端生成」「还没有真实的选票电路」这类说法就红）。同理，README 的「当前版本边界」与 techspec §7.1 的能力清单要跟实现对齐 —— **改完实现要回头看一眼这三处**，它们都是对外承诺。
 
 ---
 

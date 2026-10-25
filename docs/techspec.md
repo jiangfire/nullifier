@@ -730,9 +730,8 @@ web/                        # Vue 3 前端门户
   - 运营端
 - 用户端能力：
   - 查看开放提案
-  - 领取或导入凭证
+  - 领取或导入凭证（开启资格校验时还要带资格证明，见 §6.11）
   - **在浏览器本地生成选票**（密文 + nullifier + 零知识证明，见 §6.10）
-  - 按选项生成投票草稿（**仅 debug 模式可见**）
   - 提交投票
   - 查询是否已投票
 - 运营端能力：
@@ -754,7 +753,8 @@ web/                        # Vue 3 前端门户
 - **浏览器端 prover 已落地**（`web/src/lib/wasm-prover.ts` + `web/src/workers/ballot-prover.worker.ts`）：
   门户在本地生成密文、nullifier 与证明再提交，服务端拿不到明文选项（见 §6.10）。
   前提是门户静态目录里备好 `wasm_exec.js`、`ballot-prover.wasm`、`proving.key` 三个文件
-  （`make web-wasm` / `make web-proving-key`）。
+  （`make web-wasm` / `make web-proving-key`）；**开启资格校验时是四个** —— 还要一把
+  `eligibility-proving.key`（见下）。
 - **「一人一票」在门户里多一步**（见 §6.11）：「我的身份」面板多一个「导入资格文件」
   （`eligibility-<member_id>.json`）。领凭证时门户先向服务端要一次领取挑战，再把
   成员包与挑战交给浏览器端 prover（`web/src/lib/eligibility-prover.ts`，密码学全在
