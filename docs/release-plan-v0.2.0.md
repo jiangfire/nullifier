@@ -211,3 +211,39 @@ git push origin feat/v0.2.0-m2-proof-chain v0.2.0
   剩下的是第 3 步（打注解 tag）与第 4 步（推分支 + 推 tag）—— **等拍板**。
 - ⚠️ 分支 `feat/v0.2.0-m2-proof-chain` **尚未推送**。
 - ⬜ 发版动作（§2）等拍板。
+
+### 8.1 发版流水线核对（2026-10-25）
+
+打 tag 之前把 `.github/workflows/release.yml` 通读并逐条本地复现，结论：**没找到会让
+tag 推送后流水线断掉的阻断性问题**。
+
+- **流水线本身已真跑通过**：v0.1.0 的 tag 里就含 `release.yml`，对应 Actions run
+  `39433251666` 八个 job 全绿（verify / build×5 平台 / web / release），产出 5 平台 zip
+  + 门户包 + 各 sha256。CI 基础设施不是纸面的。
+- **v0.2.0 相对 v0.1.0 只改了 3 处**（`web` job 编译并校验 prover、注入两把 proving key、
+  `release` job 改用 `gh api` 取注解 tag 正文），这几处**在 CI 里从未跑过**（v0.1.0 的
+  `web` job 没有 prover 步骤），已本地逐条复现：
+  - `pnpm --dir web install --frozen-lockfile` 通过（lockfile v9.0 与 pnpm 12 同步）；
+  - `GOOS=js GOARCH=wasm CGO_ENABLED=0` 编译出 11,953,957 字节的 `ballot-prover.wasm`，
+    `wasm_exec.js` 取自 `$(go env GOROOT)/lib/wasm/`；
+  - lint / tsc / vitest（19 个文件 156 条用例）/ rsbuild build 全绿，
+    `web/dist/` 实测含 `ballot-prover.wasm` 与 `wasm_exec.js`；
+  - 新的 tag 正文提取逻辑用现成的 v0.1.0 注解 tag 实测通过
+    （`git/ref/tags/v0.1.0` 的 `.object.type == "tag"` → `git/tags/<sha>` → `.message`）。
+- **Go 版本对齐**：CI 按 `go-version-file: go.mod` 装的是 **1.25.4**，本地默认 1.26.6。
+  已用 `GOTOOLCHAIN=go1.25.4` 复跑：`go build ./...` 通过、`go test -count=1 ./...` 全过
+  （含 `tests/integration` 8.7s、`tests/e2e` 46.9s）、覆盖率同样 **80.83%** 逐包全达标。
+- **无平台差异风险**：仓库没有任何 `_linux.go` / `_windows.go` 之类的平台专属文件，
+  build tag 只有 3 处（`cmd/ballot-wasm` 的 js/wasm 与非 js/wasm 两份、
+  `internal/di/wire.go` 的 `wireinject`）。
+- **PG 集成测试在 Linux CI 上是真跑不是跳过**：main 的 CI run `39590728582` 显示
+  `ok anonvote/tests/integration 11.101s`，故 `verify` job 不会因缺 Docker 而红。
+
+剩余的唯一风险：这 71 笔提交**从未整体在 Linux 上运行过**（本机 Docker 不可用、
+WSL 无发行版，补不了本地 Linux 运行）。tag 推送后的 `verify` job 就是它们的第一次
+Linux 执行 —— 风险面很低，但不为零。
+
+> 两个踩过的坑，供后续复现者参考：跑 `scripts/check-coverage.sh` 时脚本内部会把
+> `GOSUMDB` 设成 `off`，这会让 `GOTOOLCHAIN` 下载工具链失败（要先在外层设
+> `GOSUMDB=sum.golang.org`）；另外 `CGO_ENABLED` 必须为 1，否则
+> `github.com/mattn/go-sqlite3` 的 `SQLiteConn` 没有 `Exec` 方法，多个包直接 build failed。
