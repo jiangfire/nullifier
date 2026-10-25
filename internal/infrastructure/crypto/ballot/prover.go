@@ -31,6 +31,17 @@ func NewProver(provingKeyPath string) (*Prover, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read proving key: %w", err)
 	}
+	return NewProverFromBytes(raw)
+}
+
+// NewProverFromBytes 从 proving key 字节流加载证明器。
+//
+// 浏览器端没有文件路径：proving key 由门户下载后直接交给 WASM 模块，
+// 走的就是这个入口。
+func NewProverFromBytes(raw []byte) (*Prover, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("decode proving key: empty proving key")
+	}
 	key := groth16.NewProvingKey(ecc.BN254)
 	if _, err := key.ReadFrom(bytes.NewReader(raw)); err != nil {
 		return nil, fmt.Errorf("decode proving key: %w", err)
