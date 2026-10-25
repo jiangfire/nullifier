@@ -34,7 +34,8 @@
 |---|---|
 | `cmd/server/main.go` | 服务入口。加载配置 → 生成/校验 admin token → 建 logger → `di.InitializeServer` → `server.Run()`；`-migrate` 只跑迁移后退出（`serve(migrateOnly)`） |
 | `cmd/keygen/main.go` | 生成选票电路的 Groth16 密钥：`verifying.key`（0644，服务端用）/ `proving.key`（0600，**只在客户端侧**）；打印 verifying key 的 sha256 指纹；默认不覆盖已有文件（`-force` 才覆盖） |
-| `cmd/cli/main.go` | 15 个子命令的 CLI 客户端，**只走 HTTP API**，不绕过服务端校验 |
+| `cmd/cli/main.go` | 17 个子命令的 CLI 客户端，**只走 HTTP API**，不绕过服务端校验 |
+| `cmd/ballot-wasm/main.go` | **浏览器端 prover 的 WASM 模块**（`GOOS=js GOARCH=wasm` 构建，见 §1.10）。在全局对象上注册 `nullifierProver`（`init` / `prove`）；非 js/wasm 平台有同名 stub，让 `go build ./...` 照常通过 |
 | `internal/di/providers.go` | 全部 Wire provider 的实现体（logger/db/各仓储/各 usecase/handler）；密码学的装配点在这里：`NewProofVerifier` `NewEncrypter` `NewThresholdCrypto` `NewNullifierGenerator` `NewCredentialIssuer` |
 | `internal/di/wire.go` + `wire_gen.go` | Wire 声明与生成产物。**当前是手工同步的**（见陷阱） |
 | `internal/config/config.go` | viper 加载 + 运行期校验；`server.mode` 推导 `Config.DebugMode`（`isDebugMode`），release/prod/production 走 `IsReleaseMode`；`CONFIG_FILE` 显式指定配置文件路径 |
@@ -213,7 +214,9 @@
 | `src/components/` | `AppSidebar` `AppTopbar` `GuideOverlay` `JourneyBar` `NoticeStack` |
 | `src/components/ui/` | `EmptyState` `NoticeBanner` `StatTile` |
 | `src/composables/useVotePortal.ts` | **全部状态与 API 编排**（单文件约 1800 行，是前端的事实核心） |
-| `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `blind-rsa.ts` `credential.ts` `datetime.ts` `error-messages.ts` `field.ts` `focus-trap.ts` `keccak.ts` `mimc.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` `sha256.ts` `sha384.ts` —— 除 `api.ts` 外都有单测 |
+| `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `blind-rsa.ts` `credential.ts` `datetime.ts` `error-messages.ts` `field.ts` `focus-trap.ts` `keccak.ts` `mimc.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` `sha256.ts` `sha384.ts` `wasm-prover.ts` `wasm-prover-protocol.ts` —— 除 `api.ts` 外都有单测 |
+| `src/workers/ballot-prover.worker.ts` | **浏览器端 prover 的 Worker**：加载 Go 官方胶水 + WASM 模块，跑一次出票 |
+| `public/` | 门户静态资源目录：`wasm_exec.js` / `ballot-prover.wasm` / `proving.key`（构建产物，不入库，见 `web/public/README.md`） |
 | `src/styles/` | `tokens.css` `base.css` `components.css` `shell.css` |
 | `src/types/` | `portal.ts` `portal-api.ts` |
 | `vitest.config.ts` | 测试配置 + **自写的 `.vue` 编译插件**（见下） |
@@ -254,13 +257,19 @@
 - `web/src/lib/ballot-cipher.ts` —— **浏览器端选票加密**：BN254 twisted Edwards 上的指数 ElGamal（加密选项下标），点编码与 Go 侧逐字节一致（见 §3 陷阱 21）。计票公钥以**未压缩**形式传入，因此浏览器端不需要在域内求平方根。
 - `web/src/lib/credential.ts` —— **浏览器端凭证盲签名的客户端侧**：`credentialMessage`（`sha256(user_id ‖ 0x00 ‖ user_pub_key)`）、`parseIssuerKey`、`blindCredentialMessage`、`finalizeCredentialSignature`。与 Go 侧 `crypto.CredentialMessage` 同口径，由跨语言向量钉死。
 - `web/src/lib/{field,sha256,keccak,mimc}.ts` —— **浏览器端 nullifier 派生的底座**：域运算与标量规范编码、SHA-256、legacy Keccak-256（MiMC 轮常量由它派生）、Fr 上的 MiMC。全部是纯 TS 实现，不依赖任何外部密码学包（离线环境下装不了），也不依赖 WebCrypto（`crypto.subtle` 要求安全上下文，内网 http 部署会失效）。
+- `web/src/lib/wasm-prover.ts` + `web/src/workers/ballot-prover.worker.ts` —— **浏览器端 prover**：主线程发「资源地址 + 选项下标」，Worker 里加载 `wasm_exec.js` 与 `ballot-prover.wasm`，用 `cmd/ballot-wasm` 的 `nullifierProver` API 出票。密码学全在 Go 侧（WASM），门户只做编排。
 
 **陷阱**：
 - `lib/api.ts` 是唯一的 HTTP 出口，返回 `{ok, status, data, error, code, rawText}`；错误文案统一走 `lib/error-messages.ts` 的 `describeApiError(message, code, fallback)`，优先级 **业务短语 > 错误码 > 调用方兜底**。
 - **凭据与选项的绑定已经补上**：`lib/ballot.ts` 的 `hasBallotTargetDrifted` / `isBallotTargetCurrent` + `useVotePortal.ts` 里选项/提案变化的 watcher（清空 `encryptedVote` / `proof`）+ 提交前的 `ballotTargetCurrent` 校验。改了选项必须重新生成凭据。
 - **admin token 存 `sessionStorage`**（不落 `localStorage`），但仍是明文；同源脚本能读到。
-- **`ballot-draft` 在非 debug 模式返回 404**：门户此时拿不到任何可提交的密文/证明 —— **浏览器端 prover 还没做**（见 §5）。
-- **门户的匿名性文案仍与服务端能力有落差**：非 debug 模式下的提示文案说「正式客户端会在浏览器本地生成密文与证明」，但客户端 prover 尚未落地。
+- **`ballot-draft` 在非 debug 模式返回 404**：门户此时只能走浏览器端 prover 这条路
+  （`generateBallotLocally`）。三个静态资源（`wasm_exec.js` / `ballot-prover.wasm` /
+  `proving.key`）没备齐时，门户会报「下载 WASM 模块失败」—— 部署时要先跑
+  `make web-wasm` 与 `make web-proving-key PK=<路径>`。
+- **门户的匿名性文案与服务端能力已对齐**：出票入口的说明写的是「在浏览器本地生成」，
+  服务端确实拿不到明文选项；残留的 debug 模式 `ballot-draft` 已在文案里说明它是
+  开发联调入口。
 - `.vue` 面板**有渲染测试，但不是浏览器渲染**（见 §1.7 的「面板渲染测试」）。没有 CSS、没有事件绑定、没有客户端挂载 —— 改界面的视觉与交互仍要靠人工核对。
 - `pnpm run format`（prettier）会重写 `.pnpm-store`，必须先确认 `.prettierignore` 覆盖（当前已覆盖 `.pnpm-store/`）。
 
@@ -320,6 +329,43 @@
   （如 `anonvote.db?_busy_timeout=10000&_journal_mode=WAL`），否则压测结果里全是 500 ——
   那是存储层的问题，不是投票逻辑的问题。
 - **吞吐按墙钟算，不按延迟求和** —— 并发请求的延迟总和不是总耗时。
+
+### 1.10 浏览器端 prover —— `cmd/ballot-wasm/main.go`
+
+选票电路的 prover 编译成 `GOOS=js GOARCH=wasm`，由门户在浏览器里加载。
+
+**为什么不用 TS 实现电路**：证明要的是 Groth16 + BN254 配对运算，离线环境装不上
+`snarkjs` / `gnark-wasm` / `@noble/curves`；而仓库自己的 Go 侧已经有**同一套电路**
+（`internal/infrastructure/crypto/ballot`），直接编成 WASM 就能用，还顺带保证
+「客户端与服务端拼出的公开输入逐字段相同」。
+
+**接口**：在全局对象上注册 `nullifierProver`。
+
+| 函数 | 入参 | 出参 |
+|---|---|---|
+| `init` | `{"proving_key": "<base64>"}` | `{"ok":true,"init_ms":7608}` |
+| `prove` | `{"proposal_id","election_public_key","option_index","num_options"}` | `{"ok":true,"ciphertext","nullifier","proof","prove_ms":2254}` |
+
+**出票逻辑在 Go 侧一次做完**：`ballot.Prover.ProveBallot`（`ballot/client.go`）—— 压缩
+计票公钥 → 加密选项下标 → 随机 nullifier 秘密并派生 nullifier → 拼公开输入 → 出证明。
+nonce 与 nullifier 秘密**只在这一次调用里出现**。
+
+**构建**：`make web-wasm` → `web/public/ballot-prover.wasm`（约 11.9 MB，gzip 后约
+2.8 MB）+ `web/public/wasm_exec.js`（Go 官方胶水）。proving key 由运营方用
+`make web-proving-key PK=<路径>` 放进同一个目录。
+
+**陷阱**：
+- **必须先 `logger.Disable()`**：js/wasm 往 stdout / stderr 写日志是「发请求给 JS 侧、
+  再等回复」的同步调用，而 JS 侧此刻正卡在这次同步回调里，事件循环转不起来 —— 结果是
+  整个运行时死锁（`all goroutines are asleep`）。不关日志，模块在 `init` 时必崩。
+- **`js.FuncOf` 只能返回 JS 支持的类型**（布尔 / 数字 / 字符串 / 数组 / 对象），
+  不能直接返回 Go 结构体；出参统一用 `map[string]any`。
+- **proving key 有 1.2 MB**，base64 之后 1.6 MB —— 用 `String.fromCharCode(...bytes)`
+  一次展开会爆栈，必须分块（Worker 里已按 32 KB 分块）。
+- **proving key 不能进服务端**：服务端只拿 verifying key。有它的人能自己出证明，
+  证明只绑定密文、不绑定身份，不构成新的身份泄露，但服务端**不该**能替投票人出票。
+- **实测耗时**（node 驱动同一个模块）：初始化 7.6 秒、出证明 2.25 秒、证明 128 字节。
+  初始化那 7.6 秒是编译电路，因此必须放进 Worker，否则界面会卡住。
 
 ---
 
@@ -435,6 +481,10 @@ go test ./internal/infrastructure/http/ -run TestServer_RealBallotProof -v
 go test ./internal/infrastructure/crypto/ballot/ -run TestKAT -v
 go test ./tests/e2e/ -run TestAPI_ClientSideEncryption -v   # 客户端本地加密 → 计票还原
 
+# 浏览器端 prover：node 驱动门户将要加载的那个 WASM 模块 → 真实验签 → 计票还原
+go test ./tests/e2e/ -run TestAPI_WASMProver -v
+make web-wasm    # 编译 web/public/ballot-prover.wasm + 拷贝 wasm_exec.js
+
 # nullifier 派生的跨语言一致性（改了 SHA-256 / Keccak / MiMC 轮常量就会红）
 go test ./internal/infrastructure/crypto/ballot/ -run 'TestKAT_Nullifier|TestKAT_Mimc|TestKAT_BrowserNullifier' -v
 
@@ -490,15 +540,19 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
 
 ## 5. 尚未完成的部分（不要写成生产能力）
 
-- **浏览器端 prover 没做。** 真实 Groth16 电路与真实验签在**服务端侧**已成立（`ballot/prover.go` + `cmd/keygen` + `GnarkProofVerifier`），**CLI 侧也已能在本地出证明**（`cmd/cli` 的 `ballot-prove`，用本地 proving key；端到端证据见 `tests/e2e/client_prover_test.go`）。但**门户**没有本地 prover，因此 **release 模式下门户仍无法完成投票**（非 debug 模式 `ballot-draft` 404）。路线图 T14。
-- **明文选项的彻底消除还差门户接线（T16 完成一半）。** 客户端本地加密已落地（浏览器端
-  `lib/ballot-cipher.ts` + CLI `ballot-encrypt`），服务端只提供公开的计票公钥；CLI 还能
-  本地出证明，因此**命令行这条路已经能投出真票**。但**门户还没接上**（缺浏览器端
-  prover），debug 链路上的 `ballot-draft` → `EncryptVoteOption` 仍是服务端代加密 ——
-  这条路径是明确的妥协，不是生产能力。
-- **门户的 nullifier 还是随机域元素。** 浏览器端已能算出与电路一致的 nullifier
-  （`lib/nullifier.ts` 的 `deriveNullifier`），但门户仍在用 `generateNullifier`；
-  接线 prover 时要一起改，并把 nullifier 秘密留在本地。
+- **浏览器端 prover 已落地，但「浏览器真实渲染」仍未验证。** WASM 模块
+  （`cmd/ballot-wasm`）在 node 下端到端跑通了（`tests/e2e/wasm_prover_test.go`：
+  init → prove → 提交 → 计票还原），门户侧也有编排测试；但**门户面板仍然不是浏览器
+  渲染**（见 §1.7），Worker 里的 WASM 加载路径**没有在真实浏览器里跑过**。
+  路线图 §4.3 的盲区 2 仍未闭合。
+- **「一人一票」还缺资格证明（T22）。** 凭证是匿名随机领取的，服务端无法强制一人一票；
+  补回这一条要靠零知识资格证明，依赖已落地的证明链能力。
+- **明文选项的彻底消除：debug 链路上仍有妥协。** 客户端本地加密与本地出证明都已落地
+  （CLI 与门户两侧），服务端只提供公开的计票公钥。残留的是 **debug 模式的
+  `ballot-draft` → `EncryptVoteOption`**（服务端代加密）—— 这是明确的开发联调妥协，
+  不是生产能力；release 模式下它是 404。
+- **门户表单里的 nullifier 字段仍可手工编辑**（低频工具）。正式出票走 prover 那条路，
+  nullifier 由 `ballot.ProveBallot` 在本地派生（随机秘密 + MiMC），秘密不出本地。
 - **盲签名的两段式协议已落地（T17 完成）**：客户端本地盲化，服务端在签名阶段只见盲化
   消息，attest 阶段才拿到公钥并验签。**口径**：attest 阶段服务端仍然看得到 `user_id`
   与 `user_pub_key`（验签必须重算凭证消息）—— 这是「签发方不知道被签内容」，不是

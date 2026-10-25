@@ -241,18 +241,18 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | T18 | 投票路径落库前 `VerifyCredential` | ✅ 已落地 |
 | T1 | `ballot-draft` 在非 debug 模式 404 | ✅ 已落地 |
 | T2 | 门户「按选项生成凭据」按钮非 debug 隐藏 | ✅ 已落地 |
-| T16 | 加密移到客户端 | 🟡 **客户端加密已落地**（浏览器端 TS 实现 + CLI 命令 + 跨语言互操作测试）；门户接线与浏览器端 prover 待 T14 |
-| T14 | 客户端 prover | 🟡 **CLI 侧已落地**（`ballot-prove`：本地 proving key 出 Groth16 证明，证明不经过服务端）；**浏览器端仍未开工**（**离线不可行**：模块缓存里没有 `gnark-wasm`，也没有 JS 密码学库）。**前置件已就位**：浏览器端 nullifier 派生（MiMC + Keccak + SHA-256，纯 TS）与 Go 侧逐位一致并有跨语言 KAT 锁定 |
+| T16 | 加密移到客户端 | ✅ **已落地**（浏览器端 TS 实现 + CLI 命令 + 跨语言互操作测试；门户已接上：`generateBallotLocally` 走 WASM prover，密文在浏览器本地生成） |
+| T14 | 客户端 prover | ✅ **已落地（CLI + 浏览器两侧）** —— CLI 是 `ballot-prove`；浏览器侧是**自建的 Go → js/wasm 路线**：`cmd/ballot-wasm` 编译成 WASM，门户在 Worker 里加载（`web/src/lib/wasm-prover.ts` + `web/src/workers/ballot-prover.worker.ts`）。加密、nullifier 派生、公开输入拼装与 Groth16 证明全部在 Go 侧完成，客户端与服务端共用同一套代码。**实测**：初始化 7.6 秒、出证明 2.25 秒、证明 128 字节（`tests/e2e/wasm_prover_test.go` 用 node 驱动同一个 WASM 模块端到端验收） |
 | T17 | 盲签名改真两段式 | ✅ **已落地**（2026-10-21）—— 真两段式协议（预留 → 本地盲化 → 盲签名 → 本地解盲 → attest）+ 门户 / CLI 接线 + 管理端同样走两段式；验收 ①（签名阶段只见盲化消息）与验收 ②（交叉攻击失败）均有 e2e 用例 |
 
 **能力 A–F 的当前状态**：
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| A 选票内容对服务端不可知 | 🟡 客户端侧已通 | **选票密文已在客户端生成**：浏览器端 TS 实现（`web/src/lib/ballot-cipher.ts`）+ CLI `ballot-encrypt` 命令；服务端只提供公开的计票公钥，接口 `GET /api/v1/proposals/:id/election-key`。落库记录里只有密文（e2e 用例断言）。**CLI 侧已能端到端投出真票**（本地加密 + 本地出证明，服务端用真 verifying key 验签，`tests/e2e/client_prover_test.go`）。**未闭合**：门户还没接上（缺浏览器端 prover），`ballot-draft` 这条服务端代加密的路径在 debug 模式仍存在 |
-| B 选票可验证 | 🟡 服务端侧达成 | 真实 Groth16 电路 + `cmd/keygen` + 服务端真实验签已落地；**浏览器端 prover 未做**（T14），release 模式下门户仍无法完成投票 |
+| A 选票内容对服务端不可知 | ✅ **已达成（release 模式）** | **选票密文在客户端生成**：CLI（`ballot-encrypt`）+ 浏览器（门户的「在浏览器本地生成选票」）。服务端只提供公开的计票公钥，接口 `GET /api/v1/proposals/:id/election-key`。落库记录里只有密文（e2e 用例断言）。**残留**：debug 模式的 `ballot-draft`（服务端代加密）在 release 模式是 404 —— 它是开发联调接口，不是生产能力 |
+| B 选票可验证 | ✅ **已达成** | 真实 Groth16 电路 + `cmd/keygen` + 服务端真实验签；浏览器端 prover 已落地（`cmd/ballot-wasm` → WASM，门户 Worker 里跑），CLI 侧 `ballot-prove` 也已落地 |
 | C proof 与票绑定 | ✅ 已达成 | 公开输入由服务端按请求字段自拼，客户端无法自选；跨提案 / 跨 nullifier 复用均验签失败 |
-| D 客户端能投票 | 🟡 **CLI 侧已达成，门户侧未达成** | CLI 现在能自己出证明（`ballot-prove`）并投出真票；**门户仍缺浏览器端 prover**（T14），release 模式下门户投不出票 |
+| D 客户端能投票 | ✅ **已达成（CLI 与门户两侧）** | CLI 用本地 proving key 出证明；门户在浏览器 Worker 里用 WASM prover 出证明并提交。两条路径都有端到端证据（`tests/e2e/client_prover_test.go` / `tests/e2e/wasm_prover_test.go`） |
 | E 凭证不可伪造 | ✅ 已达成 | 落库前 `VerifyCredential`，伪造签名 → 401 |
 | F 签发方看不到被签内容 | ✅ 已达成 | 真两段式盲签名：客户端本地盲化，服务端在**签名阶段**只见盲化消息；交叉攻击（A 的盲签名签 B）→ 验签失败。**口径**：attest 阶段服务端仍看得到 `user_id` / `user_pub_key`（验签必须重算凭证消息） |
 
@@ -322,9 +322,9 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 
 | # | 检查项 | 当前状态 |
 |---|---|---|
-| 1 | 能力 A–F 任一未完成 | ❌ **未过** —— A / D 只差**门户**那一步（T16 / T14，都卡在浏览器端 prover）：**CLI 侧已能端到端投出真票**；B / C / E / F 已达成 |
+| 1 | 能力 A–F 任一未完成 | ✅ **已过** —— A / B / D 已在 CLI 与门户两侧闭合（浏览器端 prover 走自建的 Go → js/wasm 路线）；C / E / F 已达成。**残留**：debug 模式的 `ballot-draft`（服务端代加密）是开发联调妥协，release 模式 404 |
 | 2 | 能力 G 的完成定义未达成 —— 领取凭证时不需要任何资格证明（T22），意味着服务端无法强制一人一票 | ❌ **未过** —— T22 未开工 |
-| 3 | 存在「服务端能拿到明文选项」的代码路径（grep 不到才过） | ❌ **未过** —— 客户端加密已可用（CLI `ballot-encrypt` + `ballot-prove`，浏览器端 TS 实现），但 debug 模式的 `ballot-draft` 仍是那条路径（release 模式已 404）；门户接上客户端加密（或删掉 `ballot-draft`）后，grep 才能干净 |
+| 3 | 存在「服务端能拿到明文选项」的代码路径（grep 不到才过） | 🟡 **接近闭合** —— 客户端加密已可用（CLI + 门户），但 debug 模式的 `ballot-draft` 仍是那条路径（release 模式已 404）。**要 grep 干净需二选一**：删掉 `ballot-draft`，或接受它只在 debug 模式存在并在文档里写明 |
 | 4 | 存在「proof 可以跨提案复用」的路径 | ✅ **已过** —— 公开输入由服务端自拼，跨提案 / 跨 nullifier 复用均验签失败 |
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
 | 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.4% |
@@ -376,7 +376,15 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | # | 决策 | 选项 | 建议 | 卡住什么 |
 |---|---|---|---|---|
 | G6 | 是否换纯 Go sqlite 驱动 | 保留 cgo（当前）/ 换 `modernc.org/sqlite` | **保留 cgo**：换驱动会波及持久化层方言差异测试，收益只是「静态链接二进制」，不值 | 发布形态 |
-| G9 | CLI 是否需要本地 prover | CLI 也做本地 prover / CLI 只做「带 proof 提交」 | ✅ **已拍板：两个都要**（2026-10-21）—— 原建议是「CLI 只带 proof 提交，生成 proof 放浏览器端」，那条建议的前提是浏览器端 prover 可行。**实测离线环境装不了 `gnark-wasm`**（模块缓存里没有），浏览器端 prover 因此无法在本轮落地；若 CLI 也不做，v0.2.0 就是一个**没有任何客户端能投出真票**的版本。**落地**：CLI 新增 `ballot-prove`（本地 proving key 出证明，证明不经过服务端），浏览器端 prover 留待有离线依赖来源时再做 | T14 |
+| G9 | CLI 是否需要本地 prover | CLI 也做本地 prover / CLI 只做「带 proof 提交」 | ✅ **已拍板：两个都要**（2026-10-21）—— 原建议是「CLI 只做带 proof 提交，生成 proof 放浏览器端」，那条建议的前提是浏览器端 prover 可行。**实测离线环境装不了 `gnark-wasm`**（模块缓存里没有）。**落地**：CLI 新增 `ballot-prove`；**浏览器侧最终也做成了**（2026-10-21，见下） | T14 |
+
+> **G9 的后续补充（2026-10-21）**：浏览器端 prover 的落地路线**不是**原设想里的
+> 「gnark 官方 wasm 模板」，而是**把仓库自己的 Go 侧电路编译成 WASM**
+> （`cmd/ballot-wasm`，`GOOS=js GOARCH=wasm`）。理由：离线环境装不上
+> `gnark-wasm` / `snarkjs` / `@noble/curves`，而仓库里已经有**同一套电路**的 Go 实现
+> —— 直接编成 WASM 复用它，还顺带保证「客户端与服务端拼出的公开输入逐字段相同」。
+> 实测：初始化 7.6 秒、出证明 2.25 秒、证明 128 字节。代价：模块约 11.9 MB
+> （gzip 后约 2.8 MB），首次出票要下载它与 1.2 MB 的 proving key。
 
 > **[§1.2](#12-v020-之后还有几个-0x0) 的 v0.3.0 / v0.4.0 / 1.0.0 推演不属于决策门。**
 > 它们是方向性推演：没有完成定义、没有出口标准、没有任务卡，也没经过 G1–G9 这样的拍板。
@@ -388,7 +396,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| T14 浏览器端 prover 未做，release 模式下门户无法投票 | v0.2.0 的能力 D 在**门户侧**不达成，发版价值受限 | ✅ **CLI 侧已补**（G9 拍板「两个都要」）：CLI 能本地出证明并端到端投出真票，因此 v0.2.0 **至少有 CLI 这一条可用的客户端链路**；浏览器端 prover 待有离线依赖来源（`gnark-wasm`）时再做。T13 的电路在服务端已可跑（证明约 20ms、验证约 1–2ms），WASM 化的可行性已验证；**CHANGELOG 必须如实写明 release 模式下门户仍不可投票** |
+| T14 浏览器端 prover 未做，release 模式下门户无法投票 | v0.2.0 的能力 D 在**门户侧**不达成，发版价值受限 | ✅ **已解除** —— 浏览器端 prover 已落地（自建的 Go → js/wasm 路线，`cmd/ballot-wasm` + 门户 Worker）：初始化 7.6 秒、出证明 2.25 秒，node 驱动的端到端验收见 `tests/e2e/wasm_prover_test.go`。**剩余风险**：Worker 里的 WASM 加载路径**没有在真实浏览器里跑过**（仓库无浏览器自动化环境），首次出票要下载 2.8 MB 的 wasm 与 1.2 MB 的 proving key |
 | T13 电路的证明生成太慢，浏览器端体验不可用 | 投票流程不可用 | ✅ **已实测**：约 7917 条约束，证明约 20ms、验证约 1–2ms，性能风险基本解除。必要时仍可换电路形状（公开输入更少）而不是硬扛 |
 | T17 真盲签名改动面大，拖垮整个 v0.2.0 | 发版无限延期 | ✅ **已解除** —— T17 已于 2026-10-21 落地（协议 + 门户 / CLI 接线 + e2e 验收），改动面比预估小：领域接口拆成 `BlindSign` / `IssuerPublicKey` / `VerifyCredential` 三个方法，没有新增 schema 列 |
 | T7 KDF 换协议使 v0.1.0 之前的旧密文永久不可解 | 旧数据丢失 | 明确标注密文格式版本；v0.1.0 起格式即 v2，v0.2.0 前不要用旧数据做真实投票 |
@@ -457,7 +465,8 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 改法 | ① 用 gnark 官方 wasm 模板产出 prover WASM，放进 `web/public/` 或独立静态目录；② 门户在浏览器内生成 proof；③ `ballot-draft` 降级为「仅返回选票选项与加密公钥」，**不再返回假 proof**；④ CLI 侧同步：CLI 只做「带 proof 提交」，本地 prover 归浏览器（G9 建议） |
 | **状态修正** | ⚠️ 任务卡原文的「生成 proof **与 `public_witness`**」已失效 —— `public_witness` 自由文本入口在 T15 里删掉了，公开输入由服务端自拼。浏览器端 prover 现在只需产出 **proof**（外加密文与 nullifier），公开输入不用客户端给。**这也让 T14 比原设想简单**：不用再纠结「怎么把公开输入塞进客户端再传回来」 |
 | **新增要求** | ⚠️ **nullifier 必须改成「秘密 + nullifier」成对生成**：电路约束是 `nullifier = MiMC(NullifierSecret, ProposalID)`，而当前服务端 `BallotNullifierGenerator` 与浏览器 `web/src/lib/nullifier.ts` 产出的都只是**随机域元素** —— 这样的 nullifier **出不了证明**（库里 `DeriveNullifier` 只在测试里被调用）。T14 必须：① 浏览器侧实现与 `ballot/nullifier.go` 逐位一致的 MiMC；② 生成随机秘密 s，公开 nullifier = MiMC(s, proposal_id)，**秘密 s 留在本地**作为电路的 `NullifierSecret` 见证；③ 门户不再用「随机 nullifier」填表 |
-| **落地核对（部分）** | ✅ **①②已完成**（本轮补齐，路线图 T14 的前置件）：浏览器端新增 `web/src/lib/{field,sha256,keccak,mimc}.ts` 与扩展后的 `web/src/lib/nullifier.ts` —— SHA-256 映射提案 ID、legacy Keccak-256 链派生 91 个 MiMC 轮常量、Fr 上的 MiMC（轮函数 `(x+h+c)^5` + Miyaguchi–Preneel），与 Go 侧 `ballot/nullifier.go` **逐位一致**；跨语言向量由 `internal/infrastructure/crypto/ballot/nullifier_interop_test.go` 与 `web/src/lib/{mimc,nullifier}.test.ts` 共同锁定，Go 侧还真的用这组值出了一份证明并验过（**浏览器算出的 nullifier，电路认**）。⏳ **③未完成**：门户（`useVotePortal.ts`）仍在用 `generateNullifier` 生成随机域元素 —— 与门户 prover 一起改（T14）。SHA-256 没用 WebCrypto：`crypto.subtle` 要求安全上下文，门户部署在内网 http 地址下会失效 |
+| **落地核对（部分）** | ✅ **①②已完成**（本轮补齐，路线图 T14 的前置件）：浏览器端新增 `web/src/lib/{field,sha256,keccak,mimc}.ts` 与扩展后的 `web/src/lib/nullifier.ts` —— SHA-256 映射提案 ID、legacy Keccak-256 链派生 91 个 MiMC 轮常量、Fr 上的 MiMC（轮函数 `(x+h+c)^5` + Miyaguchi–Preneel），与 Go 侧 `ballot/nullifier.go` **逐位一致**；跨语言向量由 `internal/infrastructure/crypto/ballot/nullifier_interop_test.go` 与 `web/src/lib/{mimc,nullifier}.test.ts` 共同锁定，Go 侧还真的用这组值出了一份证明并验过（**浏览器算出的 nullifier，电路认**）。✅ **③已完成**（随 prover 一起改）：nullifier 改由 `ballot.ProveBallot` 在本地随机秘密后派生（`MiMC(s, proposal_id)`），秘密不出本地；门户表单里那个可手填的 nullifier 字段只作为低频工具保留。SHA-256 没用 WebCrypto：`crypto.subtle` 要求安全上下文，门户部署在内网 http 地址下会失效 |
+| **浏览器侧补齐（2026-10-21）** | ✅ **浏览器端 prover 已落地**，但**路线与任务卡原文不同**：不是「gnark 官方 wasm 模板」（离线装不上 `gnark-wasm` / `snarkjs` / `@noble/curves`），而是**把仓库自己的 Go 侧电路编译成 WASM** —— `cmd/ballot-wasm`（`GOOS=js GOARCH=wasm`），在全局对象上注册 `nullifierProver`（`init` / `prove`）。门户侧：`web/src/workers/ballot-prover.worker.ts` 在 Worker 里加载 Go 官方胶水 `wasm_exec.js` 与 `ballot-prover.wasm`，主线程 `web/src/lib/wasm-prover.ts` 只做编排；`useVotePortal.ts` 的 `generateBallotLocally` 取计票公钥 → 调 prover → 把密文 / 证明 / nullifier 写进表单。**密码学全在 Go 侧**：加密、nullifier 派生、公开输入拼装（`ballot.BuildPublicInputs`）与出证明都在 `ballot.ProveBallot` 里一次做完，因此客户端与服务端拼出的公开输入逐字段相同。**实测**：初始化 7.6 秒（编译电路）、出证明 2.25 秒、证明 128 字节。**证据**：`tests/e2e/wasm_prover_test.go` —— node 加载**门户将要加载的那个 WASM 模块**，服务端配真 verifying key，改一个字节的证明必须 400 且不落库，计票还原出客户端选的选项。**代价**：模块约 11.9 MB（gzip 约 2.8 MB）+ proving key 1.2 MB，首次出票要下载；proving key 由运营方发布到门户静态目录（`make web-proving-key`），**不进服务端、不入库** |
 | **CLI 侧补齐（2026-10-21）** | ✅ **CLI 现在能自己出证明**（G9 拍板为「两个都要」）：新增命令 `ballot-prove -ballot-file -proving-key [-out]` —— 读选票文件 → 用本地 proving key 生成 Groth16 证明 → 写回文件。**证明全程不经过服务端**，proving key 只在客户端（服务端只拿 verifying key）。选票文件因此多存四项本地见证材料：`nonce`（电路约束 `a = r·G` 要用）、`option_index`（私有见证）、`num_options`（公开输入之一）、`election_public_key`（未压缩计票公钥）—— 它们**都不提交给服务端**。公开输入走服务端同一套拼装入口 `ballot.BuildPublicInputs`，客户端与服务端算出同一份才验得过；计票公钥客户端拿到的是未压缩形式、服务端用压缩形式，客户端用新增的 `ballot.CompressPoint` 转成同一形式。**证据**：`tests/e2e/client_prover_test.go` —— 服务端配**真的 verifying key**，证明由客户端本地生成，改一个字节的证明必须 400 且不落库，服务端以**非 debug 模式**启动（`ballot-draft` 是 404）因此这张票只可能来自客户端 |
 | 验收 | ① 浏览器端生成的 proof 能通过服务端 `Verify`（e2e 用例）；② proof 绑定的公开输入与服务端自拼的一致 |
 | 预估 | 5–7 天 |

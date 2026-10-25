@@ -19,23 +19,25 @@
 |---|---|
 | 服务端真实验签选票证明 | ✅ 可以（Groth16 / BN254） |
 | 凭证盲签名（签发方只见盲化消息） | ✅ 可以 |
-| 选票密文在客户端本地生成 | ✅ CLI 可以（`ballot-encrypt`） |
-| **客户端生成选票证明（proof）** | ✅ **CLI 可以**（`ballot-prove`）；❌ 门户还不行（缺浏览器端 prover） |
-| release 模式下完成一次投票 | 🟡 **CLI 可以**（本地加密 + 本地出证明）；❌ **门户不行** |
+| 选票密文在客户端本地生成 | ✅ CLI 与门户都可以 |
+| **客户端生成选票证明（proof）** | ✅ **CLI 可以**（`ballot-prove`）；✅ **门户也可以**（浏览器端 WASM prover） |
+| release 模式下完成一次投票 | ✅ **CLI 可以**（本地加密 + 本地出证明）；✅ **门户也可以**（前提是静态资源备齐，见 §6） |
 
-> ⚠️ **门户在 release 模式下仍投不出票**：它没有浏览器端 prover（离线装不了
-> `gnark-wasm`）。**CLI 这条路已经通了** —— `ballot-encrypt` 本地加密、`ballot-prove`
-> 用本地 proving key 出证明，证明不经过服务端，服务端用真 verifying key 验签。
+> ⚠️ **门户的 prover 需要三个静态资源就位**：`wasm_exec.js`、`ballot-prover.wasm`、
+> `proving.key`。少任何一个，门户点「在浏览器本地生成选票」都会报错
+> （「下载 WASM 模块失败」/「下载 proving key 失败」），**服务端不受影响**。
+> 准备方式见 §6 与 §1。
 >
-> **密文这一半是通的**（客户端本地加密，服务端看不到明文选项），**proof 这一半 CLI 也通了**。
-> 门户缺的仍然只有 proof。
+> **proving key 要分发给投票人**（CLI 用户用它跑 `ballot-prove`；门户把它放在静态目录里
+> 让浏览器下载）。它**不进服务端、不入库** —— 服务端拿到它就能替任何人造出合法密文与
+> 证明。拿到它的人可以自己出证明，但证明只绑定密文、不绑定身份，因此这不构成新的
+> 身份泄露。
 >
-> **proving key 要分发给投票人**（CLI 用户用它跑 `ballot-prove`）。它**不进服务端、不入库** ——
-> 服务端拿到它就能替任何人造出合法密文与证明。拿到它的人可以自己出证明，但证明只绑定
-> 密文、不绑定身份，因此这不构成新的身份泄露。
+> **首次出票偏慢**：浏览器要下载约 2.8 MB（gzip）的 wasm 与 1.2 MB 的 proving key，
+> 初始化证明器约 8 秒、出证明约 2 秒。这三段都在 Web Worker 里，主线程不卡。
 >
-> 门户这一条不是部署能修的 —— 它是 v0.2.0 尚未完成的部分（路线图 T14 / T16）。
-> 如果你的部署**依赖门户投票**，把它当成上线阻塞项排期；只依赖 CLI 的话这条路现在就能走。
+> **门户的浏览器路径仍未在真实浏览器里验过**：仓库里没有浏览器自动化环境，
+> 端到端证据是用 node 驱动**同一个 WASM 模块**跑出来的（`tests/e2e/wasm_prover_test.go`）。
 
 ---
 
@@ -44,13 +46,17 @@
 | 项 | 要求 | 状态 |
 |---|---|---|
 | 服务端二进制 | `go build ./cmd/server`（或用 release workflow 的产物） | ☐ |
-| 门户静态资源 | `pnpm --dir web run build` → `web/dist/` | ☐ |
+| 门户静态资源 | `make web-wasm`（产出 `web/public/ballot-prover.wasm` + `wasm_exec.js`）→ `pnpm --dir web run build` → `web/dist/` | ☐ |
+| 门户的 proving key | `make web-proving-key PK=keys/proving.key` → `web/public/proving.key`（**只给浏览器，不给服务端**） | ☐ |
 | CLI（可选） | `go build ./cmd/cli` | ☐ |
 | 压测工具（可选） | `go build ./cmd/loadtest` | ☐ |
 
 - **`cmd/server` 不提供静态托管**：门户要单独部署（nginx / Caddy / 对象存储）。
 - 门户构建时 `web/package.json` 的 `version` 由发布流水线从仓库根的 `VERSION` 注入，
   **不要手改**。
+- **构建顺序**：先 `make web-wasm`（把 wasm 与胶水放进 `web/public/`），再
+  `pnpm --dir web run build`（rsbuild 会把 `public/` 原样拷进 `web/dist/`）。
+  顺序反了，`web/dist/` 里就没有 prover 资源。
 
 ---
 
@@ -147,6 +153,9 @@
 | 同源还是跨域 | 跨域时 `SERVER_CORS_ALLOWED_ORIGINS` 必须包含门户源 | ☐ |
 | 管理令牌 | 门户把它存 `sessionStorage`（不落 `localStorage`），仍是明文 | ☐ |
 | 浏览器要求 | 需要 `crypto.getRandomValues`（所有现代浏览器都有）；**不依赖** `crypto.subtle` | ☐ |
+| **prover 资源就位** | `web/dist/` 里有 `ballot-prover.wasm`、`wasm_exec.js`、`proving.key` 三个文件（`make web-wasm` + `make web-proving-key`），且**能被浏览器下载到** | ☐ |
+| **wasm 的 MIME 与体积** | `.wasm` 要以 `application/wasm` 返回（否则 `WebAssembly.instantiate` 可能失败）；体积约 11.9 MB，**建议开 gzip/brotli**（约 2.8 MB） | ☐ |
+| **静态资源路径** | 门户部署在子路径下时，资源地址按 `document.baseURI` 解析 —— 别把 `wasm_exec.js` 放在与门户不同的域名下（Worker 的 `importScripts` 受同源限制） | ☐ |
 
 ---
 
@@ -155,11 +164,11 @@
 | 步 | 动作 | 备注 | 状态 |
 |---|---|---|---|
 | 1 | 创建提案 | `POST /api/v1/proposals` 或 `cli proposal-create` | ☐ |
-| 2 | 生成选票证明密钥 | `cmd/keygen`（**一次一把**，与提案共用同一把电路密钥）。`verifying.key` 部署到服务端；**`proving.key` 分发给投票人**（CLI 用它跑 `ballot-prove`），**不要**进服务端镜像 | ☐ |
+| 2 | 生成选票证明密钥 | `cmd/keygen`（**一次一把**，与提案共用同一把电路密钥）。`verifying.key` 部署到服务端；**`proving.key` 分发给投票人**（CLI 用它跑 `ballot-prove`；门户用 `make web-proving-key` 放进静态目录），**不要**进服务端镜像 | ☐ |
 | 3 | 往凭证池投槽位 | `POST /api/v1/proposals/:id/credentials/pool`（管理端） | ☐ |
 | 4 | **初始化门限解密会话** | `POST /api/v1/proposals/:id/decryption/setup`。⚠️ **必须在投票窗口打开之前** —— 服务端会拒绝「投票开放中」的提案 | ☐ |
 | 5 | 开放投票窗口 | 提案的 `starts_at` / `ends_at` | ☐ |
-| 6 | 投票 | 🟡 **CLI 可以**：`ballot-encrypt` → `ballot-prove -proving-key <proving.key>` → `vote-submit`；⚠️ **门户还不行**（缺浏览器端 prover，见 §0）；开发模式可用 `ballot-draft` 的占位 proof 联调 | ☐ |
+| 6 | 投票 | ✅ **CLI**：`ballot-encrypt` → `ballot-prove -proving-key <proving.key>` → `vote-submit`；✅ **门户**：选好选项 → 点「在浏览器本地生成选票」→ 提交（首次约 10 秒）；开发模式也可用 `ballot-draft` 的占位 proof 联调 | ☐ |
 | 7 | 收集门限份额 | 每个计票方拿自己那一份 | ☐ |
 | 8 | 发布结果 | `POST /api/v1/proposals/:id/results/publish`（**仅在提案关闭后**） | ☐ |
 
@@ -199,8 +208,9 @@
 
 ## 9. 已知边界（写给用的人，不是给部署的）
 
-- **门户在 release 模式下仍投不出票**（见 §0）—— 缺的是浏览器端 prover，不是密文；
-  **CLI 已经能投出真票**。
+- **门户的浏览器端 prover 只在 node 下验过**（`tests/e2e/wasm_prover_test.go` 驱动同一个
+  WASM 模块）：仓库里没有浏览器自动化环境，真实浏览器里的 Worker + WASM 路径**没有
+  实跑过**。首次上线建议人工点一次「在浏览器本地生成选票」并提交一票。
 - **服务端无法强制一人一票**：凭证是匿名随机领取的，同一个人可以领两张票投两次。
   资格证明（路线图 T22）尚未实现。
 - **防重投靠 `votes.nullifier` 的唯一索引**。数据库层要真的有唯一约束 ——

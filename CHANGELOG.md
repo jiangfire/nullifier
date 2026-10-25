@@ -69,8 +69,30 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
     （不是开发模式的「proof 非空即通过」），证明由客户端本地生成；改一个字节的证明
     必须 400 且不落库。服务端以**非 debug 模式**启动（`ballot-draft` 是 404），
     因此这张票只可能来自客户端。
-  - ⚠️ **门户仍然投不出票**：浏览器端 prover 缺依赖（离线装不了 `gnark-wasm`），
-    release 模式下门户依旧无法完成投票。
+  - ⚠️ **门户的 prover 见下面那条**：CLI 这条路不需要浏览器。
+- **浏览器端 prover 落地：门户现在能在本地出票并提交**（能力 D 的门户侧）。
+  - 路线**不是**「gnark 官方 wasm 模板」——离线环境装不上 `gnark-wasm` / `snarkjs` /
+    `@noble/curves`。实际做法是**把仓库自己的 Go 侧电路编译成 WASM**：新命令模块
+    `cmd/ballot-wasm`（`GOOS=js GOARCH=wasm`），在全局对象上注册 `nullifierProver`
+    （`init` 加载 proving key、`prove` 出票）。
+  - 门户侧：`web/src/workers/ballot-prover.worker.ts` 在 Worker 里加载 Go 官方胶水
+    `wasm_exec.js` 与 `ballot-prover.wasm`，主线程 `web/src/lib/wasm-prover.ts` 只做
+    编排；`useVotePortal.ts` 新增 `generateBallotLocally`：取计票公钥 → 调 prover →
+    把密文 / 证明 / nullifier 写进表单 → 走原有的提交路径。投票面板新增
+    「在浏览器本地生成选票」按钮（debug 模式下的服务端代生成入口保留为次要按钮）。
+  - **密码学全在 Go 侧**：加密、nullifier 派生、公开输入拼装（`ballot.BuildPublicInputs`）
+    与出证明都在新增的 `ballot.ProveBallot` 里一次做完 —— 客户端与服务端因此拼出
+    **逐字段相同**的公开输入，证明才验得过。nonce 与 nullifier 秘密只在这一次调用里
+    出现，出了函数就拼不出与密文匹配的见证。
+  - **实测**：初始化 7.6 秒（编译电路）、出证明 2.25 秒、证明 128 字节。端到端证据：
+    `tests/e2e/wasm_prover_test.go` —— node 加载**门户将要加载的那个 WASM 模块**，
+    服务端配真 verifying key，改一个字节的证明必须 400 且不落库，计票还原出客户端
+    选的选项。
+  - **代价**：模块约 11.9 MB（gzip 后约 2.8 MB）+ proving key 1.2 MB，首次出票要下载。
+    两者由 `make web-wasm` 与 `make web-proving-key PK=<路径>` 放进门户静态目录，
+    **都不进仓库**。proving key 只在客户端侧 —— 服务端仍然只拿 verifying key。
+  - ⚠️ **仓库里没有浏览器自动化环境**：Worker 里的 WASM 加载路径只在 node 下验过，
+    真实浏览器渲染仍未验证。
 - **服务端公开计票公钥**（新公开端点 `GET /api/v1/proposals/:id/election-key`）：返回
   **未压缩**形式的计票公钥（X 与 Y 各 32 字节大端，base64）—— 客户端因此不必实现点解压
   （那需要在标量域里求平方根）。
@@ -84,8 +106,8 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   用这组值出了一份证明并验过 —— **浏览器算出的 nullifier，电路认**。
   - SHA-256 没用 WebCrypto 的 `crypto.subtle`：那要求安全上下文，门户被部署在内网
     http 地址下会直接不可用。
-  - **门户还没用上**：`useVotePortal.ts` 仍在生成随机 nullifier，等客户端 prover
-    一起接线。
+  - **门户已用上**：出票时 nullifier 由 `ballot.ProveBallot` 在本地随机秘密后派生
+    （`MiMC(secret, proposal_id)`），秘密不出本地。
 - **CLI 新增 `credential-claim` 命令**：匿名领取一张凭证（与门户的「领取凭证」同一个
   公开端点，**不需要 admin token**）。此前只有门户能领，脚本化领取用不了 —— 这是
   路线图 T9 / T22 里记下的缺口。⚠️ 领取请求里**没有任何身份信息**：连公钥都不发
