@@ -84,12 +84,11 @@ func TestAPI_ClientSideProof_E2E(t *testing.T) {
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(
 		voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo,
-		encrypter, crypto.NewBallotNullifierGenerator(), merkleBuilder, logger,
+		encrypter, merkleBuilder, logger,
 	)
 
-	// 非 debug 模式：服务端代加密的 ballot-draft 不可达。
-	handler := httpapi.NewHandlerWithTallyAndMode(
-		votingUC, registerUC, proposalUC, participationUC, tallyUC, false, logger,
+	handler := httpapi.NewHandlerWithTally(
+		votingUC, registerUC, proposalUC, participationUC, tallyUC, logger,
 	)
 	server := httpapi.NewServer(&config.Config{
 		ServerAddress:    ":0",

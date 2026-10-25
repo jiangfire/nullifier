@@ -145,8 +145,6 @@ func run(args []string) int {
 		err = c.cmdClaimCredential(rest[1:])
 	case "credential-show":
 		err = c.cmdShowCredential(rest[1:])
-	case "ballot-draft":
-		err = c.cmdBallotDraft(rest[1:])
 	case "ballot-encrypt":
 		err = c.cmdBallotEncrypt(rest[1:])
 	case "ballot-prove":
@@ -525,45 +523,6 @@ func (c *cli) cmdShowCredential(args []string) error {
 		return err
 	}
 	printJSON(credential)
-	return nil
-}
-
-func (c *cli) cmdBallotDraft(args []string) error {
-	fs := flag.NewFlagSet("ballot-draft", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	proposalID := fs.String("proposal", "", "proposal id")
-	option := fs.String("option", "", "vote option")
-	outFile := fs.String("out", "", "optional output json file")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if strings.TrimSpace(*proposalID) == "" || strings.TrimSpace(*option) == "" {
-		return errors.New("必须提供 -proposal -option")
-	}
-	var raw map[string]any
-	if err := c.postJSON(
-		fmt.Sprintf("/api/v1/proposals/%s/ballot-draft", url.PathEscape(strings.TrimSpace(*proposalID))),
-		map[string]any{"option": strings.TrimSpace(*option)},
-		false,
-		&raw,
-	); err != nil {
-		return err
-	}
-	ballot := ballotFile{
-		ProposalID:     stringify(raw["proposal_id"]),
-		SelectedOption: stringify(raw["option"]),
-		EncryptedVote:  stringify(raw["encrypted_vote"]),
-		Proof:          stringify(raw["proof"]),
-		Nullifier:      stringify(raw["nullifier"]),
-	}
-	if *outFile != "" {
-		if err := writeJSON(*outFile, ballot); err != nil {
-			return err
-		}
-		fmt.Printf("选票草稿已写入 %s\n", *outFile)
-		return nil
-	}
-	printJSON(ballot)
 	return nil
 }
 
@@ -1239,7 +1198,6 @@ func printRootUsage() {
   credential-issue  -proposal -user [-pubkey] [-out]  (需要 admin token)
   credential-claim  -proposal [-pubkey] [-out]         (匿名领取:凭证池随机给一张)
   credential-show   -file
-  ballot-draft      -proposal -option [-out]
   ballot-encrypt    -proposal -option [-proof] [-out]   (本地加密:服务端看不到明文选项)
   ballot-prove      -ballot-file -proving-key [-out]     (本地出证明:proving key 只在客户端)
   vote-submit       -credential-file -ballot-file
@@ -1254,7 +1212,6 @@ func printRootUsage() {
   go run ./cmd/cli -admin-token dev-admin-token proposal-create -title "Board" -options "A,B" -start 2026-12-01T10:00:00Z -end 2026-12-01T12:00:00Z
   go run ./cmd/cli -admin-token dev-admin-token credential-issue -proposal p-1 -user u-1001 -out cred-u1001.json
   go run ./cmd/cli credential-claim -proposal p-1 -out cred.json
-  go run ./cmd/cli ballot-draft -proposal p-1 -option A -out ballot.json
   go run ./cmd/cli ballot-encrypt -proposal p-1 -option A -out ballot.json
   go run ./cmd/cli ballot-prove -ballot-file ballot.json -proving-key keys/proving.key -out ballot.json
   go run ./cmd/cli vote-submit -credential-file cred-u1001.json -ballot-file ballot.json

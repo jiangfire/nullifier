@@ -89,12 +89,11 @@ func TestAPI_VoteFlow_E2E(t *testing.T) {
 		resultRepo,
 		anchorRepo,
 		encrypter,
-		crypto.NewBallotNullifierGenerator(),
 		merkleBuilder,
 		logger,
 	)
 
-	handler := httpapi.NewHandlerWithTallyAndMode(votingUC, registerUC, proposalUC, participationUC, tallyUC, true, logger)
+	handler := httpapi.NewHandlerWithTally(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
 	server := httpapi.NewServer(&config.Config{
 		ServerAddress:    ":0",
 		GinMode:          "test",
@@ -335,12 +334,11 @@ func TestAPI_VoteFlow_ConcurrentSameUser_E2E(t *testing.T) {
 		resultRepo,
 		anchorRepo,
 		encrypter,
-		crypto.NewBallotNullifierGenerator(),
 		merkleBuilder,
 		logger,
 	)
 
-	handler := httpapi.NewHandlerWithTallyAndMode(votingUC, registerUC, proposalUC, participationUC, tallyUC, true, logger)
+	handler := httpapi.NewHandlerWithTally(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
 	server := httpapi.NewServer(&config.Config{
 		ServerAddress:    ":0",
 		GinMode:          "test",

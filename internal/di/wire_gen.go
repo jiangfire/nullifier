@@ -47,10 +47,9 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 	proposalUseCase := NewProposalUseCase(proposalRepository, logger)
 	participationUseCase := NewParticipationUseCase(participationRepository, credentialRepository, logger)
 	thresholdCrypto := NewThresholdCrypto()
-	nullifierGenerator := NewNullifierGenerator()
 	merkleRootBuilder := NewMerkleRootBuilder()
-	tallyUseCase := NewTallyUseCase(voteRepository, proposalRepository, decryptionSessionRepository, tallyResultRepository, auditAnchorRepository, thresholdCrypto, nullifierGenerator, merkleRootBuilder, logger)
-	handler := NewHTTPHandler(cfg, votingUseCase, registerUseCase, proposalUseCase, participationUseCase, tallyUseCase, logger)
+	tallyUseCase := NewTallyUseCase(voteRepository, proposalRepository, decryptionSessionRepository, tallyResultRepository, auditAnchorRepository, thresholdCrypto, merkleRootBuilder, logger)
+	handler := NewHTTPHandler(votingUseCase, registerUseCase, proposalUseCase, participationUseCase, tallyUseCase, logger)
 	server := NewHTTPServer(cfg, handler, logger)
 	return server, nil
 }

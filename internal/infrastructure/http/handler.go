@@ -21,7 +21,6 @@ type Handler struct {
 	participationUC *usecase.ParticipationUseCase
 	tallyUC         *usecase.TallyUseCase
 	validate        *validator.Validate
-	debugMode       bool
 	logger          *zap.Logger
 }
 
@@ -43,22 +42,6 @@ func NewHandlerWithTally(
 	tallyUC *usecase.TallyUseCase,
 	logger *zap.Logger,
 ) *Handler {
-	return NewHandlerWithTallyAndMode(votingUC, registerUC, proposalUC, participationUC, tallyUC, false, logger)
-}
-
-// NewHandlerWithTallyAndMode 装配 handler，并决定开发调试能力是否可达。
-//
-// debugMode 为 false 时，ballot-draft 端点按 404 处理 —— 用 404 而不是
-// 403，避免把端点存在性暴露出去。
-func NewHandlerWithTallyAndMode(
-	votingUC *usecase.VotingUseCase,
-	registerUC *usecase.RegisterUseCase,
-	proposalUC *usecase.ProposalUseCase,
-	participationUC *usecase.ParticipationUseCase,
-	tallyUC *usecase.TallyUseCase,
-	debugMode bool,
-	logger *zap.Logger,
-) *Handler {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -69,7 +52,6 @@ func NewHandlerWithTallyAndMode(
 		participationUC: participationUC,
 		tallyUC:         tallyUC,
 		validate:        validator.New(),
-		debugMode:       debugMode,
 		logger:          logger,
 	}
 }
@@ -79,7 +61,6 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/proposals", h.ListProposals)
 	r.GET("/proposals/open", h.ListOpenProposals)
 	r.POST("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
-	r.POST("/proposals/:proposal_id/ballot-draft", h.PrepareBallotDraft)
 	r.GET("/proposals/:proposal_id/election-key", h.GetElectionKey)
 	// 匿名领取凭证：真两段式盲签名，三步走。
 	//   ① claim      —— 预留一个池槽位，拿到 user_id 与签发方公钥（不签名）
@@ -559,55 +540,6 @@ func (h *Handler) ListOpenProposals(c *gin.Context) {
 type setupDecryptionPayload struct {
 	Threshold int `json:"threshold" validate:"required,min=1"`
 	Trustees  int `json:"trustees" validate:"required,min=1"`
-}
-
-type prepareBallotDraftPayload struct {
-	Option string `json:"option" validate:"required"`
-}
-
-const developmentProofBase64 = "ZGV2LXByb29m"
-
-func (h *Handler) PrepareBallotDraft(c *gin.Context) {
-	// 非 debug 模式按 404 处理：ballot-draft 让服务端拿明文选项去加密，
-	// 这条链路在生产环境不该存在，也不该暴露端点存在性。
-	if !h.debugMode {
-		c.Status(http.StatusNotFound)
-		return
-	}
-	if h.tallyUC == nil {
-		c.Error(fmt.Errorf("tally usecase is not configured"))
-		return
-	}
-
-	proposalID := c.Param("proposal_id")
-	if proposalID == "" {
-		c.Error(fmt.Errorf("%w: proposal_id is required", usecase.ErrInvalidRequest))
-		return
-	}
-
-	var payload prepareBallotDraftPayload
-	if err := c.ShouldBindJSON(&payload); err != nil {
-		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
-		return
-	}
-	if err := h.validate.Struct(payload); err != nil {
-		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
-		return
-	}
-
-	draft, err := h.tallyUC.PrepareBallotDraft(c.Request.Context(), proposalID, payload.Option)
-	if err != nil {
-		c.Error(err)
-		return
-	}
-
-	c.JSON(http.StatusCreated, gin.H{
-		"proposal_id":    proposalID,
-		"option":         draft.Option,
-		"encrypted_vote": base64.StdEncoding.EncodeToString(draft.EncryptedVote),
-		"proof":          developmentProofBase64,
-		"nullifier":      draft.Nullifier,
-	})
 }
 
 // GetElectionKey 返回提案的计票公钥，供客户端本地加密选票。

@@ -108,10 +108,6 @@ func NewThresholdCrypto() usecase.ThresholdCrypto {
 	return cryptoinfra.NewBallotThresholdCrypto()
 }
 
-func NewNullifierGenerator() domaincrypto.NullifierGenerator {
-	return cryptoinfra.NewBallotNullifierGenerator()
-}
-
 func NewMerkleRootBuilder() usecase.MerkleRootBuilder {
 	return cryptoinfra.NewGnarkMerkleRootBuilder()
 }
@@ -179,7 +175,6 @@ func NewTallyUseCase(
 	resultRepo repository.TallyResultRepository,
 	anchorRepo repository.AuditAnchorRepository,
 	crypto usecase.ThresholdCrypto,
-	nullifiers domaincrypto.NullifierGenerator,
 	merkleBuilder usecase.MerkleRootBuilder,
 	logger *zap.Logger,
 ) *usecase.TallyUseCase {
@@ -190,14 +185,12 @@ func NewTallyUseCase(
 		resultRepo,
 		anchorRepo,
 		crypto,
-		nullifiers,
 		merkleBuilder,
 		logger,
 	)
 }
 
 func NewHTTPHandler(
-	cfg *config.Config,
 	votingUC *usecase.VotingUseCase,
 	registerUC *usecase.RegisterUseCase,
 	proposalUC *usecase.ProposalUseCase,
@@ -205,17 +198,12 @@ func NewHTTPHandler(
 	tallyUC *usecase.TallyUseCase,
 	logger *zap.Logger,
 ) *httpapi.Handler {
-	debugMode := false
-	if cfg != nil {
-		debugMode = cfg.DebugMode
-	}
-	return httpapi.NewHandlerWithTallyAndMode(
+	return httpapi.NewHandlerWithTally(
 		votingUC,
 		registerUC,
 		proposalUC,
 		participationUC,
 		tallyUC,
-		debugMode,
 		logger,
 	)
 }

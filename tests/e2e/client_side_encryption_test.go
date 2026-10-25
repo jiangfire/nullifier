@@ -66,11 +66,11 @@ func TestAPI_ClientSideEncryption_E2E(t *testing.T) {
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(
 		voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo,
-		encrypter, crypto.NewBallotNullifierGenerator(), merkleBuilder, logger,
+		encrypter, merkleBuilder, logger,
 	)
 
-	handler := httpapi.NewHandlerWithTallyAndMode(
-		votingUC, registerUC, proposalUC, participationUC, tallyUC, true, logger,
+	handler := httpapi.NewHandlerWithTally(
+		votingUC, registerUC, proposalUC, participationUC, tallyUC, logger,
 	)
 	server := httpapi.NewServer(&config.Config{
 		ServerAddress:    ":0",

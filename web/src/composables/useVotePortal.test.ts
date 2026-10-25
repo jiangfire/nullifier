@@ -125,16 +125,19 @@ function setupPortal() {
   return portal;
 }
 
-const draftRoute = {
-  match: (url: string) => url.includes('ballot-draft'),
-  payload: {
-    proposal_id: 'p1',
-    option: 'A',
-    encrypted_vote: 'cipher-A',
-    proof: 'proof-A',
-    nullifier: 'null-1',
-  },
-};
+/**
+ * 模拟「在浏览器本地生成选票」写进表单的材料。
+ *
+ * 真实路径是 WASM prover 在浏览器里算出密文与证明后写进表单；这里直接写，
+ * 因为这些用例要验的是**材料与当前意图的绑定**，不是密码学本身。
+ */
+function bindLocalBallot(portal: ReturnType<typeof useVotePortal>): void {
+  portal.voteForm.encryptedVote = 'cipher-A';
+  portal.voteForm.proof = 'proof-A';
+  portal.voteForm.nullifier = 'null-1';
+  portal.voteForm.ballotProposalId = 'p1';
+  portal.voteForm.ballotOption = 'A';
+}
 
 /**
  * 签发方公钥（2048 位 RSA）。
@@ -201,11 +204,11 @@ describe('投票凭据与当前意图的绑定', () => {
     vi.unstubAllGlobals();
   });
 
-  it('按选项生成凭据后，材料绑定到该选项', async () => {
-    stubFetch([draftRoute]);
+  it('本地生成选票后，材料绑定到该选项', async () => {
+    stubFetch([]);
     const portal = setupPortal();
 
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     expect(portal.voteForm.encryptedVote).toBe('cipher-A');
     expect(portal.voteForm.proof).toBe('proof-A');
@@ -215,9 +218,9 @@ describe('投票凭据与当前意图的绑定', () => {
   });
 
   it('改了选项之后，已生成的凭据被清空', async () => {
-    stubFetch([draftRoute]);
+    stubFetch([]);
     const portal = setupPortal();
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     portal.selectedVoteOption.value = 'B';
     await nextTick();
@@ -228,9 +231,9 @@ describe('投票凭据与当前意图的绑定', () => {
   });
 
   it('换了提案之后，已生成的凭据被清空', async () => {
-    stubFetch([draftRoute]);
+    stubFetch([]);
     const portal = setupPortal();
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     portal.voteForm.proposalId = 'p2';
     await nextTick();
@@ -241,11 +244,10 @@ describe('投票凭据与当前意图的绑定', () => {
 
   it('凭据还指向旧选项时拒绝提交（防止静默投错票）', async () => {
     const calls = stubFetch([
-      draftRoute,
       { match: (url) => url.includes('/api/v1/votes'), payload: { status: 'ok' } },
     ]);
     const portal = setupPortal();
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     // 同步改选项，watcher 还没执行：材料还在，但绑定的目标已经过期。
     portal.selectedVoteOption.value = 'B';
@@ -258,11 +260,10 @@ describe('投票凭据与当前意图的绑定', () => {
 
   it('目标一致时正常提交', async () => {
     const calls = stubFetch([
-      draftRoute,
       { match: (url) => url.includes('/api/v1/votes'), payload: { status: 'ok' } },
     ]);
     const portal = setupPortal();
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     const submitted = await portal.submitVote();
 
@@ -275,7 +276,7 @@ describe('投票凭据与当前意图的绑定', () => {
   });
 
   it('导入的凭据带 selected_option 时绑定到该选项', async () => {
-    stubFetch([draftRoute]);
+    stubFetch([]);
     const portal = setupPortal();
 
     portal.voteForm.ballotJson = JSON.stringify({
@@ -300,7 +301,7 @@ describe('凭证与会话卫生', () => {
   });
 
   it('管理令牌只进 sessionStorage，不落 localStorage', async () => {
-    stubFetch([draftRoute]);
+    stubFetch([]);
     const portal = setupPortal();
 
     portal.adminBearerToken.value = 'super-secret';
@@ -311,7 +312,7 @@ describe('凭证与会话卫生', () => {
   });
 
   it('换提案时重置「是否已投票」', async () => {
-    stubFetch([draftRoute]);
+    stubFetch([]);
     const portal = setupPortal();
 
     portal.hasVoted.value = true;
@@ -323,11 +324,10 @@ describe('凭证与会话卫生', () => {
 
   it('错误提示不自动消失', async () => {
     stubFetch([
-      draftRoute,
       { match: (url) => url.includes('/api/v1/votes'), payload: { status: 'ok' } },
     ]);
     const portal = setupPortal();
-    await portal.prepareBallotByOption();
+    bindLocalBallot(portal);
 
     // 让投票失败：把材料清空到不满足提交条件。
     portal.voteForm.encryptedVote = '';

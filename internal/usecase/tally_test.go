@@ -36,7 +36,6 @@ func TestTallyUseCase_SetupAndPublishResult(t *testing.T) {
 		resultRepo,
 		anchorRepo,
 		cryptoSvc,
-		new(fakeNullifierGenerator),
 		merkleSvc,
 		zap.NewNop(),
 	)
@@ -117,7 +116,6 @@ func TestTallyUseCase_RejectsRepeatedSetupAndPublish(t *testing.T) {
 		resultRepo,
 		anchorRepo,
 		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
@@ -158,7 +156,6 @@ func TestTallyUseCase_PublishResult_RejectsInsufficientShares(t *testing.T) {
 		resultRepo,
 		anchorRepo,
 		cryptoSvc,
-		new(fakeNullifierGenerator),
 		merkleSvc,
 		zap.NewNop(),
 	)
@@ -198,7 +195,6 @@ func TestTallyUseCase_SetupThresholdSession_RejectsOpenProposal(t *testing.T) {
 		new(inMemoryTallyResultRepo),
 		new(inMemoryAuditAnchorRepo),
 		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
@@ -226,7 +222,6 @@ func TestTallyUseCase_PublishResult_RejectOpenProposal(t *testing.T) {
 		new(inMemoryTallyResultRepo),
 		new(inMemoryAuditAnchorRepo),
 		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
@@ -263,7 +258,6 @@ func TestTallyUseCase_ListAuditAnchors(t *testing.T) {
 		new(inMemoryTallyResultRepo),
 		anchorRepo,
 		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
@@ -291,7 +285,6 @@ func TestTallyUseCase_GetResult_DecodeFromJSON(t *testing.T) {
 		resultRepo,
 		new(inMemoryAuditAnchorRepo),
 		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
@@ -309,7 +302,6 @@ func TestTallyUseCase_SetupThresholdSession_InvalidRequest(t *testing.T) {
 		new(inMemoryTallyResultRepo),
 		new(inMemoryAuditAnchorRepo),
 		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
@@ -341,7 +333,6 @@ func TestTallyUseCase_PublishResult_InvalidShareFormat(t *testing.T) {
 		new(inMemoryTallyResultRepo),
 		new(inMemoryAuditAnchorRepo),
 		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
@@ -426,7 +417,6 @@ func TestTallyUseCase_ListAuditAnchors_Invalid(t *testing.T) {
 		new(inMemoryTallyResultRepo),
 		nil,
 		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
@@ -440,7 +430,6 @@ func TestTallyUseCase_ListAuditAnchors_Invalid(t *testing.T) {
 		new(inMemoryTallyResultRepo),
 		new(inMemoryAuditAnchorRepo),
 		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
@@ -456,7 +445,6 @@ func TestTallyUseCase_GetResult_Invalid(t *testing.T) {
 		nil,
 		new(inMemoryAuditAnchorRepo),
 		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
@@ -470,84 +458,10 @@ func TestTallyUseCase_GetResult_Invalid(t *testing.T) {
 		new(inMemoryTallyResultRepo),
 		new(inMemoryAuditAnchorRepo),
 		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
 	_, err = uc.GetResult(context.Background(), "")
-	require.ErrorIs(t, err, ErrInvalidRequest)
-}
-
-func TestTallyUseCase_EncryptVoteOption(t *testing.T) {
-	sessionRepo := new(inMemoryDecryptionSessionRepo)
-	proposalRepo := new(inMemoryProposalRepo)
-	proposalRepo.items = map[string]*entity.Proposal{
-		"proposal-1": {
-			ID:      "proposal-1",
-			Options: []string{"candidate-A", "candidate-B"},
-		},
-	}
-	require.NoError(t, sessionRepo.Save(context.Background(), &entity.DecryptionSession{
-		ID:         "s1",
-		ProposalID: "proposal-1",
-		PublicKey:  []byte("public-key"),
-		Threshold:  2,
-		Trustees:   3,
-	}))
-
-	uc := NewTallyUseCase(
-		new(inMemoryVoteRepo),
-		proposalRepo,
-		sessionRepo,
-		new(inMemoryTallyResultRepo),
-		new(inMemoryAuditAnchorRepo),
-		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
-		new(fakeMerkleBuilder),
-		zap.NewNop(),
-	)
-
-	cipher, err := uc.EncryptVoteOption(context.Background(), "proposal-1", "candidate-A")
-	require.NoError(t, err)
-	require.NotEmpty(t, cipher)
-
-	// 密文里放的是选项下标，不是选项文本。
-	index, err := (&fakeThresholdCrypto{}).Decrypt([]byte("private-key"), cipher, 2)
-	require.NoError(t, err)
-	assert.Equal(t, 0, index)
-
-	cipherB, err := uc.EncryptVoteOption(context.Background(), "proposal-1", "candidate-B")
-	require.NoError(t, err)
-	index, err = (&fakeThresholdCrypto{}).Decrypt([]byte("private-key"), cipherB, 2)
-	require.NoError(t, err)
-	assert.Equal(t, 1, index)
-
-	// 提案里没有的选项不能加密。
-	_, err = uc.EncryptVoteOption(context.Background(), "proposal-1", "candidate-C")
-	require.ErrorIs(t, err, ErrInvalidRequest)
-}
-
-func TestTallyUseCase_EncryptVoteOption_RejectsEmptyOption(t *testing.T) {
-	proposalRepo := new(inMemoryProposalRepo)
-	proposalRepo.items = map[string]*entity.Proposal{
-		"proposal-1": {
-			ID:      "proposal-1",
-			Options: []string{"candidate-A", "candidate-B"},
-		},
-	}
-	uc := NewTallyUseCase(
-		new(inMemoryVoteRepo),
-		proposalRepo,
-		new(inMemoryDecryptionSessionRepo),
-		new(inMemoryTallyResultRepo),
-		new(inMemoryAuditAnchorRepo),
-		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
-		new(fakeMerkleBuilder),
-		zap.NewNop(),
-	)
-
-	_, err := uc.EncryptVoteOption(context.Background(), "proposal-1", "  ")
 	require.ErrorIs(t, err, ErrInvalidRequest)
 }
 
@@ -567,7 +481,6 @@ func TestTallyUseCase_PublishResult_RejectsOutOfRangeOptionIndex(t *testing.T) {
 		resultRepo,
 		anchorRepo,
 		cryptoSvc,
-		new(fakeNullifierGenerator),
 		new(fakeMerkleBuilder),
 		zap.NewNop(),
 	)
@@ -602,47 +515,6 @@ func TestTallyUseCase_PublishResult_RejectsOutOfRangeOptionIndex(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidRequest)
 	require.Empty(t, resultRepo.items)
 	require.Empty(t, anchorRepo.items[proposal.ID])
-}
-
-func TestTallyUseCase_PrepareBallotDraft(t *testing.T) {
-	sessionRepo := new(inMemoryDecryptionSessionRepo)
-	proposalRepo := new(inMemoryProposalRepo)
-	proposalRepo.items = map[string]*entity.Proposal{
-		"proposal-1": {
-			ID:      "proposal-1",
-			Options: []string{"candidate-A", "candidate-B"},
-		},
-	}
-	require.NoError(t, sessionRepo.Save(context.Background(), &entity.DecryptionSession{
-		ID:         "s1",
-		ProposalID: "proposal-1",
-		PublicKey:  []byte("public-key"),
-		Threshold:  2,
-		Trustees:   3,
-	}))
-
-	uc := NewTallyUseCase(
-		new(inMemoryVoteRepo),
-		proposalRepo,
-		sessionRepo,
-		new(inMemoryTallyResultRepo),
-		new(inMemoryAuditAnchorRepo),
-		new(fakeThresholdCrypto),
-		new(fakeNullifierGenerator),
-		new(fakeMerkleBuilder),
-		zap.NewNop(),
-	)
-
-	draft, err := uc.PrepareBallotDraft(context.Background(), "proposal-1", "candidate-B")
-	require.NoError(t, err)
-	require.NotNil(t, draft)
-	assert.Equal(t, "candidate-B", draft.Option)
-	require.NotEmpty(t, draft.EncryptedVote)
-	assert.Len(t, draft.Nullifier, 64)
-
-	index, err := (&fakeThresholdCrypto{}).Decrypt([]byte("private-key"), draft.EncryptedVote, 2)
-	require.NoError(t, err)
-	assert.Equal(t, 1, index)
 }
 
 // ---- in-memory fakes ----
@@ -842,12 +714,6 @@ func (f *fakeThresholdCrypto) UncompressPublicKey(publicKey []byte) ([]byte, err
 		return nil, errors.New("empty public key")
 	}
 	return append([]byte("uncompressed:"), publicKey...), nil
-}
-
-type fakeNullifierGenerator struct{}
-
-func (f *fakeNullifierGenerator) GenerateNullifier() (string, error) {
-	return "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", nil
 }
 
 type fakeMerkleBuilder struct{}

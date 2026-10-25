@@ -123,21 +123,10 @@ describe('身份面板', () => {
   });
 });
 
-describe('投票面板的 debug 门控', () => {
-  // 这是路线图 T2 的落点：非 debug 模式下「按选项生成凭据」这个入口必须藏起来
-  // —— 它会让服务端看到你选了哪个选项。
-  it('debug 模式显示「按选项生成凭据」按钮', async () => {
-    const portal = portalWithProposal();
-    portal.debugMode = true;
-    const html = await renderPanel(VotePanel, portal);
-    expect(html).toContain('>按选项生成凭据</button>');
-  });
-
-  it('非 debug 模式不显示这个按钮', async () => {
-    const portal = portalWithProposal();
-    portal.debugMode = false;
-    const html = await renderPanel(VotePanel, portal);
-    // 说明文案里会提到这个名字，所以要看按钮本身在不在。
+describe('投票面板', () => {
+  // 服务端代加密的入口已经整个删掉了：门户只有「在浏览器本地生成选票」这一条路。
+  it('不提供「让服务端代生成凭据」的入口', async () => {
+    const html = await renderPanel(VotePanel, portalWithProposal());
     expect(html).not.toContain('>按选项生成凭据</button>');
     expect(html).toContain('与匿名投票的前提冲突');
   });

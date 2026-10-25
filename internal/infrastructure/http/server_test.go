@@ -62,7 +62,7 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 		ServerAddress:    ":0",
 		GinMode:          gin.TestMode,
 		AdminBearerToken: "secret",
-	}, NewHandlerWithTallyAndMode(nil, nil, nil, nil, nil, true, zap.NewNop()), zap.NewNop()).Engine()
+	}, NewHandlerWithTally(nil, nil, nil, nil, nil, zap.NewNop()), zap.NewNop()).Engine()
 
 	cases := []struct {
 		method string
@@ -73,7 +73,6 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/open"},
 		{method: http.MethodGet, path: "/api/v1/proposals"},
-		{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/results"},
 		{method: http.MethodGet, path: "/api/v1/proposals/p1/audit-anchors"},
 	}
@@ -105,13 +104,12 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 }
 
 func TestHandler_InvalidPayload(t *testing.T) {
-	handler := NewHandlerWithTallyAndMode(
+	handler := NewHandlerWithTally(
 		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
 		usecase.NewProposalUseCase(nil, zap.NewNop()),
 		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
-		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
-		true,
+		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		zap.NewNop(),
 	)
 	engine := NewServer(&config.Config{
@@ -206,13 +204,6 @@ func TestHandler_InvalidPayload(t *testing.T) {
 		},
 		{
 			method: http.MethodPost,
-			path:   "/api/v1/proposals/p1/ballot-draft",
-			body: map[string]any{
-				"option": "",
-			},
-		},
-		{
-			method: http.MethodPost,
 			path:   "/api/v1/proposals/p1/results/publish",
 			body: map[string]any{
 				"shares": []string{},
@@ -232,13 +223,12 @@ func TestHandler_InvalidPayload(t *testing.T) {
 }
 
 func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
-	handler := NewHandlerWithTallyAndMode(
+	handler := NewHandlerWithTally(
 		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
 		usecase.NewProposalUseCase(nil, zap.NewNop()),
 		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
-		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
-		true,
+		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		zap.NewNop(),
 	)
 	engine := NewServer(&config.Config{
@@ -256,7 +246,6 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/credentials", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", raw: "{"},
-		{method: http.MethodPost, path: "/api/v1/proposals/p1/ballot-draft", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/decryption/setup", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/results/publish", raw: "{"},
 	}
@@ -375,30 +364,6 @@ func TestHandler_GetResult_NotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-// TestHandler_BallotDraftHiddenOutsideDebugMode 覆盖 T1 的验收口径：
-// 非 debug 模式下 ballot-draft 按 404 处理，不用 403 是为了不暴露端点存在性。
-func TestHandler_BallotDraftHiddenOutsideDebugMode(t *testing.T) {
-	handler := NewHandlerWithTallyAndMode(
-		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
-		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
-		usecase.NewProposalUseCase(nil, zap.NewNop()),
-		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
-		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
-		false,
-		zap.NewNop(),
-	)
-	engine := NewServer(&config.Config{
-		ServerAddress:    ":0",
-		GinMode:          gin.TestMode,
-		AdminBearerToken: "secret",
-	}, handler, zap.NewNop()).Engine()
-
-	rec := httptest.NewRecorder()
-	req := jsonRequest(t, http.MethodPost, "/api/v1/proposals/p1/ballot-draft", map[string]any{"option": "A"})
-	engine.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusNotFound, rec.Code)
-}
-
 // TestHandler_GetElectionKey 覆盖客户端本地加密的前提：服务端公开计票公钥。
 //
 // 公钥是公开值，客户端拿到它就能在本地把选项加密成密文，服务端全程看不到
@@ -448,7 +413,7 @@ func TestHandler_GetElectionKey(t *testing.T) {
 }
 
 func TestHandler_SuccessFlow(t *testing.T) {
-	engine, _, db := buildFullStackEngine(t)
+	engine, encrypter, db := buildFullStackEngine(t)
 	ts := httptest.NewServer(engine)
 	defer ts.Close()
 
@@ -508,19 +473,13 @@ func TestHandler_SuccessFlow(t *testing.T) {
 			"ends_at":   time.Now().UTC().Add(30 * time.Minute),
 		}).Error)
 
-	draftReq := map[string]any{"option": "candidate-A"}
-	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/ballot-draft", draftReq)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	var draftResp struct {
-		EncryptedVote string `json:"encrypted_vote"`
-		Proof         string `json:"proof"`
-		Nullifier     string `json:"nullifier"`
-	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&draftResp))
-	_ = resp.Body.Close()
-	require.NotEmpty(t, draftResp.EncryptedVote)
-	require.NotEmpty(t, draftResp.Proof)
-	require.NotEmpty(t, draftResp.Nullifier)
+	// 密文由客户端本地加密：服务端没有代加密的入口了。
+	pubKeyBytes, err := base64.StdEncoding.DecodeString(setupResp.PublicKey)
+	require.NoError(t, err)
+	cipher, err := encrypter.Encrypt(pubKeyBytes, 0)
+	require.NoError(t, err)
+	nullifier, err := cryptoinfra.NewBallotNullifierGenerator().GenerateNullifier()
+	require.NoError(t, err)
 
 	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/vote-status", map[string]any{
 		"user_id":              "u-1",
@@ -532,9 +491,9 @@ func TestHandler_SuccessFlow(t *testing.T) {
 
 	voteReq := map[string]any{
 		"proposal_id":          proposalResp.ID,
-		"encrypted_vote":       draftResp.EncryptedVote,
-		"proof":                draftResp.Proof,
-		"nullifier":            draftResp.Nullifier,
+		"encrypted_vote":       base64.StdEncoding.EncodeToString(cipher),
+		"proof":                base64.StdEncoding.EncodeToString([]byte("debug-proof")),
+		"nullifier":            nullifier,
 		"user_id":              "u-1",
 		"user_pub_key":         credential.UserPubKey,
 		"credential_signature": credential.Signature,
@@ -705,18 +664,16 @@ func buildFullStackEngineWithVerifier(
 		resultRepo,
 		anchorRepo,
 		encrypter,
-		cryptoinfra.NewBallotNullifierGenerator(),
 		merkleBuilder,
 		logger,
 	)
 
-	handler := NewHandlerWithTallyAndMode(
+	handler := NewHandlerWithTally(
 		votingUC,
 		registerUC,
 		proposalUC,
 		participationUC,
 		tallyUC,
-		true,
 		logger,
 	)
 	server := NewServer(&config.Config{

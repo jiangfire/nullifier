@@ -19,7 +19,7 @@ func TestConstructors_DefaultLogger(t *testing.T) {
 	require.NotNil(t, NewRegisterUseCase(nil, nil, nil, nil))
 	require.NotNil(t, NewProposalUseCase(nil, nil))
 	require.NotNil(t, NewParticipationUseCase(nil, nil, nil))
-	require.NotNil(t, NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil, nil))
+	require.NotNil(t, NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil))
 }
 
 func TestSubmitVoteRequest_Validate(t *testing.T) {

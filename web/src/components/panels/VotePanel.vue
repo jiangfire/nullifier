@@ -10,13 +10,6 @@ const emit = defineEmits<{
   submitted: [];
 }>();
 
-async function prepare(): Promise<void> {
-  const ok = await portal.prepareBallotByOption();
-  if (ok) {
-    emit('ballotReady');
-  }
-}
-
 async function prepareLocally(): Promise<void> {
   const ok = await portal.generateBallotLocally();
   if (ok) {
@@ -193,23 +186,9 @@ async function checkStatus(): Promise<void> {
           >
             {{ portal.voteLoading ? '生成中…' : '在浏览器本地生成选票' }}
           </button>
-          <template v-if="portal.debugMode">
-            <p class="card-sub">
-              开发联调模式下还可以让服务端代生成凭据，方便联调 —— 但它会让服务端
-              看到你选了哪个选项，与匿名投票的前提冲突，所以正式模式没有这个入口。
-            </p>
-            <button
-              class="btn btn--secondary"
-              type="button"
-              :disabled="portal.voteLoading || !portal.walletReady"
-              @click="prepare"
-            >
-              {{ portal.voteLoading ? '生成中…' : '按选项生成凭据' }}
-            </button>
-          </template>
-          <p v-else class="card-sub">
-            当前服务不是开发联调模式，没有「按选项生成凭据」这个入口 ——
-            它会让服务端看到你选了哪个选项，与匿名投票的前提冲突。
+          <p class="card-sub">
+            正式模式下只有这一个出票入口：没有「让服务端代生成凭据」的路子 ——
+            那会让服务端看到你选了哪个选项，与匿名投票的前提冲突。
           </p>
 
           <details class="disclosure">

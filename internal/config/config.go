@@ -22,8 +22,9 @@ const ConfigFileEnvVar = "CONFIG_FILE"
 type Config struct {
 	ServerAddress string
 	GinMode       string
-	// DebugMode 表示服务运行在开发联调模式。非 debug 模式下，
-	// ballot-draft 这类「服务端替用户选票」的调试能力一律不可达。
+	// DebugMode 表示服务运行在开发联调模式。它只作为运行状态暴露
+	// （`GET /healthz` 的 `debug` 字段）：服务端没有任何「替用户选票」的
+	// 调试能力，开发模式与正式模式的行为完全一致。
 	DebugMode                   bool
 	CORSAllowedOrigins          []string
 	AdminBearerToken            string
@@ -183,8 +184,8 @@ func IsReleaseMode(mode string) bool {
 
 // isDebugMode 判断服务是否运行在开发联调模式。
 //
-// 只有显式的开发模式才开放调试能力：ballot-draft 这类端点会让服务端
-// 看到明文选项，生产环境不该可达。
+// 它只影响 `GET /healthz` 报出的运行状态：服务端在两种模式下的行为
+// 完全一致 —— 选票的加密与证明都在客户端完成。
 func isDebugMode(mode string) bool {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "debug", "dev", "development":

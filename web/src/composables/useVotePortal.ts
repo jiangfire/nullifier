@@ -194,19 +194,6 @@ function newNullifier(): string {
   return generateNullifier();
 }
 
-/**
- * 从健康检查响应里读出服务端的 debug 标志。
- *
- * 服务端没给这个字段时按 false 处理：宁可把开发入口藏起来，
- * 也不要因为一个没读到的字段把「服务端能看到明文选项」的按钮露出去。
- */
-function readDebugFlag(payload: unknown): boolean {
-  if (typeof payload !== 'object' || payload === null) {
-    return false;
-  }
-  return (payload as { debug?: unknown }).debug === true;
-}
-
 function splitShares(raw: string): string[] {  return raw
     .split(/[\s,]+/)
     .map((item) => item.trim())
@@ -335,9 +322,6 @@ export function useVotePortal() {
     text: '未检测',
     checkedAt: '',
   });
-  // 服务端是否处于开发联调模式。非 debug 模式下「按选项生成凭据」
-  // 这类让服务端看到明文选项的能力不可用，门户要把它藏起来。
-  const debugMode = ref(false);
   const hallState = reactive({
     loading: false,
     proposals: [] as ProposalItem[],
@@ -870,62 +854,6 @@ export function useVotePortal() {
     }
   }
 
-  async function prepareBallotByOption(): Promise<boolean> {
-    clearErrorGroup(voteErrors);
-    if (!walletReady.value) {
-      addNotice('error', '生成失败', '请先领取或导入匿名凭证');
-      return false;
-    }
-    if (voteForm.proposalId.trim() === '') {
-      voteErrors.proposalId = '请先选择 proposal_id';
-      addNotice('error', '生成失败', voteErrors.proposalId);
-      return false;
-    }
-    if (selectedVoteOption.value.trim() === '') {
-      voteErrors.option = '请先选择投票选项';
-      addNotice('error', '生成失败', voteErrors.option);
-      return false;
-    }
-
-    voteLoading.value = true;
-    const result = await apiCall({
-      baseUrl: apiBaseUrl.value,
-      path: `/api/v1/proposals/${encodeURIComponent(voteForm.proposalId.trim())}/ballot-draft`,
-      method: 'POST',
-      body: { option: selectedVoteOption.value.trim() },
-    });
-    voteLoading.value = false;
-
-    if (!result.ok) {
-      addNotice(
-        'error',
-        '生成失败',
-        describeApiError(
-          result.error,
-          result.code,
-          '该提案还没初始化解密，请先在「计票与审计」完成「初始化解密」',
-        ),
-      );
-      return false;
-    }
-
-    const payload = toObject(result.data);
-    voteForm.encryptedVote = textOf(payload, 'encrypted_vote');
-    voteForm.proof = textOf(payload, 'proof');
-    voteForm.nullifier = textOf(payload, 'nullifier') || newNullifier();
-    const option = textOf(payload, 'option');
-    // 先绑定目标再回写选项：回写会触发下面的 watcher，watcher 是延迟执行的，
-    // 那时 ballotOption 已经是新值，不会误清刚拿到的材料。
-    voteForm.ballotProposalId = voteForm.proposalId.trim();
-    voteForm.ballotOption = (option || selectedVoteOption.value).trim();
-    if (option !== '') {
-      selectedVoteOption.value = option;
-    }
-    updateBallotJson(selectedVoteOption.value);
-    addNotice('success', '生成成功', '已根据选项生成可提交的投票凭据');
-    return true;
-  }
-
   /**
    * 在浏览器本地生成选票（密文 + nullifier + 零知识证明）。
    *
@@ -1025,9 +953,6 @@ export function useVotePortal() {
     if (result.ok) {
       healthState.ok = true;
       healthState.text = '服务在线';
-      // 服务端会告诉门户自己是不是开发联调模式：非 debug 模式下
-      // 「按选项生成凭据」不可用，门户据此隐藏入口。
-      debugMode.value = readDebugFlag(result.data);
       if (showNotice) {
         addNotice('success', '连接成功', '后端服务可访问');
       }
@@ -2040,7 +1965,6 @@ export function useVotePortal() {
     apiBaseUrl,
     adminBearerToken,
     healthState,
-    debugMode,
     checkHealth,
 
     hallState,
@@ -2080,7 +2004,6 @@ export function useVotePortal() {
     applySelectedOptionToBallot,
     fillBallotTemplate,
     importBallotJson,
-    prepareBallotByOption,
     generateBallotLocally,
     submitVote,
     fetchVoteStatus,

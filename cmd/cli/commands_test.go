@@ -127,14 +127,6 @@ func TestRun_HTTPCommands(t *testing.T) {
 			wantOut: `"id": "p1"`,
 		},
 		{
-			name:    "ballot-draft",
-			args:    []string{"ballot-draft", "-proposal", "p1", "-option", "A"},
-			method:  http.MethodPost,
-			path:    "/api/v1/proposals/p1/ballot-draft",
-			resp:    `{"proposal_id":"p1","option":"A","encrypted_vote":"cipher","proof":"proof","nullifier":"n1"}`,
-			wantOut: `"encrypted_vote": "cipher"`,
-		},
-		{
 			name:    "vote-status",
 			args:    []string{"vote-status", "-proposal", "p1", "-credential-file", credentialPath},
 			method:  http.MethodPost,
@@ -247,36 +239,6 @@ func TestRun_CommandsThatWriteFiles(t *testing.T) {
 		require.Equal(t, "p1", issued.ProposalID)
 		require.Equal(t, "u-1", issued.UserID)
 		require.NotEmpty(t, issued.ExportedAt)
-	})
-
-	t.Run("ballot-draft 落盘", func(t *testing.T) {
-		t.Parallel()
-
-		srv, requests := newRecordingServer(t, http.StatusOK,
-			`{"proposal_id":"p1","option":"A","encrypted_vote":"cipher","proof":"proof","nullifier":"n1"}`)
-		outPath := filepath.Join(dir, "ballot.json")
-
-		code := 0
-		out, _ := captureOutput(t, func() {
-			code = run([]string{
-				"-base-url", srv.URL,
-				"ballot-draft", "-proposal", "p1", "-option", "A", "-out", outPath,
-			})
-		})
-
-		require.Equal(t, 0, code)
-		require.Contains(t, out, outPath)
-
-		req := <-requests
-		require.Equal(t, "/api/v1/proposals/p1/ballot-draft", req.Path)
-
-		var ballot ballotFile
-		raw, err := os.ReadFile(outPath)
-		require.NoError(t, err)
-		require.NoError(t, json.Unmarshal(raw, &ballot))
-		require.Equal(t, "p1", ballot.ProposalID)
-		require.Equal(t, "A", ballot.SelectedOption)
-		require.Equal(t, "cipher", ballot.EncryptedVote)
 	})
 
 	t.Run("vote-submit 提交选票", func(t *testing.T) {
@@ -535,7 +497,6 @@ func TestRun_MissingRequiredFlags(t *testing.T) {
 		{name: "proposal-create", call: func(c *cli) error { return c.cmdCreateProposal(nil) }},
 		{name: "credential-issue", call: func(c *cli) error { return c.cmdIssueCredential(nil) }},
 		{name: "credential-show", call: func(c *cli) error { return c.cmdShowCredential(nil) }},
-		{name: "ballot-draft", call: func(c *cli) error { return c.cmdBallotDraft(nil) }},
 		{name: "vote-submit", call: func(c *cli) error { return c.cmdVoteSubmit(nil) }},
 		{name: "vote-status", call: func(c *cli) error { return c.cmdVoteStatus(nil) }},
 		{name: "credentials-list", call: func(c *cli) error { return c.cmdCredentialStatuses(nil) }},
