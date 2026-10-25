@@ -698,6 +698,40 @@ web/                        # Vue 3 前端门户
 工具自身有单元测试（`cmd/loadtest/main_test.go`）：用 `httptest` 模拟最小 API 面，覆盖
 「正常压测 → 防重投守住」「防重投失守 → 非 0 退出」「令牌不对」「参数非法」与报告计算。
 
+### 8.2 PostgreSQL 集成测试（本地 compose）
+
+`tests/integration` 的 PostgreSQL 用例有**两条路径**，共用同一份测试代码：
+
+| 路径 | 触发条件 | 数据库来源 |
+|---|---|---|
+| testcontainers | 没设 `ANONVOTE_TEST_PG_HOST` | 每次测试拉一个临时 `postgres:16-alpine` 容器 |
+| 外部库 | 设了 `ANONVOTE_TEST_PG_HOST` | 连已有的 PostgreSQL |
+
+**本地跑法**（仓库根有 `docker-compose.yml`）：
+
+```bash
+make pg-test        # 起库 → 跑集成测试 → 关库
+```
+
+`make pg-test` 依次做三件事：`docker compose up -d --wait postgres` → 带
+`ANONVOTE_TEST_PG_*` 环境变量跑 `go test ./tests/integration/ -run Postgres` →
+`docker compose down -v`。测试失败也会关库（退出码照样带出来）。
+
+**每个测试一个独立 schema**（`itest_<纳秒时间戳>`）：外部库是共享的，同一个库上
+反复跑测试不会撞上一次留下的表；跑完 `DROP SCHEMA ... CASCADE` 清理。
+
+**环境变量**（默认值与 `docker-compose.yml` 一致）：
+
+| 变量 | 默认值 |
+|---|---|
+| `ANONVOTE_TEST_PG_HOST` | 空（空 = 走 testcontainers） |
+| `ANONVOTE_TEST_PG_PORT` | `5432` |
+| `ANONVOTE_TEST_PG_USER` | `test` |
+| `ANONVOTE_TEST_PG_PASSWORD` | `test` |
+| `ANONVOTE_TEST_PG_DATABASE` | `anonvote` |
+
+> 端口不是数字时按「没有外部库」处理 —— 宁可不跑，也不要连到错的地址。
+
 
 ## 9. 当前已知限制
 

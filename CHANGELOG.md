@@ -97,6 +97,11 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 - **Go 侧的盲签名客户端**（新模块 `internal/infrastructure/crypto/credential_client.go`）：
   `CredentialBlindClient.Blind` / `Finalize`，CLI 与端到端测试共用。只需签发方公钥，
   零新依赖（同库 CIRCL）。
+- **PostgreSQL 集成测试可以在本地跑了**（新文件 `docker-compose.yml` + 新目标
+  `make pg-test`）：起一个 `postgres:16-alpine` → 跑 `go test ./tests/integration/ -run Postgres`
+  → 关库。集成测试同时支持**外部库模式**（设 `ANONVOTE_TEST_PG_HOST` 即连已有的
+  PostgreSQL，每个测试开一个独立 schema 并在跑完时删掉）—— CI 走 testcontainers、
+  本地走 compose，**两条路径共用同一份断言**。
 - `GET /healthz` 响应新增 `debug` 布尔字段（由 `server.mode` 推导）。
 - **服务现在能用 `CONFIG_FILE` 显式指定配置文件**：`CONFIG_FILE=./configs/config.production.yaml`
   启动即可加载生产配置 —— 那个文件此前**永远不会被自动加载**（viper 只找 `config.yaml`），

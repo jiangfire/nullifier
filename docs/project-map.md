@@ -420,6 +420,10 @@ go run ./cmd/loadtest -admin-token dev-admin-token -votes 200 -concurrency 20
 go run ./cmd/loadtest -admin-token dev-admin-token -votes 200 -concurrency 20 -json
 #   防重投没守住时退出码非 0 —— 可以直接当门禁用
 
+# PostgreSQL 集成测试：本地用 compose 起库（需要 Docker），CI 走 testcontainers
+make pg-test                       # 起库 → 跑集成测试 → 关库
+go test ./tests/integration/ -run TestExternalPostgresSettingsFromEnv -v   # 连接参数解析（不需要数据库）
+
 # 前端
 pnpm --dir web run test
 pnpm --dir web run test -- src/lib/nullifier.test.ts   # 只跑 nullifier 单测

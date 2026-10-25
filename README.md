@@ -275,6 +275,7 @@ make test              # 全部测试
 make cover             # 覆盖率门槛(THRESHOLD=90 可覆盖默认值)
 make web-lint web-typecheck web-test   # 前端检查
 make loadtest ARGS="-votes 200 -concurrency 20"   # 并发投票压测(需要一个本地 debug 服务)
+make pg-test          # PostgreSQL 集成测试(用 docker-compose 起一个库,跑完关掉)
 ```
 
 等价的原始命令：
