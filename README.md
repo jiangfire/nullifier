@@ -33,12 +33,14 @@ nullifier 把这两个动作拆开:
 > Groth16 选票电路**（服务端能真实验签）。但**客户端侧还差最后一段**：请在下面的
 > 「项目状态与限制」里读完整说明，不要把当前实现当成生产能力：
 >
-> - **服务端侧证明链已成立，浏览器端 prover 还没有。** 电路、`cmd/keygen` 密钥生成、
->   服务端按请求字段自拼公开输入并真实验签都已落地；但**没有任何客户端在本地生成 proof** ——
+> - **服务端侧证明链已成立，CLI 已能在本地出证明，浏览器端 prover 还没有。** 电路、`cmd/keygen`
+>   密钥生成、服务端按请求字段自拼公开输入并真实验签都已落地；**CLI 现在能自己出证明**
+>   （`ballot-prove`，用本地 proving key，证明不经过服务端）。但**门户没有本地 prover** ——
 >   因此 **release 模式下门户仍然无法完成一次投票**。
-> - **选票密文已经能在客户端生成，但门户还没接上。** 浏览器端（`web/src/lib/ballot-cipher.ts`）
+> - **选票密文已经能在客户端生成，CLI 已完整可用，门户还没接上。** 浏览器端（`web/src/lib/ballot-cipher.ts`）
 >   与 CLI（`ballot-encrypt` 命令）都能在本地加密选票，服务端只提供公开的计票公钥；
->   **门户尚未接线**（缺客户端 prover，接了也投不出去），debug 模式的 `ballot-draft`
+>   **CLI 这条路已经能投出真票**（本地加密 + 本地证明，服务端真实验签）；
+>   **门户尚未接线**（缺浏览器端 prover，接了也投不出去），debug 模式的 `ballot-draft`
 >   仍是「服务端知道选项」的那条路径。
 > - **只适合内测与开发**，不要用于真实投票。补齐客户端 prover 与门户接线的工作见
 >   [`docs/roadmap.md`](./docs/roadmap.md) 的 v0.2.0 里程碑。
@@ -50,8 +52,8 @@ nullifier 把这两个动作拆开:
 | 能力 | 说明 |
 |---|---|
 | 凭证签名 | RSA-PSS 签名(基于 RFC9474 盲签名库);**真两段式盲签名**:客户端本地盲化,签发方在签名阶段只见盲化消息,交叉攻击(拿 A 的盲签名签 B)验签失败 |
-| 零知识验票 | 真实 Groth16 电路(BN254),证明「这张票加密了某个合法选项」且不携带身份 —— **服务端已能真实验签;客户端 prover 还没有** |
-| 客户端加密 | 选票密文在**客户端本地**生成(浏览器端 TS + CLI `ballot-encrypt`),服务端只提供公开的计票公钥 —— **门户还没接上** |
+| 零知识验票 | 真实 Groth16 电路(BN254),证明「这张票加密了某个合法选项」且不携带身份 —— **服务端已能真实验签;CLI 已能本地出证明,门户的浏览器端 prover 还没有** |
+| 客户端加密 | 选票密文在**客户端本地**生成(浏览器端 TS + CLI `ballot-encrypt`),服务端只提供公开的计票公钥 —— **CLI 已完整可用,门户还没接上** |
 | 防重放 | 每票一个 `nullifier`,重复投票直接拒绝;nullifier 落库前归一成规范形式,变体写法绕不过唯一索引;nullifier 由秘密单向派生(浏览器端已能算出与电路一致的值) |
 | 并发防重投 | 8 个请求同时用**同一个 nullifier** 提交时,数据库唯一索引兜底 —— 恰好一张票入库,其余 409(有回归测试) |
 | 防冒充 | `proposal_id + user_id + user_pub_key + credential_signature` 四元组校验,并**验签凭证签名**(失败 401) |
@@ -72,7 +74,7 @@ nullifier 把这两个动作拆开:
 | 形态 | 说明 |
 |---|---|
 | HTTP API | 15 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
-| CLI | 16 个命令,复用同一套 HTTP API,不绕过服务端校验 |
+| CLI | 17 个命令,复用同一套 HTTP API,不绕过服务端校验（`ballot-prove` 除外 —— 它纯本地出证明） |
 | Web 门户 | Vue 3 单页应用,覆盖投票端与运营端全流程 |
 
 ## 快速开始
@@ -109,12 +111,17 @@ go run ./cmd/cli -admin-token dev-admin-token credential-issue \
 #       —— 运营方不知道谁领了哪张,匿名性更好
 go run ./cmd/cli credential-claim -proposal <proposal_id> -out cred.json
 
-# 4. 在本地加密选票并投票
+# 4. 在本地加密选票、出证明并投票
 #    ballot-encrypt 在客户端本地加密:取公开的计票公钥 → 加密选项下标 → 落盘选票文件。
-#    服务端全程拿不到明文选项。选票文件里的 nullifier_secret 只留本地(提交时不会发出)。
+#    服务端全程拿不到明文选项。选票文件里的 nullifier_secret、nonce 等只留本地(提交时不会发出)。
 #    -proof 省略时用开发占位值,只在开发模式(未配 crypto.vk_path)能过验签;
-#    release 模式必须传本地 prover 产出的真实 proof。
+#    release 模式必须用下面 ballot-prove 产出的真实 proof。
 go run ./cmd/cli ballot-encrypt -proposal <proposal_id> -option A -out ballot.json
+
+#    ballot-prove 在**本地**用 proving key 生成 Groth16 证明:证明不经过服务端,
+#    proving key 只在客户端(服务端只拿 verifying.key)。release 模式要投真票就得走这一步。
+go run ./cmd/cli ballot-prove -ballot-file ballot.json -proving-key keys/proving.key -out ballot.json
+
 go run ./cmd/cli vote-submit -credential-file cred.json -ballot-file ballot.json
 
 #    备选:ballot-draft 让服务端代加密,只在 debug 模式可达(非 debug 模式返回 404),
@@ -306,8 +313,8 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 这是个在推进中的实现,接手前请知道边界在哪:
 
-- **证明链:服务端侧已通,客户端侧还差一段。** 真实 Groth16 电路(`internal/infrastructure/crypto/ballot/`)、`cmd/keygen` 密钥生成流程、服务端按请求字段自拼公开输入并真实验签都已落地 —— 篡改任一公开输入都会验签失败。**但没有任何客户端在本地生成 proof**:门户与 CLI 都拿不到可提交的证明,因此 **release 模式下门户仍然无法完成一次投票**。`crypto.vk_path` 为空时验证器只要求 proof 非空(开发模式),本地「验证通过」不代表真的验过。
-- **选票密文已经能在客户端生成,门户还没接上。** 浏览器端(`web/src/lib/ballot-cipher.ts`)与 CLI(`ballot-encrypt` 命令)都能在本地加密选票,服务端只提供公开的计票公钥(`GET /api/v1/proposals/:id/election-key`),落库记录里只有密文。两边的点编码**逐字节一致**,由一组跨语言已知答案向量锁死。**但门户还没接上**(缺客户端 prover,接了也投不出去),debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径 —— 能力 A 因此尚未完全闭合。
+- **证明链:服务端侧已通,CLI 侧也通了,门户还差一段。** 真实 Groth16 电路(`internal/infrastructure/crypto/ballot/`)、`cmd/keygen` 密钥生成流程、服务端按请求字段自拼公开输入并真实验签都已落地 —— 篡改任一公开输入都会验签失败。**CLI 现在能在本地生成 proof**(`ballot-prove`,用本地 proving key,证明不经过服务端),因此**命令行这条路能投出真票**;但**门户没有本地 prover**,因此 **release 模式下门户仍然无法完成一次投票**。`crypto.vk_path` 为空时验证器只要求 proof 非空(开发模式),本地「验证通过」不代表真的验过。
+- **选票密文已经能在客户端生成,CLI 已完整可用,门户还没接上。** 浏览器端(`web/src/lib/ballot-cipher.ts`)与 CLI(`ballot-encrypt` 命令)都能在本地加密选票,服务端只提供公开的计票公钥(`GET /api/v1/proposals/:id/election-key`),落库记录里只有密文。两边的点编码**逐字节一致**,由一组跨语言已知答案向量锁死。**CLI 已能端到端投出真票**(本地加密 + 本地证明,服务端用真 verifying key 验签,见 `tests/e2e/client_prover_test.go`)。**但门户还没接上**(缺浏览器端 prover,接了也投不出去),debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径 —— 能力 A 因此尚未完全闭合。
 - **门户的 nullifier 还是随机域元素。** 浏览器端已能按 `MiMC(秘密, 提案域元素)` 算出**电路认可**的 nullifier(纯 TypeScript 实现,与 Go 侧逐位一致,跨语言向量锁死,Go 侧还真的用这组值出过证明),但门户仍在生成随机 nullifier —— 那种 nullifier 按电路约束出不了证明。与客户端 prover 一起改。
 - **凭证签名现在会被验证。** 投票落库前会调用签发方验签,伪造签名的请求返回 401。
 - **凭证签发是真两段式盲签名。** 客户端本地盲化(`sha256(user_id ‖ 0x00 ‖ user_pub_key)`),签发方在**签名阶段**只见盲化消息 —— 它没有、也不需要私钥以外的任何客户端秘密。⚠️ 口径:最后一次 attest 时服务端会看到公钥与 `user_id`,因为验签必须重算凭证消息;达成的是「签发方看不到被签内容」,不是「服务端全程不知道客户端是谁」。

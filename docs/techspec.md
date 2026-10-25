@@ -416,6 +416,11 @@ web/                        # Vue 3 前端门户
 - 默认不覆盖已存在的文件；要覆盖得加 `-force`。
 - 轮换密钥等于重新生成一对并让服务端加载新的 vk。旧 proof 用新 vk 验证必然失败，
   因此轮换要挑在投票窗口之外。
+- **proving key 要分发给投票人**（CLI 用户拿它跑 `ballot-prove`；浏览器端 prover 落地后
+  由门户提供）。这一点要说清楚：拿到 proving key 的人可以自己出证明，**但证明只绑定
+  密文、不绑定身份** —— 它不携带任何「谁投的」信息，因此分发它不构成新的身份泄露；
+  真正的身份约束来自凭证签名与「一张凭证只能投一票」。反过来，**服务端永远不该拿到
+  proving key**（它拿到就能替任何人造出合法密文与证明）。
 
 ### 6.6 服务端证明链接线
 
@@ -456,9 +461,19 @@ web/                        # Vue 3 前端门户
 - **CLI 实现**：`cmd/cli` 的 `ballot-encrypt` 命令 —— 取公钥 → 本地加密 → 落盘选票
   文件。选票文件里带 `nullifier_secret`（nullifier 秘密，只留本地），prover 需要它
   才能满足电路里的 nullifier 约束。
+- **CLI 侧本地 prover**：`cmd/cli` 的 `ballot-prove` 命令 —— 读选票文件 → 用本地
+  proving key 生成 Groth16 证明 → 把证明写回选票文件。**证明全程不经过服务端**，
+  proving key 也只留在客户端（服务端只拿 verifying key）。
+  - 选票文件因此多存四项本地见证材料：`nonce`（加密用的一次性随机数，电路约束
+    `a = r·G` 要用）、`option_index`（选项下标，电路的私有见证）、`num_options`
+    （提案选项数，公开输入之一）、`election_public_key`（计票公钥未压缩形式）。
+    这四项**都不提交给服务端**，`vote-submit` 也不会发它们。
+  - 公开输入走**服务端同一套**拼装入口（`ballot.BuildPublicInputs`）：客户端与服务端
+    算出同一份公开输入，证明才验得过。计票公钥客户端拿到的是未压缩形式，服务端
+    用的是压缩形式，客户端先用 `ballot.CompressPoint` 转成同一形式。
 - **服务端不再需要知道明文选项**：`usecase.TallyUseCase.EncryptVoteOption`（服务端
   代加密）只剩 debug 模式的 `ballot-draft` 在用。
-- **还没闭合的部分**：门户还没接上客户端加密（缺客户端 prover，接了也投不出去），
+- **还没闭合的部分**：门户还没接上客户端加密（缺浏览器端 prover，接了也投不出去），
   debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径。
 
 ### 6.9 凭证验签与真两段式盲签名
@@ -600,6 +615,9 @@ web/                        # Vue 3 前端门户
   是开发用占位值，不是真实证明。
 - `ballot-encrypt` 在**客户端本地加密**选票：取公开的计票公钥 → 本地加密选项下标 →
   落盘选票文件。选票文件里的 `nullifier_secret` 只留本地，prover 需要它。
+- `ballot-prove` 在**客户端本地出证明**：读选票文件 → 用本地 proving key 生成 Groth16
+  证明 → 写回选票文件。证明不经过服务端，proving key 也不上服务端（服务端只拿
+  verifying key）。缺材料（nonce / 选项下标 / 选项数 / 计票公钥）时报错退出。
 - `credential-claim` 匿名领取凭证：走**真两段式盲签名**（预留 → 本地盲化 → 盲签名 →
   本地解盲 → attest），**不需要 admin token**（领取端点是公开的），服务端随机给出一个
   池槽位的凭证。服务端因此无法把凭证与投票人对应起来。槽位被抢走时客户端换一个槽位
@@ -616,6 +634,7 @@ web/                        # Vue 3 前端门户
   - `credential-show`
   - `ballot-draft`
   - `ballot-encrypt`
+  - `ballot-prove`
   - `vote-submit`
   - `vote-status`
   - `credentials-list`
@@ -650,6 +669,12 @@ web/                        # Vue 3 前端门户
   - **两段式盲签名的端到端测试**：`tests/e2e/blind_signature_test.go` —— 验收 ①
     （服务端在签名阶段只见盲化消息）与验收 ②（交叉攻击失败），外加「公开盲签名端点
     必须绑定池槽位」与「槽位被抢时客户端换槽位重来」
+  - **客户端本地出证明的端到端测试**：`tests/e2e/client_prover_test.go` —— 服务端配
+    **真的 verifying key**（不是开发模式的「proof 非空即通过」），证明由客户端用
+    proving key 在本地生成，服务端全程没参与出证明也没见过明文选项。反向断言也
+    补上了：改一个字节的证明必须 400 且不落库 —— 这条用例不会因为服务端没在验签
+    而假通过。服务端以**非 debug 模式**启动（`ballot-draft` 是 404），因此这张票
+    只可能来自客户端。
   - **凭证端点的请求校验分支测试**：`internal/infrastructure/http/credential_endpoints_test.go`
     —— 公开端与管理端的盲签名、attest、备池、预留端点在「缺字段 / 非法 base64 /
     请求体不是 JSON」时一律 4xx（**不能 5xx**），管理端缺 admin token 是 401，
@@ -759,15 +784,17 @@ make pg-test        # 起库 → 跑集成测试 → 关库
 > 上线前的逐项核对见 [`deployment-checklist.md`](./deployment-checklist.md) ——
 > 那里把配置、密钥、迁移、TLS、门户部署与投票运营流程拆成了可勾的条目。
 
-- **证明链已通，但浏览器端 prover 还没做。** 服务端能真实验签：真实 Groth16 电路 +
-  `cmd/keygen` + 加载 `crypto.vk_path` 后的 Groth16 验证都落地了。但门户没有本地
-  prover，**release 模式下门户依然无法完成投票**；dev 模式走的是服务端代加密的
-  草稿链路（`ballot-draft`）。
-- **明文选项对服务端不可知：客户端加密已落地，但门户还没接上。** 浏览器端
+- **证明链已通，CLI 已能在本地出证明，浏览器端 prover 还没做。** 服务端能真实验签：真实
+  Groth16 电路 + `cmd/keygen` + 加载 `crypto.vk_path` 后的 Groth16 验证都落地了；
+  **CLI 侧**也能自己出证明（`cmd/cli` 的 `ballot-prove`，用本地 proving key），端到端
+  证据见 `tests/e2e/client_prover_test.go`。但门户没有本地 prover，**release 模式下
+  门户依然无法完成投票**；dev 模式走的是服务端代加密的草稿链路（`ballot-draft`）。
+- **明文选项对服务端不可知：CLI 侧已闭合，门户还没接上。** 浏览器端
   （`web/src/lib/ballot-cipher.ts`）与 CLI（`cmd/cli` 的 `ballot-encrypt`）都能在本地
   生成选票密文，服务端只提供公开的计票公钥（`GET .../election-key`），落库记录里
-  只有密文。**但门户还没接上**（缺客户端 prover），debug 模式的 `ballot-draft` 仍是
-  「服务端知道选项」的那条路径 —— 能力 A 因此尚未完全闭合。
+  只有密文。CLI 还能在本地出证明，因此**命令行这条路已经能投出真票**（服务端用真
+  verifying key 验签）。**但门户还没接上**（缺浏览器端 prover），debug 模式的
+  `ballot-draft` 仍是「服务端知道选项」的那条路径 —— 能力 A 因此尚未完全闭合。
 - **凭证签发已经是真两段式盲签名**（见 §6.9）：客户端本地盲化，服务端在签名阶段只见
   盲化消息，attest 阶段才拿到公钥并验签。能力 F 在**签名阶段**达成。
   - 口径要说清楚：**attest 阶段服务端仍然看得到 `user_id` 与 `user_pub_key`** —— 验签

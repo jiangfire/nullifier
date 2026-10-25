@@ -266,8 +266,8 @@
 
 ### 1.8 CLI —— `cmd/cli/main.go`
 
-16 个命令，全部走 HTTP API：
-`health` `version` `proposals-open` `proposal-create` `credential-issue` `credential-claim` `credential-show` `ballot-draft` `ballot-encrypt` `vote-submit` `vote-status` `credentials-list` `decrypt-setup` `result-publish` `result-get` `anchors-list`
+17 个命令，全部走 HTTP API（`ballot-prove` 除外 —— 它纯本地，不发请求）：
+`health` `version` `proposals-open` `proposal-create` `credential-issue` `credential-claim` `credential-show` `ballot-draft` `ballot-encrypt` `ballot-prove` `vote-submit` `vote-status` `credentials-list` `decrypt-setup` `result-publish` `result-get` `anchors-list`
 
 **模式**：`-admin-token` flag 或 `NULLIFIER_ADMIN_TOKEN` 环境变量；`-base-url` 或 `NULLIFIER_BASE_URL`。
 
@@ -276,6 +276,11 @@
 客户端是 `internal/infrastructure/crypto/credential_client.go` 的 `CredentialBlindClient`
 （CLI 与端到端测试共用同一个实现）。
 
+**CLI 能自己出证明**（路线图 G9 的另一个选项，见 §5）：`ballot-encrypt` 在本地加密并把
+见证材料写进选票文件，`ballot-prove` 用本地 proving key 生成 Groth16 证明。证明全程
+不经过服务端 —— proving key 只在客户端，服务端只拿 verifying key。公开输入走服务端
+同一套拼装入口（`ballot.BuildPublicInputs`），客户端与服务端算出同一份才验得过。
+
 **陷阱**：
 - CLI 输出是纯文本命令结果，**不做中文本地化**（与前端相反，是有意为之）。
 - **CLI 的 `postJSON` 返回 `*httpError`**（带 HTTP 状态码）：领取凭证时「槽位被别人
@@ -283,7 +288,12 @@
   `CREDENTIAL_POOL_EMPTY`（池领完了），那个**不重试**。
 - **URL 路径二次转义**：`main.go` 的 `cmdResultGet` 把已 `url.PathEscape` 过的 path 塞进 `base.Path`，`url.URL.String()` 会再转义一次（`%` → `%25`）。含空格 / `/` / `%` 的 proposal id 必然 404。实测：`result-get -proposal "a b/c"` → `/api/v1/proposals/a%2520b%252Fc/results`。
 - **CLI 不再发送 `selected_option`**（旧版本会多发这个字段，明文选项上过网）。`cmdVoteSubmit` 的 body 只有 `proposal_id` `encrypted_vote` `proof` `nullifier` `user_id` `user_pub_key` `credential_signature`。
-- **CLI 没有 `-public-witness` 入口**，服务端也不再收这个字段。CLI 只「带 proof 提交」，不本地生成 proof（路线图 G9 决策）。
+- **CLI 没有 `-public-witness` 入口**，服务端也不再收这个字段。CLI 现在自己生成本地证明
+  （`ballot-prove`），不再依赖外部塞进来的 proof。
+- **选票文件里多存了四项本地见证材料**：`nonce`（电路约束 `a = r·G` 要用）、`option_index`
+  （选项下标，私有见证）、`num_options`（公开输入之一）、`election_public_key`（未压缩的
+  计票公钥）。它们**只留在本地文件里**，`vote-submit` 不提交它们。`option_index` 用指针
+  存 —— 0 是合法下标，`omitempty` 会把它吞掉。
 - **`decrypt-setup` 不带 `-out` 时会把门限份额打印到 stdout**。
 - **`ballot-draft` 只在 debug 模式可用**：release 模式下服务端返回 404，CLI 拿不到草稿。
 
@@ -480,11 +490,12 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
 
 ## 5. 尚未完成的部分（不要写成生产能力）
 
-- **浏览器端 prover 没做。** 真实 Groth16 电路与真实验签在**服务端侧**已成立（`ballot/prover.go` + `cmd/keygen` + `GnarkProofVerifier`），但**没有任何客户端**在本地生成 proof：门户与 CLI 都拿不到可提交的证明。因此 **release 模式下门户仍无法完成投票**（非 debug 模式 `ballot-draft` 404，本地又没有 prover）。路线图 T14。
+- **浏览器端 prover 没做。** 真实 Groth16 电路与真实验签在**服务端侧**已成立（`ballot/prover.go` + `cmd/keygen` + `GnarkProofVerifier`），**CLI 侧也已能在本地出证明**（`cmd/cli` 的 `ballot-prove`，用本地 proving key；端到端证据见 `tests/e2e/client_prover_test.go`）。但**门户**没有本地 prover，因此 **release 模式下门户仍无法完成投票**（非 debug 模式 `ballot-draft` 404）。路线图 T14。
 - **明文选项的彻底消除还差门户接线（T16 完成一半）。** 客户端本地加密已落地（浏览器端
-  `lib/ballot-cipher.ts` + CLI `ballot-encrypt`），服务端只提供公开的计票公钥；但**门户
-  还没接上**（缺客户端 prover），debug 链路上的 `ballot-draft` → `EncryptVoteOption`
-  仍是服务端代加密 —— 这条路径是明确的妥协，不是生产能力。
+  `lib/ballot-cipher.ts` + CLI `ballot-encrypt`），服务端只提供公开的计票公钥；CLI 还能
+  本地出证明，因此**命令行这条路已经能投出真票**。但**门户还没接上**（缺浏览器端
+  prover），debug 链路上的 `ballot-draft` → `EncryptVoteOption` 仍是服务端代加密 ——
+  这条路径是明确的妥协，不是生产能力。
 - **门户的 nullifier 还是随机域元素。** 浏览器端已能算出与电路一致的 nullifier
   （`lib/nullifier.ts` 的 `deriveNullifier`），但门户仍在用 `generateNullifier`；
   接线 prover 时要一起改，并把 nullifier 秘密留在本地。

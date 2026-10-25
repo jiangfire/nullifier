@@ -20,7 +20,7 @@
 - 静态检查：`go vet ./...` 与 `gofmt -l ./cmd ./internal ./tests`（应无输出）
 - 覆盖率门槛：`./scripts/check-coverage.ps1`（PowerShell）/ `bash ./scripts/check-coverage.sh`（Bash）。**按包分档**：每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`，逐包判定；脚本的第一个参数是「表里没有的包」的兜底阈值，默认 80%
 - 前端：`pnpm --dir web run dev`（rsbuild，默认 :3000）、`run build`、`run test`（vitest）、`exec tsc --noEmit`
-- CLI 工作流：`go run ./cmd/cli help` 查看全部 16 个命令
+- CLI 工作流：`go run ./cmd/cli help` 查看全部 17 个命令
 
 ## Project layout
 
@@ -48,7 +48,7 @@
 - 后端用 Go 原生测试 + `testify`；集成测试集中在 `tests/integration`，HTTP 与持久化测试贴近实现文件
 - 前端用 vitest，测试文件与源码同目录（如 `web/src/lib/datetime.test.ts`）；`.vue` 面板走**服务端渲染测试**（`web/src/components/panels/panels.test.ts`），`.vue` 能在 vitest 里跑是因为 `web/vitest.config.ts` 里自写了 SFC 编译插件（`vue/compiler-sfc` + `typescript`，不新增依赖）
 - 改动涉及接口、密码学或持久化逻辑时**必须补回归测试**；合入前至少 `go test ./...` 且覆盖率脚本通过
-- 覆盖率有两个口径，别混用：**门槛口径 80.4%**（`check-coverage.sh` 选中的 11 个包：usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server），**全仓口径 74.1%**（2026-10-21 实测）。门槛是**逐包分档**的（门槛值见 `scripts/coverage-thresholds.txt`），单个包回退会直接让 CI 变红；`internal/infrastructure/persistence`（63.3%）是当前最低的一档，抬门槛时它会先卡住
+- 覆盖率有两个口径，别混用：**门槛口径 80.4%**（`check-coverage.sh` 选中的 11 个包：usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server），**全仓口径 74.2%**（2026-10-21 实测）。门槛是**逐包分档**的（门槛值见 `scripts/coverage-thresholds.txt`），单个包回退会直接让 CI 变红；`internal/infrastructure/persistence`（63.3%）是当前最低的一档，抬门槛时它会先卡住
 - CI 实际执行：`go test ./...` + `bash ./scripts/check-coverage.sh 80 coverage.ci.out`，**另加** gofmt 检查、前端 lint / tsc / vitest（`.github/workflows/ci.yml`）
 
 ## PR & commit conventions
@@ -62,6 +62,7 @@
 
 - 绝不提交真实密钥、令牌或生产数据库；`.env` 已在 `.gitignore`
 - 生产模式（`server.mode=release/prod/production`）必须显式设置 `crypto.vk_path`（或 `CRYPTO_VK_PATH`），否则服务启动失败
+- **proving key 只在客户端**：服务端只拿 verifying key（`crypto.vk_path`）；CLI 用 `ballot-prove -proving-key` 在本地出证明，proof 不经过服务端。`cmd/keygen` 生成的 `proving.key`（0600）**不入库**
 - 管理面接口（凭证签发、创建提案、凭证状态、解密 setup、发布结果）需 `Authorization: Bearer <admin token>`；未配置时服务启动会生成仅当前进程有效的临时 token 并打印日志
 - 凭证签发走**真两段式盲签名**：`credentials/claim` 只预留（**不收公钥**）→ `credentials/blind-sign` 对盲化消息签名 → `credentials/attest` 验签后落库；公开的 blind-sign 只覆盖池里还空着的槽位
 - 票据表只存匿名投票数据；`vote_participations` 仅存 `hash(user_id)`，用于「知道你是否投过票」但不关联票内容
