@@ -12,7 +12,7 @@
 //  1. 名单与 Merkle 承诺（merkle.go）：离线工具把成员名单变成一棵 Merkle 树，
 //     服务端只拿到树根 root，成员各自拿到「秘密 + 叶子 + 路径」。
 //  2. 资格电路（circuit.go）：证明「我持有某个秘密，它的叶子在这棵树的根下」。
-//  3. 公开输入（statement.go）：root、提案、挑战、去重键 —— 四个定长元素。
+//  3. 公开输入（statement.go）：root、提案、挑战、去重键、会话绑定 —— 五个定长元素。
 //  4. 证明器（prover.go）：Groth16 的 prover / verifier 与密钥生成。
 //
 // **去重键**是 `QualificationID = MiMC(Leaf, ProposalID)`：同一成员在同一提案里

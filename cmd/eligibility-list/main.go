@@ -107,7 +107,9 @@ func readMembers(path string) ([]string, error) {
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read members file: %w", err)
 	}
-	// 排序让名单是**确定的**：同一份名单两次生成的树根必须一致。
+	// 排序让成员的位置是**确定的**：同一份名单每次生成时成员的叶子位置一致。
+	// 但资格秘密每次运行都会重新随机生成，所以**两次运行的树根不一样** ——
+	// 名单与成员包必须成套保存，不能只留 root。
 	sort.Strings(members)
 	return members, nil
 }
