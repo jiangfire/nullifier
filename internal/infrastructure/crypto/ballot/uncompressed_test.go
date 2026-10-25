@@ -33,6 +33,29 @@ func TestUncompressPoint(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestCompressPoint 覆盖未压缩 → 压缩的转换：客户端用它与服务端拼出同一份
+// 公开输入。
+func TestCompressPoint(t *testing.T) {
+	keys, err := GenerateKeyPair()
+	require.NoError(t, err)
+	uncompressed, err := UncompressPoint(keys.Public)
+	require.NoError(t, err)
+
+	compressed, err := CompressPoint(uncompressed)
+	require.NoError(t, err)
+	require.Len(t, compressed, PointSize)
+	// 往返必须回到同一个字节：客户端与服务端的公开输入要逐字节一致。
+	require.Equal(t, keys.Public, compressed)
+
+	// 长度不对、点不合法都要被拒。
+	_, err = CompressPoint(uncompressed[:2*PointSize-1])
+	require.Error(t, err)
+	broken := append([]byte(nil), uncompressed...)
+	broken[0] ^= 0x01
+	_, err = CompressPoint(broken)
+	require.Error(t, err)
+}
+
 // TestEncryptBallotWithUncompressedKey 覆盖客户端加密入口。
 func TestEncryptBallotWithUncompressedKey(t *testing.T) {
 	keys, err := GenerateKeyPair()

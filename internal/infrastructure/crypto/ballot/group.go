@@ -108,6 +108,19 @@ func UncompressPoint(publicKey []byte) ([]byte, error) {
 	return out, nil
 }
 
+// CompressPoint 把未压缩的曲线点（X 与 Y 各 32 字节大端）转成压缩形式。
+//
+// 它是 UncompressPoint 的逆操作。客户端拿到的计票公钥是未压缩形式（不必在
+// 标量域里求平方根），但服务端拼公开输入时用的是压缩形式 —— 客户端要生成
+// 能被服务端验过的证明，就得先转回压缩形式，两边才会算出同一份公开输入。
+func CompressPoint(uncompressed []byte) ([]byte, error) {
+	point, err := parseUncompressedPoint(uncompressed)
+	if err != nil {
+		return nil, err
+	}
+	return point.marshal(), nil
+}
+
 // parseUncompressedPoint 解析未压缩的曲线点（X 与 Y 各 32 字节大端）。
 //
 // 与压缩形式的区别：这里不需要在域内求平方根，客户端因此不必实现点解压。
