@@ -24,7 +24,7 @@ endif
 .DEFAULT_GOAL := help
 
 .PHONY: help \
-	deps tidy build run cli \
+	deps tidy build run cli loadtest \
 	test test-short cover \
 	vet fmt fmt-check \
 	web-install web-dev web-build web-test web-lint web-typecheck web-format web-format-check \
@@ -54,6 +54,9 @@ run: ## Start the HTTP server (SQLite file anonvote.db)
 
 cli: ## Run the CLI (make cli ARGS="help")
 	$(GO) run ./cmd/cli $(ARGS)
+
+loadtest: ## Run the concurrent voting load test (make loadtest ARGS="-votes 200")
+	$(GO) run ./cmd/loadtest $(ARGS)
 
 # ---------- 测试 ----------
 
