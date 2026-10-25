@@ -114,10 +114,13 @@
 | GET | `/api/v1/proposals/open` | 无 |
 | POST | `/api/v1/proposals/:id/vote-status` | 无（需凭证材料） |
 | POST | `/api/v1/proposals/:id/ballot-draft` | 无（**仅 debug 模式**，否则 404） |
-| POST | `/api/v1/proposals/:id/credentials/claim` | 无（匿名领取凭证） |
+| POST | `/api/v1/proposals/:id/credentials/claim` | 无（匿名领取凭证，**只预留**） |
+| POST | `/api/v1/proposals/:id/credentials/blind-sign` | 无（**只签池里还空着的槽位**） |
+| POST | `/api/v1/proposals/:id/credentials/attest` | 无（先验签再落库） |
 | GET | `/api/v1/proposals/:id/results` | 无 |
 | GET | `/api/v1/proposals/:id/audit-anchors` | 无 |
-| POST | `/api/v1/credentials` | **admin** |
+| POST | `/api/v1/credentials` | **admin**（为指定 `user_id` 预留） |
+| POST | `/api/v1/credentials/blind-sign` | **admin**（可为**任意** `user_id` 盲签） |
 | POST | `/api/v1/proposals` | **admin** |
 | GET | `/api/v1/proposals/:id/credentials` | **admin** |
 | POST | `/api/v1/proposals/:id/credentials/pool` | **admin**（备凭证池） |

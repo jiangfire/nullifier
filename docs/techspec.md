@@ -650,6 +650,10 @@ web/                        # Vue 3 前端门户
   - **两段式盲签名的端到端测试**：`tests/e2e/blind_signature_test.go` —— 验收 ①
     （服务端在签名阶段只见盲化消息）与验收 ②（交叉攻击失败），外加「公开盲签名端点
     必须绑定池槽位」与「槽位被抢时客户端换槽位重来」
+  - **凭证端点的请求校验分支测试**：`internal/infrastructure/http/credential_endpoints_test.go`
+    —— 公开端与管理端的盲签名、attest、备池、预留端点在「缺字段 / 非法 base64 /
+    请求体不是 JSON」时一律 4xx（**不能 5xx**），管理端缺 admin token 是 401，
+    且管理端可以为**池外**的 `user_id` 盲签（与公开端必须绑定池槽位的区别）
   - `cmd/keygen` 单元测试
   - `tests/integration` 集成测试
   - `tests/e2e` 端到端流程测试（含「客户端本地加密 → 落库只有密文 → 计票还原」，
