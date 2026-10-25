@@ -1,5 +1,6 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import { apiCall } from '../lib/api';
+import { apiPaths, type VoteSubmitRequest } from '../lib/api-contract';
 import {
   hasBallotTargetDrifted,
   isBallotTargetCurrent,
@@ -1133,7 +1134,7 @@ export function useVotePortal() {
 
     const reserve = await apiCall({
       baseUrl: apiBaseUrl.value,
-      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/claim`,
+      path: apiPaths.credentialClaim(proposalId),
       method: 'POST',
       body: claimBody,
     });
@@ -1146,7 +1147,7 @@ export function useVotePortal() {
     }
     const reservation = toObject(reserve.data);
     return completeCredentialBlindSignature(proposalId, userPubKey, reservation, {
-      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/blind-sign`,
+      path: apiPaths.credentialBlindSign(proposalId),
       buildBody: (issuerKeyVersion, blindedMessage) => ({
         user_id: textOf(reservation, 'user_id'),
         blinded_message: blindedMessage,
@@ -1172,7 +1173,7 @@ export function useVotePortal() {
 
     const challengeResult = await apiCall({
       baseUrl: apiBaseUrl.value,
-      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/eligibility-challenge`,
+      path: apiPaths.eligibilityChallenge(proposalId),
       method: 'POST',
       body: {},
     });
@@ -1358,7 +1359,7 @@ export function useVotePortal() {
 
     const attestResult = await apiCall({
       baseUrl: apiBaseUrl.value,
-      path: `/api/v1/proposals/${encodeURIComponent(proposalId)}/credentials/attest`,
+      path: apiPaths.credentialAttest(proposalId),
       method: 'POST',
       body: {
         user_id: userId,
@@ -1513,7 +1514,7 @@ export function useVotePortal() {
       return false;
     }
 
-    const body: JsonMap = {
+    const body: VoteSubmitRequest = {
       encrypted_vote: voteForm.encryptedVote.trim(),
       proof: voteForm.proof.trim(),
       nullifier: voteForm.nullifier.trim(),
@@ -1528,7 +1529,7 @@ export function useVotePortal() {
     voteLoading.value = true;
     const result = await apiCall({
       baseUrl: apiBaseUrl.value,
-      path: `/api/v1/proposals/${encodeURIComponent(voteForm.proposalId.trim())}/votes`,
+      path: apiPaths.voteSubmit(voteForm.proposalId.trim()),
       method: 'POST',
       body,
     });
