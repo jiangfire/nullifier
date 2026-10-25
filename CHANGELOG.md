@@ -15,6 +15,12 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 
 ### 破坏性变更
 
+- **`POST /api/v1/proposals/:proposal_id/ballot-draft` 端点已删除**（连带 CLI 的 `ballot-draft`
+  命令与门户的「按选项生成凭据」入口）。它让**服务端拿明文选项去加密选票** —— 能力 A
+  （选票内容对服务端不可知）的底线唯一的例外。服务端现在**没有任何**接收明文选项的入口，
+  与 `server.mode` 无关；这条不变量由 `tests/architecture/` 持续守卫（**不设豁免机制**）。
+  自建客户端如果用过这个端点，改用 `ballot-encrypt`（CLI）或门户的
+  「在浏览器本地生成选票」。
 - **选票密文格式从 v2 升到 v3，与 v0.1.0 的密文完全不兼容。** v3 = 1 字节版本 `0x03` + 两个
   32 字节压缩点（BN254 twisted Edwards），共 65 字节，加密的是**选项下标**。原因：零知识电路的
   算术发生在 BN254 标量域里，v0.1.0 用的 ed25519 + HKDF 群运算**无法在电路中复算** —— 不换栈
@@ -79,7 +85,8 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
     `wasm_exec.js` 与 `ballot-prover.wasm`，主线程 `web/src/lib/wasm-prover.ts` 只做
     编排；`useVotePortal.ts` 新增 `generateBallotLocally`：取计票公钥 → 调 prover →
     把密文 / 证明 / nullifier 写进表单 → 走原有的提交路径。投票面板新增
-    「在浏览器本地生成选票」按钮（debug 模式下的服务端代生成入口保留为次要按钮）。
+    「在浏览器本地生成选票」按钮（debug 模式下的服务端代生成入口保留为次要按钮 —— **后续
+    已整个删除**，见上方「破坏性变更」）。
   - **密码学全在 Go 侧**：加密、nullifier 派生、公开输入拼装（`ballot.BuildPublicInputs`）
     与出证明都在新增的 `ballot.ProveBallot` 里一次做完 —— 客户端与服务端因此拼出
     **逐字段相同**的公开输入，证明才验得过。nonce 与 nullifier 秘密只在这一次调用里
@@ -183,7 +190,9 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   防重投会失效。现在查重与落库都用规范形式。
 - **`ballot-draft` 在非 debug 模式返回 404**（不是 403，避免暴露端点存在性）。该端点让服务端
   按明文选项加密，生产环境不该可达。debug 模式由 `server.mode`（`debug`/`dev`/`development`）推导。
+  —— **后续已整个删除**（见上方「破坏性变更」）。
 - **门户「按选项生成凭据」按钮在非 debug 模式隐藏**，改为一句说明为什么没有这个入口。
+  —— **后续已整个删除**（见上方「破坏性变更」）。
 
 ### 变更
 
@@ -253,18 +262,19 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
   `database table is locked`，「恰好一张票入库」的断言偶发失败。改用文件库 + WAL
   （与 `concurrent_nullifier_test.go` 同一套 DSN）后连跑 5 次稳定通过。
 - **「服务端不得拿到明文选项」从人工 grep 变成持续门禁**（新包 `tests/architecture/`，
-  `plaintext_option_test.go`）：用 go/ast 扫 `internal/`，四条断言 —— HTTP 层请求体结构体不得有
-  明文选项 json tag；usecase 层不得出现第二个「接受明文选项」的入口；debug 链函数的调用点必须在
-  允许文件里；**每一条豁免在 release 模式必须真的 404**（豁免表因此自证：加一条豁免就得同时
-  证明它在生产里是死的）。当前唯一豁免是 debug 模式 `ballot-draft` 的请求体字段 —— 无论最终
-  删掉还是保留这条联调路径，决定都只落在改豁免表上。
+  `plaintext_option_test.go`）：用 go/ast 扫 `internal/` —— HTTP 层请求体结构体不得有明文选项
+  json tag；usecase 层不得有接受明文选项的入口；**服务端代加密那条链的符号不许复活**
+  （`PrepareBallotDraft` / `EncryptVoteOption` / `BallotDraft` / `proposalOptionIndex`）；
+  **ballot-draft 端点不许复活**（POST 它任何模式都 404）。
+- **那条唯一豁免也删掉了**：服务端代加密的端点与代码链（`ballot-draft` → `EncryptVoteOption`）
+  整体删除，CLI 的 `ballot-draft` 命令与门户的「按选项生成凭据」入口一并移除。**守卫测试
+  不设豁免机制** —— 能力 A 的底线没有例外。
 
 > **本轮还没有做到的事**（别把 v0.2.0 当成已完成的版本）：**一人一票还没有强制手段**
-> （T22 未开工 —— 凭证匿名随机领取，同一个人可以领两张票投两次）；明文选项对服务端不可知这条
-> **已机器化守护**（`tests/architecture/` 持续门禁），但 **debug 模式的 `ballot-draft`**
-> （服务端代加密）这条联调路径仍在，release 模式 404 —— 删还是留待拍板；
+> （T22 未开工 —— 凭证匿名随机领取，同一个人可以领两张票投两次）；
 > 门户面板仍**没有浏览器自动化回归**（仓库无 Playwright，交互靠人工核对）；
-> PostgreSQL 集成测试在本机（无 Docker）仍未实跑。凭证签发的两段式盲签名**已闭合**。
+> PostgreSQL 集成测试在本机（无 Docker）仍未实跑。凭证签发的两段式盲签名**已闭合**，
+> 明文选项对服务端不可知这条**已彻底闭合**（无残留、无豁免）。
 > 详见 [`docs/roadmap.md`](./docs/roadmap.md) §4.1 的能力状态表。
 
 ---

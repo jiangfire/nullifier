@@ -114,7 +114,6 @@
 | GET | `/api/v1/proposals` | 无 |
 | GET | `/api/v1/proposals/open` | 无 |
 | POST | `/api/v1/proposals/:id/vote-status` | 无（需凭证材料） |
-| POST | `/api/v1/proposals/:id/ballot-draft` | 无（**仅 debug 模式**，否则 404） |
 | POST | `/api/v1/proposals/:id/credentials/claim` | 无（匿名领取凭证，**只预留**） |
 | POST | `/api/v1/proposals/:id/credentials/blind-sign` | 无（**只签池里还空着的槽位**） |
 | POST | `/api/v1/proposals/:id/credentials/attest` | 无（先验签再落库） |
@@ -132,8 +131,8 @@
 
 **本轮的接口变更**：
 - `submitVotePayload` **没有 `public_witness` 字段** —— 旧的「客户端自由提交公开输入」入口彻底消失，公开输入由服务端拼装。
-- `PrepareBallotDraft`：`h.debugMode` 为 false 时直接 `c.Status(http.StatusNotFound)` —— 用 **404 而不是 403**，避免把端点存在性暴露出去。响应体只有 `proposal_id` `option` `encrypted_vote` `proof`（开发占位常量 `developmentProofBase64`）`nullifier`。
-- `NewHandlerWithTallyAndMode(..., debugMode bool, ...)` 是 handler 的装配入口；`debugMode` 由 `config.Config.DebugMode` 传进来。
+- **`POST /proposals/:id/ballot-draft` 已删除**（服务端代加密的联调端点）—— 服务端不再有任何接收明文选项的入口，守卫测试 `tests/architecture/` 盯着这条底线。
+- `NewHandlerWithTally(..., logger)` 是 handler 的装配入口；handler **不感知运行模式** —— debug 模式只影响 `GET /healthz` 报出的 `debug` 字段。
 
 **陷阱**：
 - `middleware/admin_auth.go` 用 `!=` 做字符串比较，**不是常数时间比较**。
@@ -231,8 +230,7 @@
   模板、setup、computed 都会真的跑一遍。助手在 `src/lib/render-panel.ts`。
 - **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载。抓的是
   「模板引用了不存在的变量」「setup 抛错」「条件分支写反」这一类问题。
-- 覆盖了路线图 T2 的门控：非 debug 模式下「按选项生成凭据」按钮**不渲染**
-  （断言的是按钮本身，不是文案里出现的那个词）。
+- 覆盖了「服务端不得拿到明文选项」这条底线：面板**不渲染**任何「让服务端代生成凭据」的入口。
 
 **`.vue` 编译插件**（`vitest.config.ts` 内联）：
 
@@ -249,9 +247,8 @@
 
 **模式**：设计令牌在 `styles/tokens.css`，组件只引用变量不写裸色值；视图推导（工作区归属/标题/引导步进）集中在 `lib/portal-view.ts`。
 
-**本轮的 debug 门控**：
-- `useVotePortal.ts` 的 `readDebugFlag` 从 `GET /healthz` 的响应里读 `debug` 字段 → `debugMode` ref。
-- `VotePanel.vue` 的「按选项生成凭据」按钮整块包在 `v-if="portal.debugMode"` 里；非 debug 模式改为提示文案（说明这条入口会让服务端看到选项）。
+**本轮的口径收口**：
+- 「按选项生成凭据」的入口**已从门户删掉**（它把明文选项发给服务端）；出票只有浏览器本地 prover 这一条路。门户也不再读 `/healthz` 的 `debug` 字段。
 - 门户**不再发送** `selected_option`，也**不再发送** `public_witness`（服务端本来就不消费前者）。
 - `web/src/lib/nullifier.ts` —— 两类 nullifier：**`generateNullifier`（随机域元素，门户现在还在用）**与 **`deriveNullifier`（MiMC 绑定，与电路一致）**。前者生成 32 字节随机数后**按模 r 归约**，输出 64 位小写十六进制，保证是规范域元素编码；⚠️ 它**没有**做 MiMC 绑定，因此这样的 nullifier 按电路约束出不了证明。后者按 `MiMC(秘密, 提案域元素)` 派生，与 Go 侧 `ballot/nullifier.go` 逐位一致（见 §3 陷阱 23）。
 - `web/src/lib/ballot-cipher.ts` —— **浏览器端选票加密**：BN254 twisted Edwards 上的指数 ElGamal（加密选项下标），点编码与 Go 侧逐字节一致（见 §3 陷阱 21）。计票公钥以**未压缩**形式传入，因此浏览器端不需要在域内求平方根。
@@ -263,20 +260,18 @@
 - `lib/api.ts` 是唯一的 HTTP 出口，返回 `{ok, status, data, error, code, rawText}`；错误文案统一走 `lib/error-messages.ts` 的 `describeApiError(message, code, fallback)`，优先级 **业务短语 > 错误码 > 调用方兜底**。
 - **凭据与选项的绑定已经补上**：`lib/ballot.ts` 的 `hasBallotTargetDrifted` / `isBallotTargetCurrent` + `useVotePortal.ts` 里选项/提案变化的 watcher（清空 `encryptedVote` / `proof`）+ 提交前的 `ballotTargetCurrent` 校验。改了选项必须重新生成凭据。
 - **admin token 存 `sessionStorage`**（不落 `localStorage`），但仍是明文；同源脚本能读到。
-- **`ballot-draft` 在非 debug 模式返回 404**：门户此时只能走浏览器端 prover 这条路
-  （`generateBallotLocally`）。三个静态资源（`wasm_exec.js` / `ballot-prover.wasm` /
-  `proving.key`）没备齐时，门户会报「下载 WASM 模块失败」—— 部署时要先跑
-  `make web-wasm` 与 `make web-proving-key PK=<路径>`。
+- **门户的出票只有「在浏览器本地生成」这一条路**（`generateBallotLocally`）。三个静态资源
+  （`wasm_exec.js` / `ballot-prover.wasm` / `proving.key`）没备齐时，门户会报
+  「下载 WASM 模块失败」—— 部署时要先跑 `make web-wasm` 与 `make web-proving-key PK=<路径>`。
 - **门户的匿名性文案与服务端能力已对齐**：出票入口的说明写的是「在浏览器本地生成」，
-  服务端确实拿不到明文选项；残留的 debug 模式 `ballot-draft` 已在文案里说明它是
-  开发联调入口。
+  服务端确实拿不到明文选项（`ballot-draft` 已删除，见 §3 陷阱 9）。
 - `.vue` 面板**有渲染测试，但不是浏览器渲染**（见 §1.7 的「面板渲染测试」）。没有 CSS、没有事件绑定、没有客户端挂载 —— 改界面的视觉与交互仍要靠人工核对。
 - `pnpm run format`（prettier）会重写 `.pnpm-store`，必须先确认 `.prettierignore` 覆盖（当前已覆盖 `.pnpm-store/`）。
 
 ### 1.8 CLI —— `cmd/cli/main.go`
 
-17 个命令，全部走 HTTP API（`ballot-prove` 除外 —— 它纯本地，不发请求）：
-`health` `version` `proposals-open` `proposal-create` `credential-issue` `credential-claim` `credential-show` `ballot-draft` `ballot-encrypt` `ballot-prove` `vote-submit` `vote-status` `credentials-list` `decrypt-setup` `result-publish` `result-get` `anchors-list`
+16 个命令，全部走 HTTP API（`ballot-prove` 除外 —— 它纯本地，不发请求）：
+`health` `version` `proposals-open` `proposal-create` `credential-issue` `credential-claim` `credential-show` `ballot-encrypt` `ballot-prove` `vote-submit` `vote-status` `credentials-list` `decrypt-setup` `result-publish` `result-get` `anchors-list`
 
 **模式**：`-admin-token` flag 或 `NULLIFIER_ADMIN_TOKEN` 环境变量；`-base-url` 或 `NULLIFIER_BASE_URL`。
 
@@ -307,7 +302,7 @@
 - **`decrypt-setup -out` 落盘的是会话对象**（`{"proposal_id","public_key","shares":[...]}`），
   `result-publish -shares-file` 直接吃这个文件（也接受 JSON 数组、纯文本行）。形状对不上时
   服务端会把整份 JSON 当一个份额，回 400 `share does not belong to session`。
-- **`ballot-draft` 只在 debug 模式可用**：release 模式下服务端返回 404，CLI 拿不到草稿。
+- **`ballot-draft` 命令已删除**：CLI 没有「让服务端代加密」的入口，出票只有 `ballot-encrypt` + `ballot-prove` 这条本地路。
 
 ### 1.9 压测工具 —— `cmd/loadtest/main.go`
 
@@ -439,7 +434,7 @@ publish        → 提案必须已关闭（isProposalClosed）
 6. **加密的是选项下标，不是选项文本。** 下标是电路里可做范围检查的小整数（上限 `ballot.MaxOptions` = 256），选项文本可能很长且不唯一。解密方 `DecryptBallotOption` 拿 `numOptions` 在选项集合里逐个比对。
 7. **曲线点的子群检查不能省。** BN254 twisted Edwards 的余因子是 8，小阶点会让解密方泄漏私钥低位比特。`ballot/group.go` 的 `parsePoint` 对每个外部点都做 `isInSubGroup`（用子群阶乘点看是否回到单位元）。
 8. **`internal/di/wire_gen.go` 是手工同步的。** wire 生成器在本仓库离线不可用（`go.sum` 里 `github.com/google/subcommands` 只有 `/go.mod` 哈希，缺模块内容哈希）。改 `internal/di/wire.go` 必须手工同步 `wire_gen.go`。
-9. **`ballot-draft` 是明确的妥协，且只在 debug 模式可达。** 它由**服务端拿明文选项去加密**（`usecase/tally.go` 的 `EncryptVoteOption` → `proposalOptionIndex`），所以这条链路上服务端知道每一票的明文选项。非 debug 模式按 404 处理（`handler.go` 的 `PrepareBallotDraft`），用 404 而不是 403，避免暴露端点存在性。它**不是生产能力**，客户端 prover 落地后要被删掉。
+9. **服务端曾经有一条「代用户选票」的妥协路径，现在没有了。** 它是 `ballot-draft`（服务端拿明文选项去加密）—— 已连同 `usecase/tally.go` 的 `EncryptVoteOption` / `PrepareBallotDraft` / `proposalOptionIndex` 一起删除。**没有例外、没有豁免机制**：`tests/architecture/` 盯着「请求体不得有明文选项字段」「usecase 不得有接受明文选项的入口」「这条链不许复活」「ballot-draft 端点不许复活」。真要恢复它，先想清楚是不是该改的是客户端。
 10. **只比对签名是不够的。** 拿一张合法凭证换个 `user_id` 重放，逐字节比对签名会通过。`usecase/voting.go` 因此在落库前调 `issuer.VerifyCredential`，失败 → 401。
 11. **两段式盲签名的服务端只做两件事。** `kryptology_credential_issuer.go` 没有 `Issue` 了：签发方只给公钥（`IssuerPublicKey`）与对**盲化消息**签名（`BlindSign`）。**服务端在 attest 之前绝不能拿到 `user_pub_key`** —— 它一旦知道公钥就能算出凭证消息原文，盲化当场失效（它手上有私钥，根本不需要解盲）。因此 `credentials/claim` 的请求体是空的，旧版本收 `user_pub_key` 的字段一律忽略。
 12. **公开的盲签名端点必须绑定池槽位。** `credentials/blind-sign` 只为该提案里**还空着的** `user_id` 签名，否则签发方就是「任意消息」的签名预言机。管理端可以覆盖任意 `user_id`，走的是另一个路径 `/api/v1/credentials/blind-sign`（gin 的路由树不允许同一路径挂两套中间件）。
@@ -462,7 +457,7 @@ publish        → 提案必须已关闭（isProposalClosed）
 26. **盲签名变体名要用线路名，不是 Go 的枚举名。** 服务端在 `issuer_key` 响应里回的 `variant` 是 CIRCL 的线路名 `RSABSSA-SHA384-PSS-Deterministic`；Go 侧的枚举标识符是 `SHA384PSSDeterministic`，两者**不是同一个字符串**。门户把后者写进 `supportedBlindSignatureVariant` 时，领取流程会停在第 ① 步之后（服务端只看到 claim，blind-sign 从未发出），界面上表现为「领取失败：签发方公钥不可用」—— 匿名领取与管理端签发两条路都断。**这类跨语言字符串不会自己暴露**：单测里两边都拿同一个常量自证，只有真浏览器 / 真服务端对跑才会露馅。防线：Go 侧 `TestKAT_BlindRsaVariantName` + TS 侧 `credential.test.ts` 的「变体名与服务端线路上的名字一致」。
 27. **`web/public/` 放的是构建产物，不是源码。** `wasm_exec.js`（来自 GOROOT）、`ballot-prover.wasm`（`make web-wasm` 生成）、`proving.key`（`make web-proving-key` 拷入）三个文件都不入库，eslint 也整目录忽略（否则 `make check` 会被 Go 官方胶水里的 lint 报错卡住）。构建顺序固定是 `web-wasm` → `web-proving-key` → `web-build`。
 28. **并发写要测试请用文件库 + WAL，不要用共享缓存的内存库。** SQLite 的共享缓存（`cache=shared`）用**表级锁**，`busy_timeout` 对它无效，并发写直接抛 `database table is locked` —— 表现为「两个并发请求双双失败」，而不是「恰好一个成功」。正确姿势：文件库 + `?_busy_timeout=10000&_journal_mode=WAL&_txlock=immediate`（见 `tests/e2e/concurrent_nullifier_test.go`），并记得 `t.Cleanup` 关掉句柄 —— 否则 Windows 上临时目录清不掉。
-29. **「服务端不得拿到明文选项」由守卫测试把守，改请求体时先看它。** `tests/architecture/plaintext_option_test.go` 用 go/ast 扫 `internal/`，四条断言：HTTP 层请求体结构体不得有明文选项 json tag（`option` / `selected_option` / `option_index` / `choice` / `selected_choice` / `vote_option` / `ballot_option`，刻意**不含**复数 `options` —— 那是提案的候选项列表）；usecase 层不得出现第二个接受明文选项（形参名 `option` / `candidate`）的入口；debug 链函数（`PrepareBallotDraft` / `EncryptVoteOption`）的调用点必须在允许文件里；**每一条豁免在 release 模式必须真的 404**（豁免表因此自证 —— 加豁免就得同时证明它在生产里是死的）。当前唯一豁免是 `handler.go` 的 `prepareBallotDraftPayload.Option`（debug 模式联调端点）。**要豁免就改表并写清理由**，别把表改空来骗自己。扫描**只覆盖 `internal/`**：`cmd/` 里的明文选项字段是客户端在说话，不是服务端在收。
+29. **「服务端不得拿到明文选项」由守卫测试把守，改请求体时先看它。** `tests/architecture/plaintext_option_test.go` 用 go/ast 扫 `internal/`，四条断言：HTTP 层请求体结构体不得有明文选项 json tag（`option` / `selected_option` / `option_index` / `choice` / `selected_choice` / `vote_option` / `ballot_option`，刻意**不含**复数 `options` —— 那是提案的候选项列表）；usecase 层不得出现接受明文选项（形参名 `option` / `candidate`）的入口；**服务端代加密那条链的符号不许复活**（`PrepareBallotDraft` / `EncryptVoteOption` / `BallotDraft` / `proposalOptionIndex` / `proposalAllowsOption`）；**ballot-draft 端点不许复活**（POST 它必须 404）。**不设豁免机制** —— 加豁免就得改这个测试文件，让它在 diff 里显眼。扫描**只覆盖 `internal/`**：`cmd/` 里的明文选项字段是客户端在说话，不是服务端在收。
 
 ---
 
@@ -553,7 +548,7 @@ make ci         # go test ./... + 覆盖率门槛
 
 Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 里用 `mingw32-make` 跑；`bash` 命令在 Windows 上默认可能指向未安装的 WSL。
 
-手工验证 debug 门控：`GET /healthz` 看 `debug` 字段；`server.mode` 是 `debug` / `dev` / `development` 时 `POST /api/v1/proposals/:id/ballot-draft` 可达，其余模式返回 404。
+手工确认服务端没有明文选项入口：`go test ./tests/architecture/`（守卫测试）—— `POST /api/v1/proposals/:id/ballot-draft` 任何模式都返回 404（路由未注册）。`GET /healthz` 的 `debug` 字段只报运行状态，不再对应任何能力差异。
 
 ---
 
@@ -569,10 +564,9 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
   「WASM 路径在真实浏览器里可用」，不是「门户有端到端 UI 回归」。
 - **「一人一票」还缺资格证明（T22）。** 凭证是匿名随机领取的，服务端无法强制一人一票；
   补回这一条要靠零知识资格证明，依赖已落地的证明链能力。
-- **明文选项的彻底消除：debug 链路上仍有妥协。** 客户端本地加密与本地出证明都已落地
-  （CLI 与门户两侧），服务端只提供公开的计票公钥。残留的是 **debug 模式的
-  `ballot-draft` → `EncryptVoteOption`**（服务端代加密）—— 这是明确的开发联调妥协，
-  不是生产能力；release 模式下它是 404。
+- **明文选项的彻底消除：已达成。** 客户端本地加密与本地出证明都已落地（CLI 与门户两侧），
+  服务端只提供公开的计票公钥；服务端代加密的 `ballot-draft` 已删除，**服务端没有任何
+  接收明文选项的入口**，由 `tests/architecture/` 持续守卫。
 - **门户表单里的 nullifier 字段仍可手工编辑**（低频工具）。正式出票走 prover 那条路，
   nullifier 由 `ballot.ProveBallot` 在本地派生（随机秘密 + MiMC），秘密不出本地。
 - **盲签名的两段式协议已落地（T17 完成）**：客户端本地盲化，服务端在签名阶段只见盲化
@@ -580,7 +574,6 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
   与 `user_pub_key`（验签必须重算凭证消息）—— 这是「签发方不知道被签内容」，不是
   「服务端全程不知道客户端是谁」。
 - **一人一票没有强制手段**（T22）：凭证匿名随机领取，同一个人可以领两张票投两次。
-- **`ballot-draft` 返回的 proof 是开发占位常量**（`developmentProofBase64`），不是真证明；release 模式下即使端点可达也会被验签拒。
 - **门户与 CLI 的匿名性文案与实现仍有落差**（见 §1.7 陷阱）。
 - **容量数字只有 SQLite 一份，且不是规划。** `cmd/loadtest` 能跑出可复现的吞吐与防重投结论，
   但 SQLite 的单写者模型会把并发写串行化，数字反映的是存储层；客户端 prover 还没做，

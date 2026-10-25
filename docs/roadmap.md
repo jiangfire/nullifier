@@ -239,8 +239,8 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | T13 | 真实选票电路 + `cmd/keygen` 密钥生成流程 | ✅ 已落地 |
 | T15 | proof 与 `proposal_id` / `nullifier` / 密文绑定 | ✅ 已落地 |
 | T18 | 投票路径落库前 `VerifyCredential` | ✅ 已落地 |
-| T1 | `ballot-draft` 在非 debug 模式 404 | ✅ 已落地 |
-| T2 | 门户「按选项生成凭据」按钮非 debug 隐藏 | ✅ 已落地 |
+| T1 | `ballot-draft` 在非 debug 模式 404 | ✅ 已落地 → **后续升级为「端点整个删除」**（2026-10-25） |
+| T2 | 门户「按选项生成凭据」按钮非 debug 隐藏 | ✅ 已落地 → **后续升级为「按钮整个删除」**（2026-10-25） |
 | T16 | 加密移到客户端 | ✅ **已落地**（浏览器端 TS 实现 + CLI 命令 + 跨语言互操作测试；门户已接上：`generateBallotLocally` 走 WASM prover，密文在浏览器本地生成） |
 | T14 | 客户端 prover | ✅ **已落地（CLI + 浏览器两侧）** —— CLI 是 `ballot-prove`；浏览器侧是**自建的 Go → js/wasm 路线**：`cmd/ballot-wasm` 编译成 WASM，门户在 Worker 里加载（`web/src/lib/wasm-prover.ts` + `web/src/workers/ballot-prover.worker.ts`）。加密、nullifier 派生、公开输入拼装与 Groth16 证明全部在 Go 侧完成，客户端与服务端共用同一套代码。**实测**：初始化 7.6 秒、出证明 2.25 秒、证明 128 字节（`tests/e2e/wasm_prover_test.go` 用 node 驱动同一个 WASM 模块端到端验收） |
 | T17 | 盲签名改真两段式 | ✅ **已落地**（2026-10-21）—— 真两段式协议（预留 → 本地盲化 → 盲签名 → 本地解盲 → attest）+ 门户 / CLI 接线 + 管理端同样走两段式；验收 ①（签名阶段只见盲化消息）与验收 ②（交叉攻击失败）均有 e2e 用例 |
@@ -249,7 +249,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 
 | 能力 | 状态 | 说明 |
 |---|---|---|
-| A 选票内容对服务端不可知 | ✅ **已达成（release 模式）** | **选票密文在客户端生成**：CLI（`ballot-encrypt`）+ 浏览器（门户的「在浏览器本地生成选票」）。服务端只提供公开的计票公钥，接口 `GET /api/v1/proposals/:id/election-key`。落库记录里只有密文（e2e 用例断言）。**残留**：debug 模式的 `ballot-draft`（服务端代加密）在 release 模式是 404 —— 它是开发联调接口，不是生产能力。**这条不变量现由持续门禁把守**：`tests/architecture/`（请求体字段 / usecase 入口 / 调用点 / 豁免项 release 模式 404 四条断言） |
+| A 选票内容对服务端不可知 | ✅ **已达成** | **选票密文在客户端生成**：CLI（`ballot-encrypt`）+ 浏览器（门户的「在浏览器本地生成选票」）。服务端只提供公开的计票公钥，接口 `GET /api/v1/proposals/:id/election-key`。落库记录里只有密文（e2e 用例断言）。**服务端没有任何接收明文选项的入口** —— `ballot-draft`（服务端代加密）已删除，这条不变量由 `tests/architecture/` 持续守卫（请求体字段 / usecase 入口 / 代加密链不许复活 / 端点不许复活，**不设豁免**） |
 | B 选票可验证 | ✅ **已达成** | 真实 Groth16 电路 + `cmd/keygen` + 服务端真实验签；浏览器端 prover 已落地（`cmd/ballot-wasm` → WASM，门户 Worker 里跑），CLI 侧 `ballot-prove` 也已落地 |
 | C proof 与票绑定 | ✅ 已达成 | 公开输入由服务端按请求字段自拼，客户端无法自选；跨提案 / 跨 nullifier 复用均验签失败 |
 | D 客户端能投票 | ✅ **已达成（CLI 与门户两侧）** | CLI 用本地 proving key 出证明；门户在浏览器 Worker 里用 WASM prover 出证明并提交。两条路径都有端到端证据（`tests/e2e/client_prover_test.go` / `tests/e2e/wasm_prover_test.go`） |
@@ -266,7 +266,9 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 ### 4.2 v0.1.0 的边界（v0.1.0 发布时的快照）
 
 > 以下是 **v0.1.0 发布时**的边界，属历史快照。**当前实现见 §4.1 的 M2 进展表**
-> —— 其中「没有真实电路」与「`ballot-draft` 生产可达」两条已在本轮改变。
+> —— 其中「没有真实电路」已改变；「`ballot-draft` 生产可达」这条**已彻底消失**：
+> 该端点连同服务端的代加密链一起删掉了（2026-10-25），现在服务端没有任何
+> 接收明文选项的入口。
 
 **能**：
 
@@ -333,9 +335,9 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 
 | # | 检查项 | 当前状态 |
 |---|---|---|
-| 1 | 能力 A–F 任一未完成 | ✅ **已过** —— A / B / D 已在 CLI 与门户两侧闭合（浏览器端 prover 走自建的 Go → js/wasm 路线）；C / E / F 已达成。**残留**：debug 模式的 `ballot-draft`（服务端代加密）是开发联调妥协，release 模式 404 |
+| 1 | 能力 A–F 任一未完成 | ✅ **已过** —— A / B / D 已在 CLI 与门户两侧闭合（浏览器端 prover 走自建的 Go → js/wasm 路线）；C / E / F 已达成。能力 A 不再有残留：服务端的代加密链（`ballot-draft`）已删除 |
 | 2 | 能力 G 的完成定义未达成 —— 领取凭证时不需要任何资格证明（T22），意味着服务端无法强制一人一票 | ❌ **未过** —— T22 未开工 |
-| 3 | 存在「服务端能拿到明文选项」的代码路径（grep 不到才过） | 🟡 **接近闭合（口径已机器化）** —— 这条检查从人工 grep 变成持续门禁 `tests/architecture/plaintext_option_test.go`：HTTP 层请求体不得有明文选项 json tag、usecase 层不得出现第二个「接受明文选项」的入口、debug 链的调用点必须在允许文件里、**每一条豁免必须在 release 模式真的 404**（豁免表自证）。**残留**只有 debug 模式的 `ballot-draft` 一条（release 模式 404，已被守卫测试断言）。**待拍板**：删掉它，还是接受它只在 debug 模式存在 —— 两种决定都只落在改豁免表上（删 = 删豁免行 + 删端点；留 = 现状即合规） |
+| 3 | 存在「服务端能拿到明文选项」的代码路径（grep 不到才过） | ✅ **已过** —— 这条检查从人工 grep 变成持续门禁 `tests/architecture/plaintext_option_test.go`，而且**不设豁免机制**：HTTP 层请求体不得有明文选项 json tag、usecase 层不得有接受明文选项的入口、服务端代加密那条链的符号不许复活、`ballot-draft` 端点不许复活（POST 它必须 404）。**残留为零** |
 | 4 | 存在「proof 可以跨提案复用」的路径 | ✅ **已过** —— 公开输入由服务端自拼，跨提案 / 跨 nullifier 复用均验签失败 |
 | 5 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 任一失败 | ✅ **已过** —— 本轮全绿 |
 | 6 | 覆盖率门槛退出码非 0 | ✅ **已过** —— 逐包分档，合计 80.4% |
@@ -359,13 +361,13 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | # | 决策 | 结论 |
 |---|---|---|
 | **G1** | 版本定位 | ✅ **v0.1.0 = 已发布的内测版**；**v0.2.0 = 产品路线图目标**，不是「生产可用版」的承诺 —— 接口仍会变 |
-| **G2** | 门户「按选项生成凭据」按钮 | ✅ **非 debug 隐藏**（T2 已落地）—— debug 标志来自 `/healthz` 的 `debug` 字段 |
-| **G3** | `ballot-draft` 生产可达性 | ✅ **非 debug 返回 404**（T1 已落地）—— 用 404 而不是 403，避免暴露端点存在性 |
+| **G2** | 门户「按选项生成凭据」按钮 | ✅ **整个删掉**（2026-10-25）—— 它把明文选项发给服务端，正式模式与 debug 模式都没有这个入口 |
+| **G3** | `ballot-draft` 生产可达性 | ✅ **端点整个删掉**（2026-10-25）—— 不只是「非 debug 404」；服务端的代加密链一起删除 |
 | **G4** | 盲签名：改实现还是改文档 | ✅ **先改文档如实描述**（T12），两段式（T17）留到 M2 一起做 —— v0.2.0 承诺匿名性时必须补上 |
 | **G5** | 版本号 | ✅ 当前发版 `0.1.0`；路线图目标用 **`0.2.0`**，**不用 `1.0.0`**（1.0.0 意味着 API 稳定 + 生产可用，届时做不到；见 §1.1） |
 | **G7** | 电路形状与曲线 | ✅ **Groth16/BN254**（T13 已落地）—— 沿用 verifier 原本硬编码的 `ecc.BN254` |
 | **G8** | 投票人领凭证的形态 | ✅ **凭证池 + 投票人匿名随机领取**（T9）—— 不再用一次性领票码。核心理由：admin 逐个分发就等于 admin 知道哪个票是谁的，直接破坏不可关联性。**代价已记下**：一人一票要靠资格证明补回（T22） |
-| **范围** | 这轮做哪些 | ✅ **T3–T12 这 10 项**已全部落地；T1（`ballot-draft` 非 debug 404）与 T2（门户隐藏按钮）暂缓，等 G2/G3 |
+| **范围** | 这轮做哪些 | ✅ **T3–T12 这 10 项**已全部落地；T1（`ballot-draft`）与 T2（门户隐藏按钮）后来也落地了，并进一步升级为「端点与按钮整个删除」 |
 
 **本轮新增的决策（2026-10-21）**
 
@@ -412,7 +414,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | T17 真盲签名改动面大，拖垮整个 v0.2.0 | 发版无限延期 | ✅ **已解除** —— T17 已于 2026-10-21 落地（协议 + 门户 / CLI 接线 + e2e 验收），改动面比预估小：领域接口拆成 `BlindSign` / `IssuerPublicKey` / `VerifyCredential` 三个方法，没有新增 schema 列 |
 | T7 KDF 换协议使 v0.1.0 之前的旧密文永久不可解 | 旧数据丢失 | 明确标注密文格式版本；v0.1.0 起格式即 v2，v0.2.0 前不要用旧数据做真实投票 |
 | **D2 密文 v2 → v3 使 v0.1.0 的选票永久不可解** | 旧数据丢失 | v0.2.0 尚未发版，本地/内测数据可弃；CHANGELOG 必须写明「与 v0.1.0 不兼容」；发版前清库 |
-| **debug 模式下服务端仍能拿到明文选项** | 能力 A 未达成 | T1 已把该端点在非 debug 模式关成 404；**release 模式必须显式设置 `server.mode`**，否则开发默认值会让能力 A 在生产失效 —— 部署清单里逐项核对 |
+| ~~**debug 模式下服务端仍能拿到明文选项**~~ | 能力 A 未达成 | ✅ **已解除**（2026-10-25）：服务端代加密的端点与代码链**整个删除**，不再依赖 `server.mode` 的取值。能力 A 现在与运行模式无关 |
 | T16 把加密移到客户端后，前端成为新的攻击面 | 密钥泄露 | proving key 只在前端，**不入服务端**；前端构建产物做完整性校验 |
 | 匿名随机领取牺牲了一人一票 | 可重复投票 | M3 用资格证明补回（T22，见 §2.3） |
 | M1 拖太久，M2 无时间 | 路线图整体延期 | M1 与 M2 **可并行**（除 T1/T2 依赖 M2 的字段） |
@@ -435,8 +437,8 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 问题 | `POST /api/v1/proposals/:id/ballot-draft` 是**公开路由**，返回写死的假 proof。任何人都能调用，且这条链路的密文由服务端生成。 |
 | 证据 | `internal/infrastructure/http/handler.go:65`（路由未挂在 admin 分组下）、`:408`（常量 `developmentProofBase64`，由 `PrepareBallotDraft` 在 `:442` 返回） |
 | 改法 | ① `config.Config` 增加 `DebugMode bool`（由 `server.mode` 推导：`debug`/`dev`/`development` 为 true）；② 路由在非 debug 模式返回 **404**（用 404 而不是 403，避免暴露端点存在性）；③ `server_test.go` 里现有的 `ballot-draft` 用例按模式分叉，debug 断言 201、release 断言 404 |
-| 落地核对 | ① ✅ `config.Config.DebugMode`（`internal/config/config.go` 的 `isDebugMode`，`server.mode` 为 `debug`/`dev`/`development` 时为 true）；② ✅ `Handler` 新增 `NewHandlerWithTallyAndMode`，非 debug 时 `PrepareBallotDraft` **直接 404**；③ ✅ `GET /healthz` 响应新增 `debug` 布尔字段，门户据此决定要不要显示调试入口；④ ✅ 新增用例 `TestHandler_BallotDraftHiddenOutsideDebugMode` 断言非 debug → 404 |
-| 验收 | `go test ./...` 全绿；新增用例断言 release 模式 404 —— ✅ 已达成 |
+| 落地核对 | ① ✅ `config.Config.DebugMode`（`internal/config/config.go` 的 `isDebugMode`，`server.mode` 为 `debug`/`dev`/`development` 时为 true）；② ✅ `Handler` 新增 `NewHandlerWithTallyAndMode`，非 debug 时 `PrepareBallotDraft` **直接 404**；③ ✅ `GET /healthz` 响应新增 `debug` 布尔字段，门户据此决定要不要显示调试入口；④ ✅ 新增用例 `TestHandler_BallotDraftHiddenOutsideDebugMode` 断言非 debug → 404；⑤ ✅ **2026-10-25 升级：端点整个删除** —— `PrepareBallotDraft` / `EncryptVoteOption` / `BallotDraft` 与门户的「按选项生成凭据」入口一并删除，「非 debug 才 404」这层门控不再需要。`config.DebugMode` 保留下来只作为运行状态（`/healthz` 的 `debug` 字段） |
+| 验收 | `go test ./...` 全绿；新增用例断言 release 模式 404 —— ✅ 已达成；**升级后的验收**：`tests/architecture/` 断言 ballot-draft 端点任何模式都 404 —— ✅ 已达成 |
 | 预估 | 1 小时 |
 | 依赖 | G3 ✅ 已拍板（§6） |
 
@@ -447,8 +449,8 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 问题 | 门户在运营侧提供「按选项生成凭据」的入口，等于把「服务端替用户选」的能力做成一键操作。 |
 | 证据 | `web/src/composables/useVotePortal.ts:977` `issueCredential`、`web/src/components/panels/IdentityPanel.vue:13` |
 | 改法 | 按钮按 `debug` 模式条件渲染；非 debug 时给一句说明为什么没有这个入口 |
-| 落地核对 | ① ✅ `useVotePortal.ts` 读 `/healthz` 的 `debug` 字段，暴露为 `debugMode` ref；② ✅ `VotePanel.vue` 的「按选项生成凭据」按钮加 `v-if="portal.debugMode"`，非 debug 时改为一句说明文案；③ ✅ **验收方式已在 T20 批次补上**：仓库仍无 `@vue/test-utils`（离线不可安装），但**自写了 SFC 编译插件**（`web/vitest.config.ts`，用 `vue/compiler-sfc` + `typescript`，不新增依赖），因此面板可以在 vitest 里做**服务端渲染测试** —— `web/src/components/panels/panels.test.ts` 断言：debug 模式渲染出「按选项生成凭据」按钮，**非 debug 模式渲染不出这个按钮**（断言的是按钮本身，不是说明文案里出现的那个词）。⚠️ 不是浏览器渲染（无 CSS / 无事件 / 无客户端挂载） |
-| 验收 | vitest：非 debug 模式渲染不出该按钮；debug 模式仍在 —— ✅ **已达成**（`panels.test.ts` 的「投票面板的 debug 门控」三条用例） |
+| 落地核对 | ① ✅ `useVotePortal.ts` 读 `/healthz` 的 `debug` 字段，暴露为 `debugMode` ref；② ✅ `VotePanel.vue` 的「按选项生成凭据」按钮加 `v-if="portal.debugMode"`，非 debug 时改为一句说明文案；③ ✅ **验收方式已在 T20 批次补上**：仓库仍无 `@vue/test-utils`（离线不可安装），但**自写了 SFC 编译插件**（`web/vitest.config.ts`，用 `vue/compiler-sfc` + `typescript`，不新增依赖），因此面板可以在 vitest 里做**服务端渲染测试** —— `web/src/components/panels/panels.test.ts` 断言：debug 模式渲染出「按选项生成凭据」按钮，**非 debug 模式渲染不出这个按钮**（断言的是按钮本身，不是说明文案里出现的那个词）。⚠️ 不是浏览器渲染（无 CSS / 无事件 / 无客户端挂载）；④ ✅ **2026-10-25 升级：按钮整个删除** —— 服务端代加密的端点也没了，按钮留着只会 404。`debugMode` ref 与 `readDebugFlag` 一并删除，门户不再读 `/healthz` 的 `debug` 字段；`panels.test.ts` 的断言改为「面板不渲染任何「让服务端代生成凭据」的入口」 |
+| 验收 | vitest：非 debug 模式渲染不出该按钮；debug 模式仍在 —— ✅ **已达成**（`panels.test.ts` 的「投票面板的 debug 门控」三条用例）；**升级后的验收**：面板在任何情况下都渲染不出该入口 —— ✅ 已达成 |
 | 预估 | 1 小时 |
 | 依赖 | G2 ✅ 已拍板（§6） |
 
@@ -503,9 +505,9 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 问题 | **当前版本最大的匿名性缺口**：密文由服务端生成（`ballot-draft` 拿明文 `option` 去加密），服务端在生成凭据时就知道选了哪个。 |
 | 证据 | `internal/infrastructure/http/handler.go:432`（`EncryptVoteOption` —— 服务端拿明文选项加密）、`:405`（`Option string` 字段）、review C5 |
 | 改法 | ① 服务端只发**加密公钥 + 电路参数**，不再接受明文选项；② 浏览器端完成「选票 → 加密 → proof → 提交」全流程；③ 服务端接口改为接受 `{encrypted_vote, proof, nullifier, ...}`，**没有明文选项字段**；④ `ballot-draft` 端点随之删除（T1 已先把它关掉） |
-| **状态补充** | 加密栈已在本轮换到 **v3**（D2）：浏览器端要做的是 BN254 twisted Edwards 上的指数 ElGamal，加密的是**选项下标**。服务端计票侧已就绪（`BallotThresholdCrypto`），**T16 缺的是浏览器侧的加密实现**。另外：T1 已把 `ballot-draft` 在非 debug 模式关成 404，**服务端代加密这条路在 release 模式已经不可达** —— 「服务端代码里不存在接收明文选项的字段」这条验收原先仍差着一处（`PrepareBallotDraft` 的请求体有 `option` 字段，debug 模式可达），现在它被**显式列为唯一一条豁免**，并由守卫测试证明「这条豁免在 release 模式是死的」 |
-| 验收 | ① 服务端代码里**不存在**接收明文选项的字段（原口径是人工 grep 验证，现为持续门禁 `tests/architecture/`；debug 模式的 `ballot-draft` 是**显式豁免**，守卫测试断言它在 release 模式必须 404）；② e2e：浏览器投票 → 服务端落库记录里没有可还原的选项 |
-| 落地核对 | ① ✅ **浏览器端选票加密**：`web/src/lib/ballot-cipher.ts` 实现 BN254 twisted Edwards 上的指数 ElGamal（加密选项下标），点编码与 Go 侧**逐字节一致**（互操作向量见 `internal/infrastructure/crypto/ballot/kat_interop_test.go` 与 `web/src/lib/ballot-cipher.test.ts`）；② ✅ **CLI 客户端加密**：`cmd/cli` 新增 `ballot-encrypt` 命令，客户端取公钥 → 本地加密 → 落盘选票文件（含 nullifier 秘密，只留本地）；③ ✅ **服务端公开计票公钥**：新接口 `GET /api/v1/proposals/:id/election-key`（未压缩形式，客户端不必实现点解压）；④ ✅ **e2e 证据**：`tests/e2e/client_side_encryption_test.go` —— 客户端本地加密 → 落库记录里只有密文 → 计票仍还原出客户端选的选项；⑤ ✅ **门户已接上**（2026-10-25 真实浏览器跑通）：浏览器端 prover 走自建的 Go → js/wasm 路线（`cmd/ballot-wasm`），`web/src/lib/wasm-prover.ts` 主线程编排 + `web/src/workers/ballot-prover.worker.ts` 在 Worker 里加载 WASM —— 实测 init 11.8–14.3 秒、prove 2.9 秒、proof 128 字节，浏览器生成的密文 / nullifier / proof 提交后服务端真验签通过；⑥ ✅ **验收 ① 从「人工 grep」升级为「持续门禁」**：新增 `tests/architecture/plaintext_option_test.go`（go/ast 扫描 `internal/`），四条断言 —— HTTP 层请求体结构体不得有明文选项 json tag、usecase 层不得出现第二个「接受明文选项」的入口、debug 链函数的调用点必须在允许文件里、**每一条豁免必须在 release 模式真的 404**（豁免表因此自证）；豁免表当前只有一条（debug 模式的 `ballot-draft`），无论最终删还是留，决定都只落在改这张表上 |
+| **状态补充** | 加密栈已在本轮换到 **v3**（D2）：浏览器端要做的是 BN254 twisted Edwards 上的指数 ElGamal，加密的是**选项下标**。服务端计票侧已就绪（`BallotThresholdCrypto`），**T16 缺的是浏览器侧的加密实现**。另外：服务端代加密这条路**已彻底关闭** —— `ballot-draft` 端点与 `EncryptVoteOption` / `PrepareBallotDraft` / `BallotDraft` 这条链在 2026-10-25 一起删除，「服务端代码里不存在接收明文选项的字段」这条验收**没有任何豁免** |
+| 验收 | ① 服务端代码里**不存在**接收明文选项的字段（持续门禁 `tests/architecture/`，**不设豁免**：请求体字段 / usecase 入口 / 代加密链不许复活 / 端点不许复活）；② e2e：浏览器投票 → 服务端落库记录里没有可还原的选项 |
+| 落地核对 | ① ✅ **浏览器端选票加密**：`web/src/lib/ballot-cipher.ts` 实现 BN254 twisted Edwards 上的指数 ElGamal（加密选项下标），点编码与 Go 侧**逐字节一致**（互操作向量见 `internal/infrastructure/crypto/ballot/kat_interop_test.go` 与 `web/src/lib/ballot-cipher.test.ts`）；② ✅ **CLI 客户端加密**：`cmd/cli` 新增 `ballot-encrypt` 命令，客户端取公钥 → 本地加密 → 落盘选票文件（含 nullifier 秘密，只留本地）；③ ✅ **服务端公开计票公钥**：新接口 `GET /api/v1/proposals/:id/election-key`（未压缩形式，客户端不必实现点解压）；④ ✅ **e2e 证据**：`tests/e2e/client_side_encryption_test.go` —— 客户端本地加密 → 落库记录里只有密文 → 计票仍还原出客户端选的选项；⑤ ✅ **门户已接上**（2026-10-25 真实浏览器跑通）：浏览器端 prover 走自建的 Go → js/wasm 路线（`cmd/ballot-wasm`），`web/src/lib/wasm-prover.ts` 主线程编排 + `web/src/workers/ballot-prover.worker.ts` 在 Worker 里加载 WASM —— 实测 init 11.8–14.3 秒、prove 2.9 秒、proof 128 字节，浏览器生成的密文 / nullifier / proof 提交后服务端真验签通过；⑥ ✅ **验收 ① 从「人工 grep」升级为「持续门禁」**：新增 `tests/architecture/plaintext_option_test.go`（go/ast 扫描 `internal/`）—— HTTP 层请求体结构体不得有明文选项 json tag、usecase 层不得有接受明文选项的入口、**服务端代加密那条链的符号不许复活**、**ballot-draft 端点不许复活**（POST 它任何模式都 404）。**不设豁免机制**；⑦ ✅ **2026-10-25：豁免的那一条也删掉了** —— `ballot-draft` 端点、`EncryptVoteOption` / `PrepareBallotDraft` / `BallotDraft`、门户的「按选项生成凭据」入口一并移除。能力 A 现在**与运行模式无关**：服务端没有任何接收明文选项的入口 |
 | 预估 | 3–4 天 |
 | 依赖 | T13、T14、T15 |
 

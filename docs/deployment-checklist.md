@@ -168,7 +168,7 @@
 | 3 | 往凭证池投槽位 | `POST /api/v1/proposals/:id/credentials/pool`（管理端） | ☐ |
 | 4 | **初始化门限解密会话** | `POST /api/v1/proposals/:id/decryption/setup`。⚠️ **必须在投票窗口打开之前** —— 服务端会拒绝「投票开放中」的提案 | ☐ |
 | 5 | 开放投票窗口 | 提案的 `starts_at` / `ends_at` | ☐ |
-| 6 | 投票 | ✅ **CLI**：`ballot-encrypt` → `ballot-prove -proving-key <proving.key>` → `vote-submit`；✅ **门户**：选好选项 → 点「在浏览器本地生成选票」→ 提交（首次约 12~14 秒，含编译电路）；开发模式也可用 `ballot-draft` 的占位 proof 联调 | ☐ |
+| 6 | 投票 | ✅ **CLI**：`ballot-encrypt` → `ballot-prove -proving-key <proving.key>` → `vote-submit`；✅ **门户**：选好选项 → 点「在浏览器本地生成选票」→ 提交（首次约 12~14 秒，含编译电路）。**没有服务端代加密的路径** —— `ballot-draft` 已删除 | ☐ |
 | 7 | 收集门限份额 | 每个计票方拿自己那一份 | ☐ |
 | 8 | 发布结果 | `POST /api/v1/proposals/:id/results/publish`（**仅在提案关闭后**）。CLI：`result-publish -proposal <id> -shares-file <decrypt-setup 落盘的文件>` —— 这个文件可以直接用 | ☐ |
 
@@ -200,7 +200,7 @@
 | `GET /api/v1/proposals` | 能列出提案 | ☐ |
 | `POST /api/v1/votes`（伪造签名） | **401** `INVALID_CREDENTIAL` | ☐ |
 | `POST /api/v1/votes`（篡改 proof） | **400** `INVALID_REQUEST` | ☐ |
-| `POST /api/v1/proposals/:id/ballot-draft` | **404**（release 模式不可达） | ☐ |
+| `POST /api/v1/proposals/:id/ballot-draft` | **404**（端点已删除，任何模式都不可达） | ☐ |
 | 领取凭证（无 admin token） | 能领到 —— 领取端点是公开的 | ☐ |
 | 管理端接口（无 token） | **401** | ☐ |
 | **浏览器里领一次凭证** | 「我的身份 → 匿名领取」成功，页面变成「已就绪」。**必须走到 attest**（服务端日志里能看到 `credential attested`）—— 停在 claim 之后说明浏览器端与服务端的盲签名参数对不上 | ☐ |

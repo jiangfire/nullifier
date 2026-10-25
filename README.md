@@ -39,8 +39,7 @@ nullifier 把这两个动作拆开:
 >   Worker 里跑）。两条路的证明都不经过服务端。
 > - **选票密文在客户端生成，CLI 与门户两侧都已接上。** 浏览器端与 CLI 都能在本地加密选票，
 >   服务端只提供公开的计票公钥；**门户现在有「在浏览器本地生成选票」入口**。
->   残留：debug 模式的 `ballot-draft`（服务端代加密）仍是「服务端知道选项」的那条路径 ——
->   它在 release 模式是 404，属开发联调接口。
+>   服务端**没有任何**接收明文选项的入口（`ballot-draft` 已删除，守卫测试持续盯着）。
 > - **只适合内测与开发**，不要用于真实投票。仍未闭合的是「一人一票」的资格证明与
 >   生产化验收，见 [`docs/roadmap.md`](./docs/roadmap.md) 的 v0.2.0 里程碑。
 
@@ -122,10 +121,6 @@ go run ./cmd/cli ballot-encrypt -proposal <proposal_id> -option A -out ballot.js
 go run ./cmd/cli ballot-prove -ballot-file ballot.json -proving-key keys/proving.key -out ballot.json
 
 go run ./cmd/cli vote-submit -credential-file cred.json -ballot-file ballot.json
-
-#    备选:ballot-draft 让服务端代加密,只在 debug 模式可达(非 debug 模式返回 404),
-#    服务端因此知道选了哪个 —— 这正是客户端加密要消除的路径。
-go run ./cmd/cli ballot-draft -proposal <proposal_id> -option A -out ballot.json
 
 # 5. 提案关闭后,提交份额并计票
 go run ./cmd/cli -admin-token dev-admin-token result-publish \
@@ -259,7 +254,6 @@ nullifier-server             # 再起服务
 | `POST` | `/api/v1/votes` | 提交匿名投票(7 个字段全部必填;公开输入由服务端自拼,不收 `public_witness`) |
 | `POST` | `/api/v1/proposals/:id/vote-status` | 持凭证材料查询是否已投票 |
 | `GET` | `/api/v1/proposals/:id/election-key` | 计票公钥(公开值,客户端本地加密用;未压缩形式 base64) |
-| `POST` | `/api/v1/proposals/:id/ballot-draft` | 生成选票草稿(开发联调,**仅 debug 模式**,其余模式 404) |
 | `GET` | `/api/v1/proposals/:id/results` | 已发布的计票结果 |
 | `GET` | `/api/v1/proposals/:id/audit-anchors` | 导出审计锚点 |
 | `POST` | `/api/v1/proposals/:id/credentials/claim` | **预留**一个凭证池槽位(请求体为空,不收公钥) |
@@ -322,7 +316,7 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 这是个在推进中的实现,接手前请知道边界在哪:
 
 - **证明链:服务端、CLI、浏览器三侧都通了。** 真实 Groth16 电路(`internal/infrastructure/crypto/ballot/`)、`cmd/keygen` 密钥生成流程、服务端按请求字段自拼公开输入并真实验签都已落地 —— 篡改任一公开输入都会验签失败。**CLI 能本地生成 proof**(`ballot-prove`,用本地 proving key,证明不经过服务端);**浏览器也能**(`cmd/ballot-wasm` 编译成 WASM,门户在 Web Worker 里加载它出票)。`crypto.vk_path` 为空时验证器只要求 proof 非空(开发模式),本地「验证通过」不代表真的验过。
-- **选票密文在客户端生成,CLI 与门户两侧都已闭合。** 服务端只提供公开的计票公钥(`GET /api/v1/proposals/:id/election-key`),落库记录里只有密文。门户的出票入口是「在浏览器本地生成选票」;CLI 是 `ballot-encrypt` + `ballot-prove`。两边的点编码**逐字节一致**,由一组跨语言已知答案向量锁死。端到端证据:`tests/e2e/client_prover_test.go`(CLI)与 `tests/e2e/wasm_prover_test.go`(浏览器 WASM 模块,node 驱动)。⚠️ **残留**:debug 模式的 `ballot-draft` 仍是「服务端知道选项」的那条路径(release 模式 404,属开发联调接口)。
+- **选票密文在客户端生成,CLI 与门户两侧都已闭合。** 服务端只提供公开的计票公钥(`GET /api/v1/proposals/:id/election-key`),落库记录里只有密文。门户的出票入口是「在浏览器本地生成选票」;CLI 是 `ballot-encrypt` + `ballot-prove`。两边的点编码**逐字节一致**,由一组跨语言已知答案向量锁死。端到端证据:`tests/e2e/client_prover_test.go`(CLI)与 `tests/e2e/wasm_prover_test.go`(浏览器 WASM 模块,node 驱动)。**服务端没有任何接收明文选项的入口** —— `ballot-draft`(服务端代加密)已删除,`tests/architecture/` 持续盯着这条底线。
 - **浏览器端 prover 的三个静态资源要部署时备齐。** `wasm_exec.js`、`ballot-prover.wasm`(约 11.9 MB,gzip 后约 2.8 MB)、`proving.key`(约 1.2 MB):`make web-wasm` 与 `make web-proving-key PK=<路径>`。首次出票要下载它们并初始化证明器(浏览器实测约 12~14 秒,含编译电路),出证明约 3 秒。**proving key 只在客户端** —— 服务端只拿 verifying key。
 - **门户的浏览器路径已在真实浏览器里跑过（2026-10-25）。** 端到端证据有两条：node 驱动同一个 WASM 模块的自动化用例（`tests/e2e/wasm_prover_test.go`），以及一次**真实浏览器**（Chromium / Electron）的人工验收 —— 静态资源三件套真实加载 → 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 服务端以真 verifying key 验签通过（201）→ 提案关闭后计票还原出所选选项。⚠️ 但**仓库里仍然没有浏览器自动化**（无 Playwright），门户的 UI 交互仍要人工核对；首次上线仍建议人工点一次出票流程 —— 这次验收正是靠它挖出了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而不是线路名，领取流程会停在 claim 之后）。
 - **凭证签名现在会被验证。** 投票落库前会调用签发方验签,伪造签名的请求返回 401。

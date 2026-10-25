@@ -198,7 +198,6 @@ web/                        # Vue 3 前端门户
 - `GET /api/v1/proposals/open`
 - `POST /api/v1/votes`
 - `POST /api/v1/proposals/:proposal_id/vote-status`
-- `POST /api/v1/proposals/:proposal_id/ballot-draft`（仅 debug 模式）
 - `GET /api/v1/proposals/:proposal_id/election-key`（计票公钥，公开值）
 - `POST /api/v1/proposals/:proposal_id/credentials/claim`
 - `POST /api/v1/proposals/:proposal_id/credentials/blind-sign`
@@ -244,14 +243,6 @@ web/                        # Vue 3 前端门户
   - 落票与参与记录要么在同一事务里完成，要么都不做；不存在“记了票但没记参与状态”的路径
   - 请求体里的 `selected_option` 服务端**不消费**，也不应发送（明文选项上服务端会抵消
     “选票是加密的”这个属性）；门户与 CLI 均已移除该字段
-- `POST /api/v1/proposals/:proposal_id/ballot-draft`
-  - **非 debug 模式返回 404**：用 404 而不是 403，避免暴露端点存在性。
-    路由始终注册，门控在 handler 里做。
-  - 响应字段：`proposal_id`、`option`、`encrypted_vote`、`proof`、`nullifier`；
-    **不再返回 `public_witness`**。
-  - 返回的 `proof` 是开发用占位值（`handler.developmentProofBase64`），不是真实证明。
-  - 密文由服务端按明文选项生成，服务端此时就知道选了哪个 —— 这条链路不匿名，
-    只是为了联调（见 §6.7）。
 - `POST /api/v1/proposals/:proposal_id/vote-status`
   - 必须带当前凭证材料，不接受裸 `user_id` 枚举
 - `POST /api/v1/proposals/:proposal_id/credentials/claim`（预留签发权，公开）
@@ -436,16 +427,16 @@ web/                        # Vue 3 前端门户
   走真实 Groth16 验签（`ballot.Verifier.Verify`）。release 模式下 `vk_path` 必填，
   这条放行分支不会生效。
 
-### 6.7 debug 模式下的妥协
+### 6.7 debug 模式
 
 - `config.Config.DebugMode` 由 `server.mode` 推导：`debug` / `dev` / `development` 为 true，
-  其余为 false。
-- `POST /api/v1/proposals/:proposal_id/ballot-draft` 只在 debug 模式可达；非 debug 模式
-  返回 404（用 404 而不是 403，避免暴露端点存在性）。
-- 该端点的密文由服务端按明文选项生成（`usecase.TallyUseCase.EncryptVoteOption`），
-  返回的 `proof` 是开发用占位值，不是真实证明。
-- 性质要说清楚：debug 模式下服务端知道选了哪个，这条链路**不匿名**，只是换联调速度。
-  release 模式下这个端点不存在。
+  其余为 false。它**只作为运行状态暴露**（`GET /healthz` 的 `debug` 字段）。
+- **服务端在两种模式下的行为完全一致**：没有「替用户选票」的调试能力。
+  曾存在的 `POST /api/v1/proposals/:proposal_id/ballot-draft`（服务端代加密）已删除，
+  路由不再注册，任何模式都返回 404。
+- 这条底线由 `tests/architecture/plaintext_option_test.go` 持续守卫：请求体结构体不得有
+  明文选项字段、usecase 不得有接受明文选项的入口、服务端代加密那条链不许复活、
+  ballot-draft 端点不许复活。
 
 ### 6.8 客户端加密（选票密文在客户端生成）
 
@@ -471,8 +462,8 @@ web/                        # Vue 3 前端门户
   - 公开输入走**服务端同一套**拼装入口（`ballot.BuildPublicInputs`）：客户端与服务端
     算出同一份公开输入，证明才验得过。计票公钥客户端拿到的是未压缩形式，服务端
     用的是压缩形式，客户端先用 `ballot.CompressPoint` 转成同一形式。
-- **服务端不再需要知道明文选项**：`usecase.TallyUseCase.EncryptVoteOption`（服务端
-  代加密）只剩 debug 模式的 `ballot-draft` 在用。
+- **服务端不再需要知道明文选项**：服务端代加密的 `usecase.TallyUseCase.EncryptVoteOption`
+  已随 `ballot-draft` 一起删除，服务端只剩解密（计票）这一侧。
 - **门户接线已闭合**：浏览器端 prover 见 §6.10，门户在本地出票再提交。
 
 ### 6.10 浏览器端 prover（WASM）
@@ -602,9 +593,8 @@ web/                        # Vue 3 前端门户
   - 查看审计锚点
 - nullifier 在浏览器本地生成（`web/src/lib/nullifier.ts`）：32 字节随机值先按 BN254
   标量域模数归约，再编码成 64 位十六进制，保证一定是规范编码（有对应单元测试）。
-- 「按选项生成凭据」按钮只在 debug 模式显示；非 debug 模式改为一句说明：这个入口会让
-  服务端看到你选了哪个选项，与匿名投票的前提冲突。debug 标志来自 `GET /healthz` 的
-  `debug` 字段，读不到该字段时按 false 处理（宁可把开发入口藏起来）。
+- 「按选项生成凭据」按钮**已删除**：它把明文选项发给服务端，与匿名投票的前提冲突。
+  出票只有「在浏览器本地生成选票」这一条路。
 - 门户与 CLI 都不再发送 `public_witness`；公开输入由服务端自拼。
 - **凭证领取走真两段式盲签名**（`web/src/lib/credential.ts` + `web/src/lib/blind-rsa.ts`）：
   预留 → 本地盲化 → 盲签名 → 本地解盲 → attest。预留阶段请求体是空的 —— 公钥只在
@@ -665,8 +655,7 @@ web/                        # Vue 3 前端门户
 - CLI 不发送 `selected_option`：服务端不消费该字段，明文选项上服务端会抵消
   「选票是加密的」这个属性。
 - CLI 不发送 `public_witness`：公开输入由服务端按请求字段自拼，客户端无从选择。
-- `ballot-draft` 只在 debug 模式可用（服务端在非 debug 模式返回 404），返回的 `proof`
-  是开发用占位值，不是真实证明。
+- `ballot-draft` 已删除：服务端没有任何接收明文选项的入口，也就没有「占位 proof」这回事。
 - `ballot-encrypt` 在**客户端本地加密**选票：取公开的计票公钥 → 本地加密选项下标 →
   落盘选票文件。选票文件里的 `nullifier_secret` 只留本地，prover 需要它。
 - `ballot-prove` 在**客户端本地出证明**：读选票文件 → 用本地 proving key 生成 Groth16
@@ -691,7 +680,6 @@ web/                        # Vue 3 前端门户
   - `credential-issue`
   - `credential-claim`
   - `credential-show`
-  - `ballot-draft`
   - `ballot-encrypt`
   - `ballot-prove`
   - `vote-submit`
@@ -732,8 +720,8 @@ web/                        # Vue 3 前端门户
     **真的 verifying key**（不是开发模式的「proof 非空即通过」），证明由客户端用
     proving key 在本地生成，服务端全程没参与出证明也没见过明文选项。反向断言也
     补上了：改一个字节的证明必须 400 且不落库 —— 这条用例不会因为服务端没在验签
-    而假通过。服务端以**非 debug 模式**启动（`ballot-draft` 是 404），因此这张票
-    只可能来自客户端。
+    而假通过。服务端在非 debug 模式下同样跑（服务端已没有 debug 专属能力），
+    因此这张票只可能来自客户端。
   - **凭证端点的请求校验分支测试**：`internal/infrastructure/http/credential_endpoints_test.go`
     —— 公开端与管理端的盲签名、attest、备池、预留端点在「缺字段 / 非法 base64 /
     请求体不是 JSON」时一律 4xx（**不能 5xx**），管理端缺 admin token 是 401，
@@ -808,8 +796,7 @@ web/                        # Vue 3 前端门户
 - 为了能在 vitest 里跑 `.vue`，`web/vitest.config.ts` 里自写了一个 SFC 编译
   插件：离线环境装不了 `@vitejs/plugin-vue`，但 `vue` 自带 `vue/compiler-sfc`，
   `typescript` 又是已有的 devDependency。
-- 覆盖了 debug 门控（路线图 T2）：非 debug 模式下「按选项生成凭据」按钮
-  **不渲染**。
+- 覆盖了「服务端不得拿到明文选项」这条底线：面板**不渲染**任何「让服务端代生成凭据」的入口。
 
 ### 8.3 PostgreSQL 集成测试（本地 compose）
 
@@ -860,12 +847,11 @@ make pg-test        # 起库 → 跑集成测试 → 关库
   三个文件，否则门户会报「下载 WASM 模块失败」。
 - **明文选项对服务端不可知：CLI 与门户两侧都已闭合。** 密文、nullifier 与证明全部在
   客户端本地生成，服务端只提供公开的计票公钥（`GET .../election-key`），落库记录里
-  只有密文。**残留的唯一路径是 debug 模式的 `ballot-draft`**（服务端代加密，release
-  模式 404）—— 它是开发联调接口，不应被写成生产能力。
+  只有密文。**服务端没有任何接收明文选项的入口** —— `ballot-draft`（服务端代加密）已删除。
   - **这条不变量由持续门禁把守**（不再是人工 grep）：`tests/architecture/plaintext_option_test.go`
     用 go/ast 扫 `internal/`，断言 HTTP 层请求体结构体没有明文选项 json tag、usecase 层没有
-    第二个接受明文选项的入口、debug 链的调用点只在允许文件里，且**每一条豁免在 release 模式
-    必须真的 404**。`ballot-draft` 的请求体字段是当前唯一一条豁免。
+    接受明文选项的入口、服务端代加密那条链（`EncryptVoteOption` / `PrepareBallotDraft` /
+    `BallotDraft`）不许复活、`ballot-draft` 端点不许复活。**不设豁免机制**。
 - **凭证签发已经是真两段式盲签名**（见 §6.9）：客户端本地盲化，服务端在签名阶段只见
   盲化消息，attest 阶段才拿到公钥并验签。能力 F 在**签名阶段**达成。
   - 口径要说清楚：**attest 阶段服务端仍然看得到 `user_id` 与 `user_pub_key`** —— 验签
@@ -876,10 +862,10 @@ make pg-test        # 起库 → 跑集成测试 → 关库
 - **nullifier 的 MiMC 绑定：两侧都已用上。** 浏览器端（`web/src/lib/nullifier.ts` 的
   `deriveNullifier`）已能与 Go 侧逐位一致地算出电路认可的 nullifier，KAT 也把它钉死了
   （见 §6.4）；**出票时 nullifier 由 `ballot.ProveBallot` 在本地派生**（随机秘密 +
-  MiMC），秘密不出本地。门户表单里的 nullifier 字段仍可手工编辑（低频工具），
-  正式出票走 prover 这条路。服务端的 `BallotNullifierGenerator` 仍是随机域元素
-  （服务端不参与出票，不需要电路认可的 nullifier）。
-- `ballot-draft` 仍是开发联调接口，不应被写成生产能力。
+  MiMC），秘密不出本地。门户表单里的 nullifier 字段仍可手工编辑（低频工具）。
+- 服务端的 `BallotNullifierGenerator` 仍在（供测试与工具用），但服务端不参与出票 ——
+  正式出票的 nullifier 由 `ballot.ProveBallot` 在本地派生，不需要电路认可的 nullifier。
+- **服务端没有「替用户选票」的联调接口**：`ballot-draft` 已删除，不要把它写成生产能力。
 - **压测工具只能在 debug 模式跑，且数字不是容量规划。** `cmd/loadtest` 提供的是
   「可复现脚本 + 实测输出」（见 §8.1）；SQLite 的单写者会把并发写串行化。真正的容量
   规划属 v0.3.0。
