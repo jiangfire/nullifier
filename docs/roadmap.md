@@ -242,7 +242,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | T2 | 门户「按选项生成凭据」按钮非 debug 隐藏 | ✅ 已落地 |
 | T16 | 加密移到客户端 | 🟡 **客户端加密已落地**（浏览器端 TS 实现 + CLI 命令 + 跨语言互操作测试）；门户接线与客户端 prover 待 T14 |
 | T14 | 客户端 prover（浏览器 WASM） | ⬜ 未开工（**离线不可行**：模块缓存里没有 `gnark-wasm`，也没有 JS 密码学库）。**前置件已就位**：浏览器端 nullifier 派生（MiMC + Keccak + SHA-256，纯 TS）与 Go 侧逐位一致并有跨语言 KAT 锁定 |
-| T17 | 盲签名改真两段式 | ⬜ 未开工（已拍板走真两段式） |
+| T17 | 盲签名改真两段式 | 🟡 **client 侧已就绪**（浏览器端纯 TS 实现，与 CIRCL 逐字节一致 + 跨语言 KAT）；**两段式协议与门户接线未做** |
 
 **能力 A–F 的当前状态**：
 
@@ -482,6 +482,7 @@ T13 电路 + 密钥  →  T15 proof 绑定 ──→ T14 客户端 prover
 | 证据 | `kryptology_credential_issuer.go:162-181` |
 | 改法 | ① 拆成两个 HTTP 端点：客户端 → `POST /credentials/blind`（提交盲化后的消息）→ 服务端 `BlindSign` 返回盲签名 → 客户端 `Finalize` 得到最终签名 → `POST /credentials/attest`（提交最终签名 + 承诺）→ 服务端用 `Verify` 校验；② 客户端（浏览器 WASM）实现 `blindrsa` 的 client 侧；③ 协议要绑定被盲化的消息承诺，防止「拿 A 的盲签名去签 B」 |
 | **实现要点（本轮查证）** | ⚠️ 读完 CIRCL `blindsign/blindrsa` 的源码后确认了三件事，直接决定改法：① **client 侧不需要私钥** —— `Client.Prepare` / `Blind` / `Finalize` 全是**客户端**操作，只要签发方的 **RSA 公钥**（`n`、`e`）就够了，服务端只做 `Signer.BlindSign(blindedMessage)`。因此 **CLI 可以立刻当真正的盲签名客户端**（Go 侧同库，零新依赖），而浏览器端需要自己实现 client 侧：SHA-384 + EMSA-PSS-ENCODE + RSA 盲化运算（BigInt 可做，但必须与 CIRCL **逐字节一致**，用 `ballot-cipher` 那套 KAT 纪律锁死）。② **签名端点必须绑定池槽位** —— 公开的盲签名端点会把签发方变成「任意消息签名预言机」：必须先给客户端预留一个槽位（拿到假名 `user_id`），盲签名只对这个槽位签，attest 时再用「最终签名验签 (user_id, user_pub_key)」把两边绑上 —— 客户端若拿 A 的盲签名去签 B，验签必然失败（验收 ② 因此可测）。③ **服务端在 attest 阶段仍会看到被签内容**（它必须把 `user_id` / `user_pub_key` 存下来），所以能力 F 的准确口径是「**签名阶段**服务端只见盲化消息」，不是「全程看不见」—— 文档口径要按这个写，别写成做不到的承诺 |
+| **落地核对（部分）** | ✅ **client 侧已完成**（本轮）：`web/src/lib/blind-rsa.ts` + `sha384.ts` —— RFC 9474 RSABSSA-PSS-Deterministic 的 `Prepare` / `Blind` / `Finalize`、EMSA-PSS 编码、MGF1、SHA-384，纯 TypeScript 实现（不依赖 WebCrypto：`crypto.subtle` 要求安全上下文，内网 http 部署会失效）。与 CIRCL **逐字节一致**，跨语言向量由 `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧用 CIRCL 真库，固定密钥 + 固定盐 + 固定盲化因子）与 `web/src/lib/blind-rsa.test.ts` 共同锁定 —— 盲化消息与解盲后的签名两侧都一致。⏳ **未做**：两段式协议（预留槽位 → 盲签名 → attest 验签）、服务端 `Issue` 拆分、CLI 与门户接线 |
 | 验收 | ① 端到端：客户端拿到的凭证，服务端**在签名阶段**只见盲化消息；② 交叉攻击测试：用 A 的盲签名 finalize 出 B 的凭证 → 校验失败；③ 服务端代码里不再出现「同一个函数里 Prepare+BlindSign+Finalize」 |
 | 预估 | 5–7 天 |
 | 依赖 | T14（需要客户端承载 crypto）、T9（凭证池路径） |

@@ -206,7 +206,7 @@
 | `src/components/` | `AppSidebar` `AppTopbar` `GuideOverlay` `JourneyBar` `NoticeStack` |
 | `src/components/ui/` | `EmptyState` `NoticeBanner` `StatTile` |
 | `src/composables/useVotePortal.ts` | **全部状态与 API 编排**（单文件约 1800 行，是前端的事实核心） |
-| `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `datetime.ts` `error-messages.ts` `field.ts` `focus-trap.ts` `keccak.ts` `mimc.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` `sha256.ts` —— 除 `api.ts` 外都有单测 |
+| `src/lib/` | `api.ts` `ballot-cipher.ts` `ballot.ts` `blind-rsa.ts` `datetime.ts` `error-messages.ts` `field.ts` `focus-trap.ts` `keccak.ts` `mimc.ts` `navigation.ts` `nullifier.ts` `options.ts` `portal-view.ts` `sha256.ts` `sha384.ts` —— 除 `api.ts` 外都有单测 |
 | `src/styles/` | `tokens.css` `base.css` `components.css` `shell.css` |
 | `src/types/` | `portal.ts` `portal-api.ts` |
 
@@ -326,6 +326,9 @@ publish        → 提案必须已关闭（isProposalClosed）
 19. **浏览器端与 Go 侧的选票密文必须逐字节一致。** 密文点编码一旦有一处偏差，服务端就解不开客户端投的票，而且**不会报错**（只是计票结果对不上）。唯一防线是那组跨语言已知答案向量：`internal/infrastructure/crypto/ballot/kat_interop_test.go`（Go 侧断言向量并解出选项下标）与 `web/src/lib/ballot-cipher.test.ts`（TS 侧断言产出同一串密文）。**改任何一边的曲线参数或编码，都要重新生成并同步这两处。**
 20. **计票公钥以未压缩形式给客户端**：`GET /api/v1/proposals/:id/election-key` 返回 X 与 Y 各 32 字节。原因是压缩点要在标量域里求平方根才能解压（`r ≡ 1 mod 4`，走 Tonelli-Shanks），浏览器端不必背这个包；代价是接口多一种编码方式，改接口时别改回压缩形式。
 21. **浏览器端的 nullifier 派生必须与 Go 侧逐位一致。** 电路约束是 `nullifier = MiMC(秘密, 提案域元素)`：SHA-256 映射提案 ID、Keccak-256 链派生 91 个 MiMC 轮常量、轮函数 `(x+h+c)^5`、外层 Miyaguchi–Preneel。差一位，浏览器就出不了证明（而且**不会报错**，只是验签失败）。防线是同一组跨语言向量：`internal/infrastructure/crypto/ballot/nullifier_interop_test.go`（Go 侧断言向量，并真的用这组值出一份证明验过）与 `web/src/lib/mimc.test.ts` / `web/src/lib/nullifier.test.ts`（TS 侧断言同一组值）。**改任一侧的哈希、轮常量或域运算，都要重新生成并同步这几处。**
+22. **浏览器端的盲签名 client 侧必须与 CIRCL 逐字节一致。** `web/src/lib/blind-rsa.ts` 实现 RFC 9474 的 `Prepare` / `Blind` / `Finalize` 与 EMSA-PSS 编码，服务端用 CIRCL `blindsign/blindrsa`（变体 `SHA384PSSDeterministic`）。两侧对同一条消息盲化出的消息必须一模一样，否则解出来的签名验不过 —— **而且不会报错**，只是验签失败。防线是 `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧用 CIRCL 真库，固定密钥 + 固定盐 + 固定盲化因子）与 `web/src/lib/blind-rsa.test.ts`。
+    - 关键事实：**client 侧只需要签发方的 RSA 公钥**（`n`、`e`），不需要私钥 —— 这是两段式盲签名能落地的前提。
+    - 改任一侧的 PSS 编码 / MGF1 / 哈希 / 盐长度，都要重新生成并同步这两处。
 
 ---
 
@@ -354,6 +357,9 @@ go test ./tests/e2e/ -run TestAPI_ClientSideEncryption -v   # 客户端本地加
 # nullifier 派生的跨语言一致性（改了 SHA-256 / Keccak / MiMC 轮常量就会红）
 go test ./internal/infrastructure/crypto/ballot/ -run 'TestKAT_Nullifier|TestKAT_Mimc|TestKAT_BrowserNullifier' -v
 
+# 盲签名 client 侧的跨语言一致性（改了 PSS 编码 / MGF1 / SHA-384 就会红）
+go test ./internal/infrastructure/crypto/ -run TestKAT_BlindRsa -v
+
 # 密钥生成（默认不覆盖已有文件；-force 才覆盖）
 go run ./cmd/keygen -dir ./keys
 go run ./cmd/keygen -dir ./keys -force
@@ -364,6 +370,7 @@ pnpm --dir web run test
 pnpm --dir web run test -- src/lib/nullifier.test.ts   # 只跑 nullifier 单测
 pnpm --dir web run test -- src/lib/ballot-cipher.test.ts   # 客户端加密（含跨语言向量）
 pnpm --dir web run test -- src/lib/mimc.test.ts   # MiMC（含跨语言向量）
+pnpm --dir web run test -- src/lib/blind-rsa.test.ts   # 盲签名 client 侧（含跨语言向量）
 pnpm --dir web run lint
 pnpm --dir web exec tsc --noEmit
 pnpm --dir web run build

@@ -435,6 +435,16 @@ web/                        # Vue 3 前端门户
 - **凭证签发不是真正的盲签名。** `kryptology_credential_issuer.go` 里
   `Prepare → Blind → BlindSign → Finalize` 全在服务端进程内完成，服务端全程持有
   被签消息 —— 等同于普通签名，签发方看得见签的是什么。
+- **浏览器端的盲签名 client 侧已经就绪**（`web/src/lib/blind-rsa.ts` + `sha384.ts`）：
+  RFC 9474 RSABSSA-PSS-Deterministic 的 `Prepare` / `Blind` / `Finalize`，
+  以及 EMSA-PSS 编码、MGF1、SHA-384。与服务端 CIRCL **逐字节一致**，由
+  `internal/infrastructure/crypto/blind_rsa_interop_test.go`（Go 侧用 CIRCL 真库）
+  与 `web/src/lib/blind-rsa.test.ts`（TS 侧）共同锁定。
+  - 关键事实：CIRCL 的 client 侧**只需要签发方的 RSA 公钥**（`n`、`e`），
+    不需要私钥 —— 因此客户端可以自己盲化，服务端那一侧只剩
+    `Signer.BlindSign(blindedMessage)`，也就是「签发方只见盲化消息」。
+  - **还没做的**：两段式协议本身（预留槽位 → 盲签名 → attest 验签）与门户接线。
+    在那之前，门户仍走一次性的 `POST /credentials/claim`（服务端代签）。
 
 > 补齐上述链路的顺序与工作量评估见 [`docs/roadmap.md`](./roadmap.md)（产品路线图）。
 
@@ -558,6 +568,9 @@ web/                        # Vue 3 前端门户
   - **nullifier 派生的跨语言测试**：`internal/infrastructure/crypto/ballot/nullifier_interop_test.go`
     与 `web/src/lib/mimc.test.ts` / `web/src/lib/nullifier.test.ts` 共用一组向量
     （提案域元素、nullifier、MiMC 轮常量）；Go 侧另有测试用这组值真的出证明并验过
+  - **盲签名 client 侧的跨语言测试**：`internal/infrastructure/crypto/blind_rsa_interop_test.go`
+    与 `web/src/lib/blind-rsa.test.ts` 共用一组向量（固定密钥 + 固定盐 + 固定盲化因子）——
+    浏览器端盲化出的消息与 CIRCL 逐字节一致，解盲出的签名也一样
   - `cmd/keygen` 单元测试
   - `tests/integration` 集成测试
   - `tests/e2e` 端到端流程测试（含「客户端本地加密 → 落库只有密文 → 计票还原」，
@@ -580,6 +593,8 @@ web/                        # Vue 3 前端门户
   只有密文。**但门户还没接上**（缺客户端 prover），debug 模式的 `ballot-draft` 仍是
   「服务端知道选项」的那条路径 —— 能力 A 因此尚未完全闭合。
 - **凭证签发仍不是盲签名。** 盲化在服务端进程内完成，签发方看得见被签内容（见 §6.9）。
+  浏览器端的盲签名 client 侧已经实现并与 CIRCL 对齐，但**两段式协议与门户接线
+  还没做** —— 门户仍走一次性的服务端代签路径。
 - **nullifier 的 MiMC 绑定：浏览器端已实现，门户还没用上。** 浏览器端
   （`web/src/lib/nullifier.ts` 的 `deriveNullifier`）已能与 Go 侧逐位一致地算出
   电路认可的 nullifier，KAT 也把它钉死了（见 §6.4）。但门户

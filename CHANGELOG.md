@@ -61,6 +61,16 @@ v0.1.0 发布之后的变更。下一个版本是 **v0.2.0**（路线图目标�
 - **CLI 新增 `credential-claim` 命令**：匿名领取一张凭证（与门户的「领取凭证」同一个
   公开端点，**不需要 admin token**）。此前只有门户能领，脚本化领取用不了 —— 这是
   路线图 T9 / T22 里记下的缺口。请求体只有本地生成的公钥，没有任何身份信息。
+- **浏览器端的盲签名 client 侧已就绪**（新模块 `web/src/lib/blind-rsa.ts` + `sha384.ts`）：
+  RFC 9474 RSABSSA-PSS-Deterministic 的 `Prepare` / `Blind` / `Finalize`，以及
+  EMSA-PSS 编码、MGF1、SHA-384 —— 纯 TypeScript 实现，不依赖任何外部密码学包。
+  与服务端 CIRCL `blindsign/blindrsa` **逐字节一致**（跨语言向量由
+  `internal/infrastructure/crypto/blind_rsa_interop_test.go` 与
+  `web/src/lib/blind-rsa.test.ts` 共同锁定）。
+  - 关键事实：CIRCL 的 client 侧**只需要签发方的 RSA 公钥**，不需要私钥 ——
+    这正是「两段式盲签名」能落地的前提。
+  - **还没做**：两段式协议本身（预留槽位 → 盲签名 → attest 验签）与门户接线。
+    在那之前门户仍走一次性的服务端代签路径，能力 F 尚未闭合。
 - `GET /healthz` 响应新增 `debug` 布尔字段（由 `server.mode` 推导）。
 - **服务现在能用 `CONFIG_FILE` 显式指定配置文件**：`CONFIG_FILE=./configs/config.production.yaml`
   启动即可加载生产配置 —— 那个文件此前**永远不会被自动加载**（viper 只找 `config.yaml`），
