@@ -72,6 +72,7 @@ func TestExposedSurface_HasNoVoteContent(t *testing.T) {
 	m.RecordCredentialAttest(ResultAccepted)
 	m.RecordEligibilityCheck(ResultInvalid)
 	m.RecordTallyResultPublished()
+	m.RecordRateLimited("/api/v1/proposals/:proposal_id/votes")
 
 	allowedLabels := map[string]bool{"method": true,
 		"route":  true,
@@ -141,6 +142,32 @@ func TestRecordCredentialAndEligibilityCounters(t *testing.T) {
 	assert.Equal(t, 1.0, testutil.ToFloat64(m.eligibilityChecks.WithLabelValues(ResultValid)))
 	assert.Equal(t, 1.0, testutil.ToFloat64(m.eligibilityChecks.WithLabelValues(ResultInvalid)))
 	assert.Equal(t, 1.0, testutil.ToFloat64(m.tallyResultsPublished))
+}
+
+// TestRecordRateLimited 验证限流计数按路由分桶。
+func TestRecordRateLimited(t *testing.T) {
+	t.Parallel()
+
+	m := New()
+
+	m.RecordRateLimited("/api/v1/proposals/:proposal_id/votes")
+	m.RecordRateLimited("/api/v1/proposals/:proposal_id/votes")
+	m.RecordRateLimited("/api/v1/proposals")
+
+	assert.Equal(t, 2.0, testutil.ToFloat64(m.rateLimited.WithLabelValues("/api/v1/proposals/:proposal_id/votes")))
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.rateLimited.WithLabelValues("/api/v1/proposals")))
+}
+
+// TestRecordRateLimited_NormalizesEmptyRoute 钉住空路由标签被归一化 ——
+// 空标签会让指标多出一组无名序列，反而更难读。
+func TestRecordRateLimited_NormalizesEmptyRoute(t *testing.T) {
+	t.Parallel()
+
+	m := New()
+
+	m.RecordRateLimited("")
+
+	assert.Equal(t, 1.0, testutil.ToFloat64(m.rateLimited.WithLabelValues("unmatched")))
 }
 
 func TestObserveHTTPRequest(t *testing.T) {

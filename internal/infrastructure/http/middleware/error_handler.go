@@ -38,6 +38,13 @@ func ErrorHandler(logger *zap.Logger) gin.HandlerFunc {
 	}
 }
 
+// RateLimitedCode 是限流触发的机器可读错误码。
+//
+// 它**不在** MapError 里：那张表映射的是领域错误（usecase.Err*），
+// 而限流是传输层的保护措施 —— 它由限流中间件自己写 429 响应。
+// 但文案仍然走 publicErrorMessage，客户端看到的是同一套错误体。
+const RateLimitedCode = "RATE_LIMITED"
+
 // MapError 把领域错误映射成 HTTP 状态码与机器可读的错误码。
 //
 // 它是**唯一**的错误码口径：响应体里的 code、指标里的 code 标签都出自这里。
@@ -86,6 +93,9 @@ func MapError(err error) (int, string) {
 func publicErrorMessage(err error, code string) string {
 	switch code {
 	case "INVALID_REQUEST":
+		if err == nil {
+			return "invalid request"
+		}
 		return err.Error()
 	case "DOUBLE_VOTING":
 		return "double voting"
@@ -112,6 +122,8 @@ func publicErrorMessage(err error, code string) string {
 		return "this eligibility has already been used"
 	case "ELIGIBILITY_NOT_ENABLED":
 		return "eligibility verification is not enabled on this server"
+	case RateLimitedCode:
+		return "rate limit exceeded"
 	case "NOT_FOUND":
 		return "resource not found"
 	default:

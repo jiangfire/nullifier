@@ -11,6 +11,7 @@ import (
 	"anonvote/internal/domain/entity"
 	"anonvote/internal/infrastructure/http/middleware"
 	"anonvote/internal/infrastructure/metrics"
+	"anonvote/internal/infrastructure/ratelimit"
 	"anonvote/internal/usecase"
 
 	"github.com/gin-gonic/gin"
@@ -26,7 +27,56 @@ type Handler struct {
 	tallyUC         *usecase.TallyUseCase
 	validate        *validator.Validate
 	metrics         *metrics.Metrics
+	rateLimits      *RateLimits
 	logger          *zap.Logger
+}
+
+// RateLimits 是各路由组的限流器。
+//
+// 三个字段都可以是 nil —— 那表示该组不限流（开发模式、单元测试）。
+type RateLimits struct {
+	// Credentials 覆盖凭证领取链路。
+	Credentials *ratelimit.Limiter
+	// Votes 覆盖投票提交端点。
+	Votes *ratelimit.Limiter
+	// Read 覆盖只读端点。
+	Read *ratelimit.Limiter
+}
+
+// WithRateLimits 接入限流器，返回自身便于链式调用。
+func (h *Handler) WithRateLimits(l *RateLimits) *Handler {
+	if l != nil {
+		h.rateLimits = l
+	}
+	return h
+}
+
+// RateLimits 返回 handler 持有的限流器集合。
+//
+// server 用它启动空闲桶的清理 —— 限流器的状态是常驻内存的，
+// 攻击者轮换来源地址就能把它撑大。
+func (h *Handler) RateLimits() *RateLimits {
+	return h.rateLimits
+}
+
+// StartCleanup 启动各限流器的空闲桶清理，直到 stop 通道被关闭。
+func (l *RateLimits) StartCleanup(stop <-chan struct{}) {
+	if l == nil {
+		return
+	}
+	for _, limiter := range []*ratelimit.Limiter{l.Credentials, l.Votes, l.Read} {
+		if limiter != nil {
+			go limiter.StartCleanup(stop)
+		}
+	}
+}
+
+// limits 返回限流器集合；没配置时返回空集合（各组都是 nil = 放行）。
+func (h *Handler) limits() RateLimits {
+	if h.rateLimits == nil {
+		return RateLimits{}
+	}
+	return *h.rateLimits
 }
 
 // WithMetrics 接入指标实例，返回自身便于链式调用。
@@ -82,14 +132,24 @@ func NewHandlerWithTally(
 }
 
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
+	// 限流按**路由组**挂：领取 / 投票 / 只读三种流量的攻击面差很多，
+	// 用同一套额度要么挡不住投票端点，要么把只读端点也一起拖死。
+	//
+	// 额度是配置项（rate_limit.*），默认偏宽松 —— 宁可放过一次攻击，
+	// 也不要在真实投票窗口里把投票人挡在门外。推导见 docs/t25-ratelimit-design.md。
+	limits := h.limits()
+	credentials := middleware.RateLimit(limits.Credentials, "credentials", h.metrics)
+	votes := middleware.RateLimit(limits.Votes, "votes", h.metrics)
+	read := middleware.RateLimit(limits.Read, "read", h.metrics)
+
 	// 投票提交与其他提案级端点同形：提案 ID 走路径，不走请求体 ——
 	// 同一个提案 ID 只有**一个**来源，客户端不可能把两个提案搞混。
 	// 这条路径在 v0.3.0 被冻结（见 docs/api-contract-v1.md）。
-	r.POST("/proposals/:proposal_id/votes", h.SubmitVote)
-	r.GET("/proposals", h.ListProposals)
-	r.GET("/proposals/open", h.ListOpenProposals)
-	r.POST("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
-	r.GET("/proposals/:proposal_id/election-key", h.GetElectionKey)
+	r.POST("/proposals/:proposal_id/votes", votes, h.SubmitVote)
+	r.GET("/proposals", read, h.ListProposals)
+	r.GET("/proposals/open", read, h.ListOpenProposals)
+	r.POST("/proposals/:proposal_id/vote-status", read, h.GetVoteStatus)
+	r.GET("/proposals/:proposal_id/election-key", read, h.GetElectionKey)
 	// 匿名领取凭证：真两段式盲签名，三步走。
 	//   ① claim      —— 预留一个池槽位，拿到 user_id 与签发方公钥（不签名）
 	//   ② blind-sign —— 服务端对**盲化后**的消息做盲签名
@@ -98,12 +158,12 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	//
 	// 开启资格校验时，claim 之前多一步：先拿一次性的领取挑战（④ eligibility-
 	// challenge），把资格证明钉在本次会话上。
-	r.POST("/proposals/:proposal_id/credentials/eligibility-challenge", h.IssueEligibilityChallenge)
-	r.POST("/proposals/:proposal_id/credentials/claim", h.ReserveCredential)
-	r.POST("/proposals/:proposal_id/credentials/blind-sign", h.BlindSignCredential)
-	r.POST("/proposals/:proposal_id/credentials/attest", h.AttestCredential)
-	r.GET("/proposals/:proposal_id/results", h.GetResult)
-	r.GET("/proposals/:proposal_id/audit-anchors", h.ListAuditAnchors)
+	r.POST("/proposals/:proposal_id/credentials/eligibility-challenge", credentials, h.IssueEligibilityChallenge)
+	r.POST("/proposals/:proposal_id/credentials/claim", credentials, h.ReserveCredential)
+	r.POST("/proposals/:proposal_id/credentials/blind-sign", credentials, h.BlindSignCredential)
+	r.POST("/proposals/:proposal_id/credentials/attest", credentials, h.AttestCredential)
+	r.GET("/proposals/:proposal_id/results", read, h.GetResult)
+	r.GET("/proposals/:proposal_id/audit-anchors", read, h.ListAuditAnchors)
 }
 
 // submitVotePayload 是投票提交的请求体。

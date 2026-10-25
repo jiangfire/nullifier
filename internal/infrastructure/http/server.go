@@ -11,9 +11,10 @@ import (
 )
 
 type Server struct {
-	engine *gin.Engine
-	addr   string
-	logger *zap.Logger
+	engine  *gin.Engine
+	addr    string
+	handler *Handler
+	logger  *zap.Logger
 }
 
 func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server {
@@ -32,6 +33,17 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 	gin.DefaultErrorWriter = io.Discard
 	gin.DebugPrintRouteFunc = func(string, string, string, int) {}
 	engine := gin.New()
+	// 可信代理。
+	//
+	// gin 的默认行为是**信任所有代理**（0.0.0.0/0）—— 那会让 c.ClientIP()
+	// 直接取 X-Forwarded-For 的第一个值，**完全可伪造**：限流的计数键
+	// 一换就绕过去，日志里的来源地址也失真。
+	//
+	// 不配（默认空）= 不信任任何代理：客户端 IP 取连接来源地址。
+	// 配错的网段在配置层就会被拒绝（启动失败），这里只是兜底。
+	if err := engine.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		logger.Error("set trusted proxies failed", zap.Error(err))
+	}
 	engine.Use(middleware.CORS(cfg.CORSAllowedOrigins))
 	// 指标中间件必须排在错误处理器**之前**：gin 的中间件先进后出，越早注册的
 	// 回程越晚 —— 这样它拿得到最终状态码。
@@ -78,21 +90,38 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 	admin.POST("/proposals/:proposal_id/results/publish", handler.PublishResult)
 
 	return &Server{
-		engine: engine,
-		addr:   cfg.ServerAddress,
-		logger: logger,
+		engine:  engine,
+		addr:    cfg.ServerAddress,
+		handler: handler,
+		logger:  logger,
 	}
 }
 
 func (s *Server) Run() error {
 	s.logger.Info("http server starting", zap.String("addr", s.addr))
+	stop := s.startCleanup()
+	defer close(stop)
 	return s.engine.Run(s.addr)
 }
 
 // Serve 在已有的 listener 上提供服务。生产路径走 Run；测试用临时端口的
 // listener 驱动一次真实的监听、请求与关停，而不用占用固定端口。
 func (s *Server) Serve(l net.Listener) error {
+	stop := s.startCleanup()
+	defer close(stop)
 	return s.engine.RunListener(l)
+}
+
+// startCleanup 启动限流器的空闲桶清理，返回停止通道。
+//
+// 限流器的状态是**常驻内存**的，来源地址一多就会撑大 —— 攻击者轮换来源
+// 就能白嫖内存。空闲的桶必须定期清掉。
+func (s *Server) startCleanup() chan struct{} {
+	stop := make(chan struct{})
+	if s.handler != nil {
+		s.handler.RateLimits().StartCleanup(stop)
+	}
+	return stop
 }
 
 func (s *Server) Engine() *gin.Engine {

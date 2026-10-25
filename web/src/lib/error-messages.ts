@@ -21,10 +21,17 @@ export type PortalErrorCode =
   | 'INVALID_ELIGIBILITY_PROOF'
   | 'ELIGIBILITY_ALREADY_USED'
   | 'ELIGIBILITY_NOT_ENABLED'
+  | 'CREDENTIAL_POOL_EMPTY'
+  | 'RATE_LIMITED'
   | 'INTERNAL_ERROR';
 
-/** 与具体操作无关的失败：直接用错误码的通用说法。 */
-const CODE_MESSAGES: Record<PortalErrorCode, string> = {
+/**
+ * 与具体操作无关的失败：直接用错误码的通用说法。
+ *
+ * 导出是为了让测试能钉住这张表 —— 错误码是**跨语言契约**的一部分，
+ * 服务端加一个码而门户不认识，用户看到的就是一句英文原文。
+ */
+export const CODE_MESSAGES: Record<PortalErrorCode, string> = {
   INVALID_REQUEST: '提交的内容不符合要求',
   DOUBLE_VOTING: '这张凭证已经投过票，不能重复提交',
   CREDENTIAL_EXISTS: '该用户已领取过本提案的凭证',
@@ -38,6 +45,8 @@ const CODE_MESSAGES: Record<PortalErrorCode, string> = {
   INVALID_ELIGIBILITY_PROOF: '资格证明没通过校验，请确认资格文件与名单、提案是否对应',
   ELIGIBILITY_ALREADY_USED: '这份资格已经领过票了 —— 一人一票',
   ELIGIBILITY_NOT_ENABLED: '服务端没有开启资格校验（一人一票）',
+  CREDENTIAL_POOL_EMPTY: '本提案的凭证池已经领完了',
+  RATE_LIMITED: '请求太频繁了，请稍等片刻再试',
   INTERNAL_ERROR: '服务端出错，请查看后端日志',
 };
 

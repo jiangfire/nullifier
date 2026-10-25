@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -19,18 +20,56 @@ import (
 // 靠改名来切换生产配置太容易出错，所以给一条明确的路径。
 const ConfigFileEnvVar = "CONFIG_FILE"
 
+// RateLimitGroupConfig 是一组端点的限流额度。
+type RateLimitGroupConfig struct {
+	// RPS 是每秒允许的请求数（按来源计）。
+	RPS int
+	// Burst 是允许的突发请求数。
+	Burst int
+}
+
+// RateLimitConfig 是限流配置。
+//
+// 额度按**路由组**分档：凭证领取、投票提交、只读三种流量的攻击面差很多，
+// 用同一套额度要么挡不住投票端点，要么把只读端点也一起拖死。
+type RateLimitConfig struct {
+	// Enabled 决定限流是否生效。
+	//
+	// release 模式下它是**硬要求**：默认开启，显式关掉会让服务启动失败。
+	Enabled bool
+	// Credentials 覆盖凭证领取链路（challenge / claim / blind-sign / attest）。
+	Credentials RateLimitGroupConfig
+	// Votes 覆盖投票提交端点 —— 每张票都要验一次 proof，最贵的一组。
+	Votes RateLimitGroupConfig
+	// Read 覆盖只读端点。
+	Read RateLimitGroupConfig
+}
+
+// Config 持有服务的全部运行期配置。
 type Config struct {
 	ServerAddress string
 	GinMode       string
 	// DebugMode 表示服务运行在开发联调模式。它只作为运行状态暴露
 	// （`GET /healthz` 的 `debug` 字段）：服务端没有任何「替用户选票」的
 	// 调试能力，开发模式与正式模式的行为完全一致。
-	DebugMode                   bool
-	CORSAllowedOrigins          []string
-	AdminBearerToken            string
-	VerifyingKeyPath            string
-	CredentialIssuerKeyPath     string
+	DebugMode          bool
+	CORSAllowedOrigins []string
+	// TrustedProxies 是可信反向代理的网段（CIDR）。
+	//
+	// **默认空 = 不信任任何代理**：客户端 IP 取连接来源地址，
+	// 伪造 X-Forwarded-For 无效。部署在反向代理后面时必须显式配置 ——
+	// 否则所有请求会被算到代理的同一个 IP 上（fail-closed：偏严而不是偏松）。
+	//
+	// 它的另一个作用：gin 的默认行为是**信任所有代理**，那会让
+	// `c.ClientIP()` 完全可伪造 —— 限流与日志里的来源地址都会失真。
+	TrustedProxies          []string
+	AdminBearerToken        string
+	VerifyingKeyPath        string
+	CredentialIssuerKeyPath string
+	// CredentialIssuerRotateAfter 是签发方密钥的轮换周期。
 	CredentialIssuerRotateAfter time.Duration
+	// RateLimit 是限流配置。
+	RateLimit RateLimitConfig
 	// EligibilityRoot 是资格名单的 Merkle 树根（十六进制域元素）。
 	//
 	// 服务端只认这个根：它能验证「这个人的资格在树里」，却无法把资格对应到
@@ -96,6 +135,18 @@ func load(forMigration bool) (*Config, error) {
 	v.SetDefault("crypto.issuer_rotate_days", 90)
 	v.SetDefault("crypto.eligibility_root", "")
 	v.SetDefault("crypto.eligibility_vk_path", "")
+
+	// 限流额度。`rate_limit.enabled` **故意不设默认值** ——
+	// 它要能区分「没配」（按模式推导）与「显式配了 false」（release 下是错误）。
+	//
+	// 默认额度偏宽松：宁可放过一次攻击，也不要在真实投票窗口里把投票人挡在门外。
+	// 真实部署规模决定最终值（推导过程见 docs/t25-ratelimit-design.md）。
+	v.SetDefault("rate_limit.credentials.rps", 10)
+	v.SetDefault("rate_limit.credentials.burst", 40)
+	v.SetDefault("rate_limit.votes.rps", 10)
+	v.SetDefault("rate_limit.votes.burst", 40)
+	v.SetDefault("rate_limit.read.rps", 50)
+	v.SetDefault("rate_limit.read.burst", 100)
 
 	if err := v.ReadInConfig(); err != nil {
 		var notFound viper.ConfigFileNotFoundError
@@ -167,6 +218,33 @@ func load(forMigration bool) (*Config, error) {
 		}
 		cfg.AutoMigrate = parsed
 	}
+
+	// 限流开关。没配就按模式推导：release 默认开，debug 默认关。
+	// 显式配成 false 要记下来 —— release 模式下那是要被拒绝的。
+	rateLimitEnabled := IsReleaseMode(ginMode)
+	rateLimitDisabled := false
+	if raw := strings.TrimSpace(v.GetString("rate_limit.enabled")); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("rate_limit.enabled must be a boolean: %w", err)
+		}
+		rateLimitEnabled = parsed
+		rateLimitDisabled = !parsed
+	}
+	rateLimit := RateLimitConfig{
+		Enabled:     rateLimitEnabled,
+		Credentials: loadRateLimitGroup(v, "credentials"),
+		Votes:       loadRateLimitGroup(v, "votes"),
+		Read:        loadRateLimitGroup(v, "read"),
+	}
+	if err := validateRateLimit(rateLimit); err != nil {
+		return nil, err
+	}
+	cfg.RateLimit = rateLimit
+	cfg.TrustedProxies = v.GetStringSlice("server.trusted_proxies")
+	if err := validateTrustedProxies(cfg.TrustedProxies); err != nil {
+		return nil, err
+	}
 	if !forMigration && IsReleaseMode(cfg.GinMode) {
 		if strings.TrimSpace(cfg.VerifyingKeyPath) == "" {
 			return nil, fmt.Errorf("crypto.vk_path is required when server.mode=%q", cfg.GinMode)
@@ -187,6 +265,18 @@ func load(forMigration bool) (*Config, error) {
 				cfg.GinMode,
 			)
 		}
+		// 限流是 release 模式的硬要求：公开端点上最贵的操作是投票
+		// （每张票都要验一次 Groth16 proof），不设上限时一个脚本就能把
+		// 验签算力打满。默认就是开的 —— 显式关掉则启动失败。
+		//
+		// 用「默认开 + 显式关才失败」而不是「不配就失败」：漏配的后果是
+		// 「没限流」，而硬失败会让所有存量 release 部署升级即宕机。
+		if rateLimitDisabled {
+			return nil, fmt.Errorf(
+				"rate_limit.enabled cannot be disabled when server.mode=%q",
+				cfg.GinMode,
+			)
+		}
 	}
 
 	// 名单根与验证密钥必须成对出现：只配根等于「不校验」，只配密钥则无从校验。
@@ -200,7 +290,6 @@ func load(forMigration bool) (*Config, error) {
 }
 
 // IsReleaseMode 判断运行模式是否属于生产模式。
-//
 // 生产模式要求显式配置密钥与管理员令牌，不自动改表，也不开调试端点。
 func IsReleaseMode(mode string) bool {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
@@ -209,6 +298,60 @@ func IsReleaseMode(mode string) bool {
 	default:
 		return false
 	}
+}
+
+// loadRateLimitGroup 读一组限流额度。
+func loadRateLimitGroup(v *viper.Viper, group string) RateLimitGroupConfig {
+	return RateLimitGroupConfig{
+		RPS:   v.GetInt("rate_limit." + group + ".rps"),
+		Burst: v.GetInt("rate_limit." + group + ".burst"),
+	}
+}
+
+// validateTrustedProxies 校验可信代理网段。
+//
+// 配错网段的后果是「限流按错误的来源计数」—— 与其带着一个假象中的限流
+// 上线，不如启动时就说清楚。
+func validateTrustedProxies(proxies []string) error {
+	for _, p := range proxies {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(trimmed); err != nil {
+			return fmt.Errorf("server.trusted_proxies contains an invalid CIDR %q: %w", trimmed, err)
+		}
+	}
+	return nil
+}
+
+// validateRateLimit 校验限流额度。
+//
+// 配错比不配更危险：额度为 0 意味着「全拒」（服务直接不可用），
+// 负数同样没有意义 —— 所以一律启动失败，不给「静默兜底」的机会。
+//
+// 限流没启用时不校验：那时这些数字根本不参与决策。
+func validateRateLimit(cfg RateLimitConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	groups := []struct {
+		name  string
+		group RateLimitGroupConfig
+	}{
+		{"credentials", cfg.Credentials},
+		{"votes", cfg.Votes},
+		{"read", cfg.Read},
+	}
+	for _, g := range groups {
+		if g.group.RPS <= 0 {
+			return fmt.Errorf("rate_limit.%s.rps must be positive, got %d", g.name, g.group.RPS)
+		}
+		if g.group.Burst <= 0 {
+			return fmt.Errorf("rate_limit.%s.burst must be positive, got %d", g.name, g.group.Burst)
+		}
+	}
+	return nil
 }
 
 // isDebugMode 判断服务是否运行在开发联调模式。

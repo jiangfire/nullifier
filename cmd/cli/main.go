@@ -49,6 +49,10 @@ type httpError struct {
 }
 
 func (e *httpError) Error() string {
+	// 限流是唯一一种「等一会儿就好」的错误 —— 别让它看起来像服务端坏了。
+	if e.Code == "RATE_LIMITED" {
+		return fmt.Sprintf("请求过于频繁，服务端要求稍等再试（%s / %s）", e.Message, e.Code)
+	}
 	if e.Code != "" {
 		return fmt.Sprintf("%s (%s)", e.Message, e.Code)
 	}

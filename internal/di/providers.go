@@ -10,10 +10,12 @@ import (
 	httpapi "anonvote/internal/infrastructure/http"
 	"anonvote/internal/infrastructure/metrics"
 	"anonvote/internal/infrastructure/persistence"
+	"anonvote/internal/infrastructure/ratelimit"
 	"anonvote/internal/usecase"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"golang.org/x/time/rate"
 	"gorm.io/gorm"
 )
 
@@ -220,6 +222,30 @@ func NewTallyUseCase(
 	)
 }
 
+// NewRateLimits 按配置造出各路由组的限流器。
+//
+// 限流没启用时返回 nil —— handler 会把它当成「不限流」处理
+// （开发模式与单元测试是正常路径）。
+func NewRateLimits(cfg *config.Config) *httpapi.RateLimits {
+	if cfg == nil || !cfg.RateLimit.Enabled {
+		return nil
+	}
+	return &httpapi.RateLimits{
+		Credentials: ratelimit.New(ratelimit.Config{
+			Limit: rate.Limit(cfg.RateLimit.Credentials.RPS),
+			Burst: cfg.RateLimit.Credentials.Burst,
+		}),
+		Votes: ratelimit.New(ratelimit.Config{
+			Limit: rate.Limit(cfg.RateLimit.Votes.RPS),
+			Burst: cfg.RateLimit.Votes.Burst,
+		}),
+		Read: ratelimit.New(ratelimit.Config{
+			Limit: rate.Limit(cfg.RateLimit.Read.RPS),
+			Burst: cfg.RateLimit.Read.Burst,
+		}),
+	}
+}
+
 func NewHTTPHandler(
 	votingUC *usecase.VotingUseCase,
 	registerUC *usecase.RegisterUseCase,
@@ -227,6 +253,7 @@ func NewHTTPHandler(
 	participationUC *usecase.ParticipationUseCase,
 	tallyUC *usecase.TallyUseCase,
 	m *metrics.Metrics,
+	rateLimits *httpapi.RateLimits,
 	logger *zap.Logger,
 ) *httpapi.Handler {
 	return httpapi.NewHandlerWithTally(
@@ -236,7 +263,7 @@ func NewHTTPHandler(
 		participationUC,
 		tallyUC,
 		logger,
-	).WithMetrics(m)
+	).WithMetrics(m).WithRateLimits(rateLimits)
 }
 
 func NewHTTPServer(cfg *config.Config, handler *httpapi.Handler, logger *zap.Logger) *httpapi.Server {

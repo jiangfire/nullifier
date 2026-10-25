@@ -52,6 +52,8 @@ type Metrics struct {
 
 	eligibilityChecks *prometheus.CounterVec
 
+	rateLimited *prometheus.CounterVec
+
 	tallyResultsPublished prometheus.Counter
 }
 
@@ -119,6 +121,14 @@ func New() *Metrics {
 		Help:      "发布出去的计票结果数。",
 	})
 
+	// 限流计数。route 用**路由模板**（/api/v1/proposals/:proposal_id/votes），
+	// 不是原始路径 —— 否则每个提案 ID 都会变成一个标签值，标签集会爆。
+	m.rateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "rate_limited_total",
+		Help:      "被限流挡下的请求数，按路由统计。",
+	}, []string{"route"})
+
 	m.registry.MustRegister(
 		m.httpRequests,
 		m.httpDuration,
@@ -128,6 +138,7 @@ func New() *Metrics {
 		m.credentialBlindSigns,
 		m.credentialAttests,
 		m.eligibilityChecks,
+		m.rateLimited,
 		m.tallyResultsPublished,
 	)
 
@@ -213,6 +224,25 @@ func (m *Metrics) RecordTallyResultPublished() {
 		return
 	}
 	m.tallyResultsPublished.Inc()
+}
+
+// RecordRateLimited 记录一次被限流挡下的请求。
+//
+// route 必须是**路由模板**而不是原始路径：每个提案 ID 都变成一个标签值的话，
+// 标签集会爆，Prometheus 侧也会变成一个查询不动的东西。
+func (m *Metrics) RecordRateLimited(route string) {
+	if m == nil {
+		return
+	}
+	m.rateLimited.WithLabelValues(normalizeRoute(route)).Inc()
+}
+
+// normalizeRoute 保证 route 标签永远非空 —— 空标签会让指标多出一组无名序列。
+func normalizeRoute(route string) string {
+	if route == "" {
+		return "unmatched"
+	}
+	return route
 }
 
 // statusLabel 把状态码转成标签值。

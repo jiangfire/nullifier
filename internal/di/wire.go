@@ -28,6 +28,7 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		NewThresholdCrypto,
 		NewMerkleRootBuilder,
 		NewMetrics,
+		NewRateLimits,
 		NewCredentialIssuer,
 		NewEligibilityService,
 		NewVotingUseCase,
