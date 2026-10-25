@@ -116,6 +116,21 @@ func readMembers(path string) ([]string, error) {
 
 // generateList 生成树根与成员包并落盘。
 func generateList(memberIDs []string, outDir string, force bool) error {
+	// 撞名预检必须在**写任何文件之前**做完。
+	//
+	// 成员包的文件名由成员标识归一化而来（sanitizeFileName），而归一化会把
+	// 字母数字与 `-_.` 之外的字符一律换成 `_`。于是「张三-01」与「李四-01」
+	// 会归一成同一个文件名 —— 两个不同成员共用一个包名，后写的那个会把
+	// 前一个**静默覆盖**（带 -force 时）或让整次生成半途失败（不带时）。
+	// 后者更糟：root.json 已经落盘、成员包只写了一半，root 声称的成员数与
+	// 实际包数对不上；运营方若看到报错就加 -force 重跑，缺的包就永远消失了。
+	//
+	// 「谁拿到谁就能领这一票」—— 张三-01 若拿到李四-01 的包，两个人就能领
+	// 同一票，一人一票当场失效。所以这里**宁可拒绝生成，也不产出无法区分的包**。
+	if err := checkMemberFileNames(memberIDs); err != nil {
+		return err
+	}
+
 	secrets := make([][]byte, len(memberIDs))
 	leaves := make([]fr.Element, len(memberIDs))
 	for i := range memberIDs {
@@ -151,10 +166,14 @@ func generateList(memberIDs []string, outDir string, force bool) error {
 		Depth: eligibility.TreeDepth,
 		Count: len(memberIDs),
 	}
-	if err := writeJSON(filepath.Join(outDir, "root.json"), list, 0o644, force); err != nil {
-		return err
-	}
 
+	// 成员包先写，root.json **最后**写。
+	//
+	// root.json 是要配到服务端的那一份 —— 它落盘就意味着「这份名单可以上线」。
+	// 如果先写 root，写成员包时中途失败，目录里就留下一份 root 声称 N 人、
+	// 实际只有 N-1 个包的名单；运营方把 root 配上去，服务端就会按一个不完整的
+	// 名单工作。反过来（包先写、root 最后）失败时目录里没有 root，
+	// 也就是「这份名单还没准备好」，不会误上线。
 	for i, memberID := range memberIDs {
 		path := make([]string, len(paths[i]))
 		for j := range paths[i] {
@@ -169,10 +188,53 @@ func generateList(memberIDs []string, outDir string, force bool) error {
 			Root:     rootHex,
 			Depth:    eligibility.TreeDepth,
 		}
-		name := fmt.Sprintf("eligibility-%s.json", sanitizeFileName(memberID))
+		name := memberFileName(memberID)
 		if err := writeJSON(filepath.Join(outDir, name), pack, 0o600, force); err != nil {
 			return err
 		}
+	}
+
+	if err := writeJSON(filepath.Join(outDir, "root.json"), list, 0o644, force); err != nil {
+		return err
+	}
+	return nil
+}
+
+// memberFileName 是成员包的文件名。
+func memberFileName(memberID string) string {
+	return fmt.Sprintf("eligibility-%s.json", sanitizeFileName(memberID))
+}
+
+// checkMemberFileNames 检查有没有两个成员归一化后落到同一个文件名。
+//
+// 归一化规则见 sanitizeFileName：字母数字与 `-_.` 之外的字符一律换成 `_`。
+// 现实名单里中文标识很常见（「张三-01」「李四-01」），它们会归一成同一个名字 ——
+// 共用一个包名就等于有一个人会拿不到自己的包（或者拿到别人的）。
+// 这里在**写盘前**拒绝，并把撞名的成员标识与落到一起的文件名一起报出来，
+// 让运营方能直接改标识或改用别的分发方式。
+func checkMemberFileNames(memberIDs []string) error {
+	byName := map[string][]string{}
+	for _, memberID := range memberIDs {
+		name := memberFileName(memberID)
+		byName[name] = append(byName[name], memberID)
+	}
+	// 撞到的按文件名排序，报错信息才稳定。
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		ids := byName[name]
+		if len(ids) < 2 {
+			continue
+		}
+		return fmt.Errorf(
+			"成员标识 %s 归一化后都落到同一个文件 %s，无法生成可区分的资格包；"+
+				"请改用只含字母数字与 -_. 的标识（或在标识里加区分后缀）",
+			strings.Join(ids, "、"), name,
+		)
 	}
 	return nil
 }

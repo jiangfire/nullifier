@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"anonvote/internal/infrastructure/crypto/eligibility"
@@ -20,6 +21,71 @@ import (
 // 中间任何一步的字段编码对不上，**要等到真实投票时才暴露**（那时已经开票了）。
 // 所以这里把「工具产出的文件」当成接口来钉：文件名、JSON 字段、权限、
 // 成员数量、路径长度都必须与客户端/服务端期望的一致。
+// TestGenerateListRejectsCollidingFileNames 钉住「撞名必须拒绝」。
+//
+// 成员包的文件名由成员标识归一化而来，归一化会把字母数字与 `-_.` 之外的字符
+// 一律换成 `_`。于是「张三-01」与「李四-01」会落到同一个文件名 ——
+// 两个人共用一个包名，后写的把前一个静默覆盖（带 -force）或整次生成半途失败。
+//
+// 后者更危险：root.json 已经落盘、成员包只写了一半，root 声称的成员数与实际
+// 包数对不上；运营方看到报错就加 -force 重跑，缺的那个包就永远消失了 ——
+// 「谁拿到谁就能领这一票」，等于有一个人能领别人的票，一人一票当场失效。
+//
+// 所以工具必须在**写盘前**拒绝，并把撞名的成员标识报出来。
+func TestGenerateListRejectsCollidingFileNames(t *testing.T) {
+	dir := t.TempDir()
+	membersPath := filepath.Join(dir, "members.txt")
+	require.NoError(t, os.WriteFile(membersPath, []byte("张三-01\n李四-01\n"), 0o600))
+
+	outDir := filepath.Join(dir, "out")
+	require.Equal(t, 1, run([]string{"-members", membersPath, "-out", outDir}),
+		"两个成员归一化后撞名时必须拒绝生成")
+
+	// 报错信息要说清是「谁」撞了「谁」—— 运营方要靠它去改标识。
+	_, err := os.Stat(filepath.Join(outDir, "root.json"))
+	require.Error(t, err, "拒绝生成时不得留下 root.json：它是要配到服务端的，留下了就可能被误上线")
+
+	// 带 -force 也一样要拒绝 —— 那是「静默覆盖」那条路。
+	require.Equal(t, 1, run([]string{"-members", membersPath, "-out", outDir, "-force"}),
+		"带 -force 也不许静默覆盖：两个成员不能共用一个包")
+	entries, err := os.ReadDir(outDir)
+	if err == nil {
+		for _, entry := range entries {
+			require.NotEqual(t, "root.json", entry.Name(),
+				"拒绝生成时不得留下 root.json")
+		}
+	}
+}
+
+// TestGenerateListWritesOnePackagePerMember 钉住「包数与成员数一致」。
+//
+// 这是撞名那个缺陷最直接的观测口径：root.json 声称 N 名成员，目录里就应当
+// 有 N 个成员包。缺陷存在时，root 说 2 个、目录里只有 1 个。
+func TestGenerateListWritesOnePackagePerMember(t *testing.T) {
+	dir := t.TempDir()
+	membersPath := filepath.Join(dir, "members.txt")
+	require.NoError(t, os.WriteFile(membersPath, []byte("E-001\nE-002\nE-003\n"), 0o600))
+
+	outDir := filepath.Join(dir, "out")
+	require.Equal(t, 0, run([]string{"-members", membersPath, "-out", outDir}))
+
+	entries, err := os.ReadDir(outDir)
+	require.NoError(t, err)
+	packages := 0
+	for _, entry := range entries {
+		if entry.Name() != "root.json" && strings.HasPrefix(entry.Name(), "eligibility-") {
+			packages++
+		}
+	}
+	require.Equal(t, 3, packages, "每个成员一份包")
+
+	var list eligibility.ListPackage
+	raw, err := os.ReadFile(filepath.Join(outDir, "root.json"))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &list))
+	require.Equal(t, list.Count, packages, "root.json 声称的成员数必须与实际包数一致")
+}
+
 func TestGenerateListProducesUsableArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	membersPath := filepath.Join(dir, "members.txt")
