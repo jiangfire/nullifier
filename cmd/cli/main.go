@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	domaincrypto "anonvote/internal/domain/crypto"
+	"anonvote/internal/domain/entity"
 	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	"anonvote/internal/infrastructure/crypto/ballot"
 
@@ -83,6 +85,17 @@ type ballotFile struct {
 	// 它只留在本地（选票文件里），prover 需要它才能满足电路里的
 	// nullifier 约束。**不要把它提交给服务端。**
 	NullifierSecret string `json:"nullifier_secret,omitempty"`
+	// Nonce 是加密用的一次性随机数：电路约束 `a = r·G` 需要它。
+	// 它只留在本地（选票文件里），prover 需要它才能出证明。
+	Nonce string `json:"nonce,omitempty"`
+	// OptionIndex 是选项下标（从 0 开始）：加密的是下标，电路的私有见证
+	// 也是它。用指针是因为 0 是合法下标 —— omitempty 会把它吞掉。
+	OptionIndex *int `json:"option_index,omitempty"`
+	// NumOptions 是提案的选项数：它进公开输入。
+	NumOptions int `json:"num_options,omitempty"`
+	// ElectionPublicKey 是提案的计票公钥（未压缩形式，base64）。
+	// 它是公开值，但证明要绑在它上面 —— 出证明时必须用同一把钥匙。
+	ElectionPublicKey string `json:"election_public_key,omitempty"`
 }
 
 // version 由构建时的 -ldflags "-X main.version=..." 注入。
@@ -136,6 +149,8 @@ func run(args []string) int {
 		err = c.cmdBallotDraft(rest[1:])
 	case "ballot-encrypt":
 		err = c.cmdBallotEncrypt(rest[1:])
+	case "ballot-prove":
+		err = c.cmdBallotProve(rest[1:])
 	case "vote-submit":
 		err = c.cmdVoteSubmit(rest[1:])
 	case "vote-status":
@@ -614,10 +629,11 @@ func (c *cli) cmdBallotEncrypt(args []string) error {
 		return fmt.Errorf("decode election public key: %w", err)
 	}
 
-	ciphertext, _, err := ballot.EncryptBallotWithUncompressedKey(publicKey, uint64(index))
+	ciphertext, nonce, err := ballot.EncryptBallotWithUncompressedKey(publicKey, uint64(index))
 	if err != nil {
 		return fmt.Errorf("encrypt ballot: %w", err)
 	}
+	nonceBytes := nonce.Bytes()
 
 	// nullifier 与提案绑定：电路约束是 nullifier = MiMC(secret, proposal_id)，
 	// 秘密留在本地，prover 需要它。
@@ -641,6 +657,12 @@ func (c *cli) cmdBallotEncrypt(args []string) error {
 		Proof:           proofValue,
 		Nullifier:       ballot.EncodeScalarHex(nullifier),
 		NullifierSecret: base64.StdEncoding.EncodeToString(secret),
+		// 以下四项是本地出证明的见证材料：它们只留在选票文件里，
+		// 提交给服务端的只有密文、nullifier 与 proof。
+		Nonce:             base64.StdEncoding.EncodeToString(nonceBytes[:]),
+		OptionIndex:       &index,
+		NumOptions:        len(options),
+		ElectionPublicKey: base64.StdEncoding.EncodeToString(publicKey),
 	}
 	if *outFile != "" {
 		if err := writeJSON(*outFile, out); err != nil {
@@ -651,6 +673,120 @@ func (c *cli) cmdBallotEncrypt(args []string) error {
 	}
 	printJSON(out)
 	return nil
+}
+
+// cmdBallotProve 在本地为选票生成零知识证明。
+//
+// 证明完全在客户端生成：服务端只收到「密文 + nullifier + proof」，看不到
+// 明文选项，也不需要知道 proving key（它只在客户端侧）。
+//
+// 公开输入与服务端用**同一套**拼装逻辑（ballot.BuildPublicInputs）：客户端
+// 与服务端算出同一份公开输入，证明才验得过。选票文件里的 nonce、选项下标、
+// nullifier 秘密与计票公钥就是拼这份输入要用的材料 —— 它们全部只留在本地。
+func (c *cli) cmdBallotProve(args []string) error {
+	fs := flag.NewFlagSet("ballot-prove", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	ballotPath := fs.String("ballot-file", "", "ballot json file")
+	provingKey := fs.String("proving-key", "", "proving key file (client side only)")
+	outFile := fs.String("out", "", "optional output json file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*ballotPath) == "" || strings.TrimSpace(*provingKey) == "" {
+		return errors.New("必须提供 -ballot-file -proving-key")
+	}
+	var ballot ballotFile
+	if err := readJSON(*ballotPath, &ballot); err != nil {
+		return err
+	}
+	proof, err := proveBallotFile(ballot, strings.TrimSpace(*provingKey))
+	if err != nil {
+		return err
+	}
+	ballot.Proof = base64.StdEncoding.EncodeToString(proof)
+	if *outFile != "" {
+		if err := writeJSON(*outFile, ballot); err != nil {
+			return err
+		}
+		fmt.Printf("选票证明已写入 %s\n", *outFile)
+		return nil
+	}
+	printJSON(ballot)
+	return nil
+}
+
+// proveBallotFile 用选票文件里的见证在本地生成证明。
+func proveBallotFile(bf ballotFile, provingKeyPath string) ([]byte, error) {
+	if strings.TrimSpace(bf.ProposalID) == "" {
+		return nil, errors.New("选票文件里没有 proposal_id")
+	}
+	if bf.OptionIndex == nil {
+		return nil, errors.New("选票文件里没有 option_index（用 ballot-encrypt 生成选票）")
+	}
+	if bf.NumOptions <= 0 {
+		return nil, errors.New("选票文件里没有 num_options（用 ballot-encrypt 生成选票）")
+	}
+	if strings.TrimSpace(bf.ElectionPublicKey) == "" {
+		return nil, errors.New("选票文件里没有 election_public_key（用 ballot-encrypt 生成选票）")
+	}
+	if strings.TrimSpace(bf.Nonce) == "" {
+		return nil, errors.New("选票文件里没有 nonce（用 ballot-encrypt 生成选票）")
+	}
+	if strings.TrimSpace(bf.NullifierSecret) == "" {
+		return nil, errors.New("选票文件里没有 nullifier_secret（用 ballot-encrypt 生成选票）")
+	}
+
+	ciphertext, err := base64.StdEncoding.DecodeString(bf.EncryptedVote)
+	if err != nil {
+		return nil, fmt.Errorf("decode encrypted_vote: %w", err)
+	}
+	nullifier, err := hex.DecodeString(strings.TrimSpace(bf.Nullifier))
+	if err != nil {
+		return nil, fmt.Errorf("decode nullifier: %w", err)
+	}
+	secret, err := base64.StdEncoding.DecodeString(bf.NullifierSecret)
+	if err != nil {
+		return nil, fmt.Errorf("decode nullifier_secret: %w", err)
+	}
+	nonceBytes, err := base64.StdEncoding.DecodeString(bf.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("decode nonce: %w", err)
+	}
+	uncompressedKey, err := base64.StdEncoding.DecodeString(bf.ElectionPublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("decode election_public_key: %w", err)
+	}
+	// 服务端拼公开输入时用的是压缩公钥：客户端要转成同一形式，
+	// 两边算出来的公开输入才逐字段相同。
+	compressedKey, err := ballot.CompressPoint(uncompressedKey)
+	if err != nil {
+		return nil, fmt.Errorf("compress election public key: %w", err)
+	}
+
+	inputs, err := ballot.BuildPublicInputs(entity.BallotStatement{
+		ProposalID:        bf.ProposalID,
+		Nullifier:         nullifier,
+		ElectionPublicKey: compressedKey,
+		Ciphertext:        ciphertext,
+		NumOptions:        bf.NumOptions,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build public inputs: %w", err)
+	}
+
+	var secretElement, nonceElement fr.Element
+	secretElement.SetBytes(secret)
+	nonceElement.SetBytes(nonceBytes)
+
+	prover, err := ballot.NewProver(provingKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load proving key: %w", err)
+	}
+	proof, err := prover.Prove(inputs, uint64(*bf.OptionIndex), nonceElement, secretElement)
+	if err != nil {
+		return nil, fmt.Errorf("prove ballot: %w", err)
+	}
+	return proof, nil
 }
 
 // proposalOptions 查出提案的选项列表，顺序即选项下标。
@@ -1097,6 +1233,7 @@ func printRootUsage() {
   credential-show   -file
   ballot-draft      -proposal -option [-out]
   ballot-encrypt    -proposal -option [-proof] [-out]   (本地加密:服务端看不到明文选项)
+  ballot-prove      -ballot-file -proving-key [-out]     (本地出证明:proving key 只在客户端)
   vote-submit       -credential-file -ballot-file
   vote-status       -proposal -credential-file
   credentials-list  -proposal
@@ -1111,6 +1248,7 @@ func printRootUsage() {
   go run ./cmd/cli credential-claim -proposal p-1 -out cred.json
   go run ./cmd/cli ballot-draft -proposal p-1 -option A -out ballot.json
   go run ./cmd/cli ballot-encrypt -proposal p-1 -option A -out ballot.json
+  go run ./cmd/cli ballot-prove -ballot-file ballot.json -proving-key keys/proving.key -out ballot.json
   go run ./cmd/cli vote-submit -credential-file cred-u1001.json -ballot-file ballot.json
   go run ./cmd/cli -admin-token dev-admin-token decrypt-setup -proposal p-1 -out shares.json
   go run ./cmd/cli -admin-token dev-admin-token credentials-list -proposal p-1`)
