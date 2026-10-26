@@ -69,8 +69,8 @@
 > 有出口标准、有任务卡」，这三条现在都有了。
 >
 > **但升格 ≠ 全部做完**：M4 的任务卡里，**T23（接口冻结）、T24（审计复算）、T26（监控指标）
-> 已落地**，**T25（限流）与 T27（容量规划）也已补上**；**T28（Playwright）仍未做**（见附录 A.5）。
-> 里程碑的状态是「进行中」，不是「已完成」。
+> 已落地**，**T25（限流）、T27（容量规划）与 T28（Playwright 门户自动化）也都已补上**。
+> 里程碑的状态是「已完成，待发版」。
 
 **0.x.0 的个数不是固定的 —— 它取决于接口什么时候能冻结，而不是凑版本号。**
 
@@ -236,7 +236,7 @@ release 流水线全绿，GitHub Release 12 个产物已发布并核验）。
 4. **可观测** —— 指标端点暴露投票 / 凭证 / 资格校验的计数与 HTTP 耗时，且**只暴露计数与耗时**（不出现任何选票内容或身份）。
 5. **公开端点有限流** —— 凭证领取 / 投票提交 / 只读端点按「来源 + 路由组」限流，超限返回 429 + `Retry-After`；**伪造 `X-Forwarded-For` 不能绕过**；release 模式强制开启。
 
-**状态**：**进行中**（2026-10-25 起）。已完成 T23（接口收敛 + 冻结）、T24（审计离线复算）、T26（监控指标）、T25（公开端点限流）、T27（真正的压测容量规划）；**T28（Playwright 门户自动化）未做** —— 它仍在 v0.3.0 的名义范围内，但排在核心之后。
+**状态**：**已完成，待发版**（2026-10-25 起）。已完成 T23（接口收敛 + 冻结）、T24（审计离线复算）、T26（监控指标）、T25（公开端点限流）、T27（真正的压测容量规划）、T28（Playwright 门户 UI 自动化）。
 
 **依赖**：M2 与 M3 全部完成。✅
 
@@ -293,7 +293,7 @@ release 流水线全绿，GitHub Release 12 个产物已发布并核验）。
 | D 客户端能投票 | ✅ **已达成（CLI 与门户两侧）** | CLI 用本地 proving key 出证明；门户在浏览器 Worker 里用 WASM prover 出证明并提交。两条路径都有端到端证据（`tests/e2e/client_prover_test.go` / `tests/e2e/wasm_prover_test.go`） |
 | E 凭证不可伪造 | ✅ 已达成 | 落库前 `VerifyCredential`，伪造签名 → 401 |
 | F 签发方看不到被签内容 | ✅ 已达成 | 真两段式盲签名：客户端本地盲化，服务端在**签名阶段**只见盲化消息；交叉攻击（A 的盲签名签 B）→ 验签失败。**口径**：attest 阶段服务端仍看得到 `user_id` / `user_pub_key`（验签必须重算凭证消息） |
-| G 凭证分发不泄露身份 | ✅ **已达成（T22，2026-10-25）** | **服务端只见 root，不见成员包** —— 它能验证「这个资格在树里」，却无法把资格对应到任何成员。领取请求体里**不含任何真人身份字段**（e2e 断言）；投票提交的材料**不含** `qualification_id`（去重只在领取时做一次）。一人一票由 `eligibility_uses` 的唯一索引 `(proposal_id, qualification_id)` 强制。**未闭合**：门户的资格领取路径仍需真浏览器人工点一遍（仓库无 Playwright） |
+| G 凭证分发不泄露身份 | ✅ **已达成（T22，2026-10-25）** | **服务端只见 root，不见成员包** —— 它能验证「这个资格在树里」，却无法把资格对应到任何成员。领取请求体里**不含任何真人身份字段**（e2e 断言）；投票提交的材料**不含** `qualification_id`（去重只在领取时做一次）。一人一票由 `eligibility_uses` 的唯一索引 `(proposal_id, qualification_id)` 强制。**门户路径已有自动化回归**（2026-10-26，T28：真浏览器里导入资格文件 → 领取 → 重复领取被拒 → 出票 → 提交 → 计票） |
 
 **本轮的两个协议变更**（都要写进 CHANGELOG，详见 §6 决策 D2）：
 
@@ -393,9 +393,11 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 
 **T22 仍然没有闭合的**：
 
-- **浏览器端没有自动化**：仓库里没有 Playwright。门户的资格领取路径**已在真浏览器里人工
-  验过一遍**（2026-10-25，见上面的验收表），但**每次上线仍要人工点一遍**
-  （步骤见 `docs/deployment-checklist.md` §8.1）—— 自动化证据只到 node 驱动的 WASM 模块。
+- ~~**浏览器端没有自动化**~~ —— ✅ **已闭合**（2026-10-26，T28）：门户的两条路径
+  （领凭证 → 本地出票 → 提交 → 查状态 → 计票；导入资格文件 → 匿名领取 → 重复领取被拒）
+  现在由 `scripts/web-e2e.sh` + Playwright 在**真浏览器**里自动跑，CI 有独立 job
+  （`web-e2e`）。**人工点一遍仍然值得做** —— 它验的是「部署形态」（真域名、
+  反向代理、真实浏览器版本），自动化验的是「接线没断」。
 - **PG 集成测试本机无 Docker**（与 T22 无关，但整体验收仍缺）—— ✅ 2026-10-25 已用本机的
   便携版 PostgreSQL 17.7 起临时集群实跑通过（外部库路径，见 §4.3 盲区 1）；**testcontainers
   那条路径仍要 CI 实跑**。
@@ -479,8 +481,15 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
      真实加载 → WASM 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 凭证匿名领取（claim →
      blind-sign → attest 三步全过）→ 服务端以真 verifying key 验签通过（201）→ 提案关闭后
      解密计票，还原出浏览器端选的那个选项（`{"tally":{"candidate-B":1}}`）。
-     ⚠️ **闭合的是「WASM 路径在真实浏览器里可用」，不是「门户有 UI 自动化回归」** ——
-     仓库仍然没有 Playwright 之类的浏览器自动化，面板交互仍靠人工核对。
+     ⚠️ **当时闭合的是「WASM 路径在真实浏览器里可用」，不是「门户有 UI 自动化回归」** ——
+     浏览器自动化是 2026-10-26 才补上的（见下一条）。
+   - ✅ **门户 UI 自动化已落地**（2026-10-26，T28）：`scripts/web-e2e.sh` + Playwright
+     （`web/e2e/portal.spec.ts`）在**真浏览器**里把门户的两条路径自动走一遍 ——
+     领凭证 → 浏览器本地生成选票 → 提交 → 查询状态 → 计票还原出所选的选项，
+     以及资格路径（导入资格文件 → 匿名领取 → **重复领取被拒**「一人一票」）。
+     环境是 **release 模式的服务端 + 真 proving key + 真资格名单**（脚本自己备好），
+     CI 有独立 job（`web-e2e`）。⚠️ **闭合的是「接线没断」**，不是「部署形态验过了」——
+     真域名、反代、真实浏览器版本仍要人工点一遍（`scripts/browser-acceptance.sh`）。
    - 这次真实浏览器验收还挖出一个**只靠 node 测不出来的跨语言 bug**：门户把盲签名变体名
      写成了 Go 的枚举标识符，服务端发的是 CIRCL 的线路名 —— 领取流程会停在 claim 之后
      （blind-sign 从未发出）。已修（`fix(web): use the CIRCL wire name for the blind
@@ -490,6 +499,9 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
      浏览器本地生成选票 → 提交 201 → 计票还原出所选选项。⚠️ 仓库仍**没有**浏览器自动化
      （证据只到 node 驱动的 WASM 模块），**每次上线仍要人工点一遍**
      （步骤见 `docs/deployment-checklist.md` §8.1）。
+   - ✅ **这条路径现在有自动化回归了**（2026-10-26，T28）：`scripts/web-e2e.sh` 用 Playwright
+     在真浏览器里把上面那串点击全部做掉（并在 CI 里跑）。上面这条 2026-10-25 的人工验收
+     记录仍然有效 —— 它验的是**部署形态**，自动化验的是**接线**。
    - 这次验收还挖出**第二个只靠 node 测不出来的 bug**：资格包在门户里是 Vue 的响应式 Proxy，
      `postMessage` 克隆不了它 —— 「匿名领取」在真浏览器里必然失败。已修
      （`fix(web): send a plain member package to the prover worker`），并补了回归用例。
@@ -499,7 +511,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
      `vote submitted` / `eligibility already used`），等窗口关闭后发布结果并核对
      **计票还原出的就是浏览器端选的那个选项**；`stop` 收尾。
      ⚠️ **闭合的是「每次上线不用从零手搓」，不是「浏览器自动化」** —— 中间那一下
-     导入资格文件与点击仍然要人来做，仓库里依然没有 Playwright。
+     导入资格文件与点击仍然要人来做（浏览器自动化是 2026-10-26 才补上的，见 A.5 的 T28）。
 3. **并发投票下的防重投与性能容量** —— 唯一索引兜底，但没测过
    - 🟡 **防重投这一半已补**（本轮落地）：`tests/e2e/concurrent_nullifier_test.go` ——
      8 个请求**同时**用同一个 nullifier、各自带不同凭证提交，断言恰好 1 张票入库、
@@ -639,7 +651,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 
 | # | 决策 | 结论 |
 |---|---|---|
-| **V3-D1** | 这一档做哪些 | ✅ **核心三件已做**（T23 接口冻结 / T24 审计离线复算 / T26 监控指标），**限流（T25）与容量规划（T27）也已补上**；**Playwright 门户自动化（T28）留下一批**，仍在 v0.3.0 的名义范围内但排在核心之后。**理由**：前两件是「接口不再动」这句承诺的**直接兑现**（不冻结就无从谈稳定，不复算就无从谈可审计），第三件是 §2.2 第 1 项明确排在 v0.2.0 之外的运维范畴。**代价**：v0.3.0 **不解决**容量问题 —— 面向真实规模投票仍然不行，那是 v0.4.0 的命题。⚠️ **这一档的范围是当前判断，不是不可动的承诺** —— 增删任务卡不改变 §3 的出口标准 |
+| **V3-D1** | 这一档做哪些 | ✅ **六张任务卡全部落地**：T23 接口冻结 / T24 审计离线复算 / T26 监控指标（核心三件）、T25 公开端点限流、T27 容量规划、**T28 门户 UI 自动化**（2026-10-26 补齐）。**理由**：前两件是「接口不再动」这句承诺的**直接兑现**（不冻结就无从谈稳定，不复算就无从谈可审计），第三件是 §2.2 第 1 项明确排在 v0.2.0 之外的运维范畴；T28 是门户这条链路的**唯一自动化缺口**（服务端与 CLI 早有 e2e，门户的浏览器端路径一直没有）。**代价**：v0.3.0 **不解决**容量问题 —— 面向真实规模投票仍然不行，那是 v0.4.0 的命题。⚠️ **这一档的范围是当前判断，不是不可动的承诺** —— 增删任务卡不改变 §3 的出口标准 |
 | **V3-D2** | 投票提交的接口形状 | ✅ **提案 ID 走路径，不走请求体** —— `POST /api/v1/proposals/:proposal_id/votes`，请求体里不再有 `proposal_id`。**理由**：一个提案 ID 只有**一个**来源；请求体里再放一份，两份不一致时服务端只能猜，猜错就是「把票投到别的提案去」。**代价**：**破坏性变更** —— 旧的 `POST /api/v1/votes` 不再存在（返回 404），客户端必须改 |
 | **V3-D3** | 监控指标怎么实现 | ✅ **用 `prometheus/client_golang`**，不手写文本格式。**理由**：指标格式的细节（直方图分桶、计数器命名、文本转义）手写一遍就是一遍可以写错的东西；门禁与运维生态也只认标准格式 |
 | **V3-D4** | 审计复算工具与服务端的关系 | ✅ **共用同一份计票算法**（`internal/tally`），不是「另写一份复算脚本」。**理由**：两边各写一份算法，一旦漂移，复算结论就失去意义 —— 那不是审计，是第二套计票。**落地**：计票的规范算法从 `internal/usecase/tally.go` 抽到 `internal/tally`，服务端与 `cmd/audit-recompute` 调的是同一个 `Compute`；锚点哈希的公式用 KAT 钉死 |
@@ -665,7 +677,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | **D2 密文 v2 → v3 使 v0.1.0 的选票永久不可解** | 旧数据丢失 | v0.2.0 尚未发版，本地/内测数据可弃；CHANGELOG 必须写明「与 v0.1.0 不兼容」；发版前清库 |
 | ~~**debug 模式下服务端仍能拿到明文选项**~~ | 能力 A 未达成 | ✅ **已解除**（2026-10-25）：服务端代加密的端点与代码链**整个删除**，不再依赖 `server.mode` 的取值。能力 A 现在与运行模式无关 |
 | T16 把加密移到客户端后，前端成为新的攻击面 | 密钥泄露 | proving key 只在前端，**不入服务端**；前端构建产物做完整性校验 |
-| 匿名随机领取牺牲了一人一票 | 可重复投票 | ✅ **已解除** —— M3 用资格证明补回（T22，2026-10-25 已落地，见 §2.3 与 §4.1 的 M3 进展表）。**剩余风险**：真实名单的内容与成员标识形式仍需运营方提供；门户的资格领取路径仍需真浏览器人工点一遍（仓库无 Playwright） |
+| 匿名随机领取牺牲了一人一票 | 可重复投票 | ✅ **已解除** —— M3 用资格证明补回（T22，2026-10-25 已落地，见 §2.3 与 §4.1 的 M3 进展表）。**剩余风险**：真实名单的内容与成员标识形式仍需运营方提供；门户的资格领取路径**已有自动化回归**（2026-10-26，T28：真浏览器里跑，CI 有独立 job），但**部署形态**（真域名、反代）仍要人工点一遍 |
 | M1 拖太久，M2 无时间 | 路线图整体延期 | M1 与 M2 **可并行**（除 T1/T2 依赖 M2 的字段） |
 
 ---
@@ -676,8 +688,9 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 **已落地的任务卡保留原始的问题与改法，并附「落地核对」行** —— 逐条说明实际怎么做的、
 与原设想有什么偏差、哪些验收项没达成。当前已落地：**T1、T2、T13、T15、T18**（2026-10-21）
 与 **T9**（见 A.4）、**T16 / T14 / T17**（M2 批次）、**T22**（2026-10-25，见 A.3）、
-**T23 / T24 / T25 / T26**（M4 批次，2026-10-25，见 A.5）。
-**其余任务卡尚未落地**（A.3 里的 T19 / T20 是部分落地；A.5 里的 T28 未做）。
+**T23 / T24 / T25 / T26**（M4 批次，2026-10-25，见 A.5）与 **T27 / T28**（M4 批次，
+2026-10-26，见 A.5）。
+**其余任务卡尚未落地**（A.3 里的 T19 / T20 是部分落地）。
 
 ### A.1 挂在 M1 但等决策的
 
@@ -809,7 +822,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 问题 | review §5 列的三项**从未被验证**：① PostgreSQL testcontainers 集成测试；② 门户 7 个 `.vue` 面板的浏览器实际渲染；③ 并发投票下的防重投与性能容量。 |
 | 证据 | `docs/release-review-2026-10-20.md` §5 |
 | 改法 | ① Docker 环境跑通 `tests/integration`（CI 会实跑，本地补一份 compose）；② 引入 Playwright 覆盖关键路径（领凭证 → 投票 → 查询状态 → 计票）；③ 用 `hey`/`k6` 写并发投票脚本，验证防重投（唯一索引兜底）与容量 |
-| 落地核对 | ① ✅ **PG 集成测试已在本机真 PostgreSQL 上实跑**（2026-10-25：用便携版 PostgreSQL 17.7 的二进制 `initdb` 起临时独立集群，走集成测试的**外部库路径** `ANONVOTE_TEST_PG_HOST`，`go test ./tests/integration/ -run Postgres` 全过 —— 含「一人一票」复合唯一索引的行为证明与并发用例）；✅ **整条浏览器验收也在 PG 上跑通**（`scripts/browser-acceptance.sh` 新增 `DB_DRIVER=postgres`，服务端连真 PG，计票还原出所选选项）；⏳ **testcontainers 那条路径仍要 CI 实跑**（CI 的 go job 跑在 ubuntu-latest，自带 Docker；缺 Docker 时集成测试**失败而不是跳过**，免得「跳过」被误读成「通过」）；✅ **compose 已补**（仓库根 `docker-compose.yml` + `make pg-test`：起库 → 跑 `go test ./tests/integration/ -run Postgres` → 关库），且集成测试新增**外部库路径**（设 `ANONVOTE_TEST_PG_HOST` 即连已有 PostgreSQL，每个测试开一个独立 schema 并在跑完时 `DROP SCHEMA ... CASCADE`）—— 两条路径共用同一份测试代码，本地与 CI 跑的是同一套断言；② 🟡 **Playwright 离线装不了，但盲区已用另一种方式部分补上**：门户 7 个 `.vue` 面板此前**既无类型检查也无测试**（`tsc` 不认 `.vue`），现在有**服务端渲染测试**（`web/src/components/panels/panels.test.ts`，16 个用例）—— 模板、setup、computed 都会真跑一遍，顺带覆盖了 T2 的 debug 门控（非 debug 模式下按钮不渲染）。⚠️ **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载，视觉与交互仍靠人工核对；✅ **但浏览器端的关键路径已在真实浏览器里跑通**（2026-10-25）：静态资源三件套真实加载 → WASM 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 凭证匿名领取三步全过 → 服务端真验签通过（201）→ 解密计票还原出所选选项。这次验收还挖出并修掉了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而非线路名，会让领取流程停在 claim 之后）—— 这类问题单测测不出来，只有真浏览器对真服务端才暴露；③ 🟡 **防重投这一半已落地**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求 + 同一 nullifier + 不同凭证，断言恰好 1 张票入库、其余 409 `DOUBLE_VOTING`（本机可复现，`go test ./tests/e2e/ -run TestAPI_ConcurrentSameNullifier_E2E`）；**容量这一半也已落地**：新工具 `cmd/loadtest`（纯 HTTP API，不碰数据库）输出吞吐 / 延迟分位 / 状态分布 / 防重投结论，`-json` 可机器读，**防重投没守住时退出码非 0**；✅ **2026-10-25 修复**：工具此前还在用 v0.1.0 的「一步式领凭证」，协议改成真两段式盲签名后**每张票都 400 `INVALID_REQUEST`、0 票入库**（工具自己也会以非 0 退出）—— 现已改为走真实的 claim → blind-sign → attest 三步（与门户、CLI 同一条链路），并补了回归测试（假服务端按 v0.2.0 协议实现，断言**领取请求体里不许出现公钥**）；本机重测 200 票 / 并发 20 → **164.1 req/s**、200 张全 201、同 nullifier 并发 5 次恰好放行 1 张、落库核对 201 == 预期 201（⚠️ SQLite 单写者 + 工具没有 prover，只能在 debug 模式跑，**不是容量规划**） |
+| 落地核对 | ① ✅ **PG 集成测试已在本机真 PostgreSQL 上实跑**（2026-10-25：用便携版 PostgreSQL 17.7 的二进制 `initdb` 起临时独立集群，走集成测试的**外部库路径** `ANONVOTE_TEST_PG_HOST`，`go test ./tests/integration/ -run Postgres` 全过 —— 含「一人一票」复合唯一索引的行为证明与并发用例）；✅ **整条浏览器验收也在 PG 上跑通**（`scripts/browser-acceptance.sh` 新增 `DB_DRIVER=postgres`，服务端连真 PG，计票还原出所选选项）；⏳ **testcontainers 那条路径仍要 CI 实跑**（CI 的 go job 跑在 ubuntu-latest，自带 Docker；缺 Docker 时集成测试**失败而不是跳过**，免得「跳过」被误读成「通过」）；✅ **compose 已补**（仓库根 `docker-compose.yml` + `make pg-test`：起库 → 跑 `go test ./tests/integration/ -run Postgres` → 关库），且集成测试新增**外部库路径**（设 `ANONVOTE_TEST_PG_HOST` 即连已有 PostgreSQL，每个测试开一个独立 schema 并在跑完时 `DROP SCHEMA ... CASCADE`）—— 两条路径共用同一份测试代码，本地与 CI 跑的是同一套断言；② ✅ **盲区已补上**（2026-10-26，T28：Playwright 真浏览器自动化落地，见 A.5 的 T28 —— 当时的「Playwright 离线装不了」前提本来就不成立，chromium 能正常下载）；在此之前先用另一种方式部分补上（门户 7 个 `.vue` 面板此前**既无类型检查也无测试**（`tsc` 不认 `.vue`），现在有**服务端渲染测试**（`web/src/components/panels/panels.test.ts`，16 个用例）—— 模板、setup、computed 都会真跑一遍，顺带覆盖了 T2 的 debug 门控（非 debug 模式下按钮不渲染）。⚠️ **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载，视觉与交互仍靠人工核对；✅ **但浏览器端的关键路径已在真实浏览器里跑通**（2026-10-25）：静态资源三件套真实加载 → WASM 出证明（init 11.8~14.3 秒、prove 2.9 秒）→ 凭证匿名领取三步全过 → 服务端真验签通过（201）→ 解密计票还原出所选选项。这次验收还挖出并修掉了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而非线路名，会让领取流程停在 claim 之后）—— 这类问题单测测不出来，只有真浏览器对真服务端才暴露；③ 🟡 **防重投这一半已落地**：`tests/e2e/concurrent_nullifier_test.go` 用 8 个并发请求 + 同一 nullifier + 不同凭证，断言恰好 1 张票入库、其余 409 `DOUBLE_VOTING`（本机可复现，`go test ./tests/e2e/ -run TestAPI_ConcurrentSameNullifier_E2E`）；**容量这一半也已落地**：新工具 `cmd/loadtest`（纯 HTTP API，不碰数据库）输出吞吐 / 延迟分位 / 状态分布 / 防重投结论，`-json` 可机器读，**防重投没守住时退出码非 0**；✅ **2026-10-25 修复**：工具此前还在用 v0.1.0 的「一步式领凭证」，协议改成真两段式盲签名后**每张票都 400 `INVALID_REQUEST`、0 票入库**（工具自己也会以非 0 退出）—— 现已改为走真实的 claim → blind-sign → attest 三步（与门户、CLI 同一条链路），并补了回归测试（假服务端按 v0.2.0 协议实现，断言**领取请求体里不许出现公钥**）；本机重测 200 票 / 并发 20 → **164.1 req/s**、200 张全 201、同 nullifier 并发 5 次恰好放行 1 张、落库核对 201 == 预期 201（⚠️ SQLite 单写者 + 工具没有 prover，只能在 debug 模式跑，**不是容量规划**） |
 | 验收 | 三项都有**可复现的脚本 + 输出**，并把结果贴进 PR |
 | 预估 | 2–3 天 |
 | 依赖 | T14（浏览器端投票链路才完整） |
@@ -835,7 +848,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | **落地核对** | ① ✅ **离线名单工具** `cmd/eligibility-list -members <名单文件> -out <目录>` → `root.json`（服务端用）+ 每成员一份 `eligibility-<member_id>.json`（0600，成员本人保管）；名单按成员 ID 排序，同一份名单两次生成的树根一致；② ✅ **资格电路** `internal/infrastructure/crypto/eligibility/`：Groth16 / BN254 / MiMC，**实测 6860 条约束**，公开输入**定长 5 个**（Root / ProposalID / Challenge / QualificationID / SessionBinding），**叶子、Merkle 路径、位置全私有**；`TreeDepth = 10` 是**编译期常量** → 单份名单上限 1024 人；③ ✅ **服务端**：`POST /api/v1/proposals/:id/credentials/eligibility-challenge`（公开、**无状态**，服务端不记账）→ `claim` 请求体新增 `{eligibility_proof, qualification_id, challenge}`（三件要么都给要么都不给）；**资格校验在取槽位之前**，资格不过**不消耗池槽位**；`blind-sign` / `attest` **完全不变**；④ ✅ **去重表** `eligibility_uses`（`proposal_id` + `qualification_id` + `used_at`），唯一索引 `(proposal_id, qualification_id)` —— 一人一票的强制点；**只存去重键**，不存叶子 / 秘密 / 成员 ID；⑤ ✅ **新错误码**：`ELIGIBILITY_REQUIRED`(400) / `INVALID_ELIGIBILITY_PROOF`(403) / `ELIGIBILITY_ALREADY_USED`(409) / `ELIGIBILITY_NOT_ENABLED`(409)；⑥ ✅ **运行期配置** `crypto.eligibility_root` + `crypto.eligibility_vk_path`（环境变量 `CRYPTO_ELIGIBILITY_ROOT` / `CRYPTO_ELIGIBILITY_VK_PATH`），**必须成对出现**；**release 模式缺一即启动失败**；`GET /healthz` 新增 `eligibility` 布尔字段；⑦ ✅ **CLI**：`cmd/keygen -circuit ballot\|eligibility`（两套密钥互不相通，默认文件名 `verifying.key`/`proving.key` 与 `eligibility-verifying.key`/`eligibility-proving.key`）；`cmd/cli credential-claim -eligibility <成员包.json> -proving-key <资格 proving key>`；⑧ ✅ **浏览器端**：`cmd/ballot-wasm` 暴露**四个 API** `init` / `prove` / `initEligibility` / `proveEligibility`（**同一个模块**）；静态资源只新增 `web/public/eligibility-proving.key`（`make web-eligibility-key PK=<路径>`）；门户「身份」面板「导入资格文件 → 领凭证时本地出证明」，资格包**只留内存**，不写 localStorage、不上传 |
 | **偏差** | ⚠️ 与设计稿原文有 5 处偏离，逐条列在 [`docs/t22-eligibility-design.md`](./t22-eligibility-design.md) §8：**① 浏览器端是同一个 WASM 模块四个 API，不是两个模块**（静态资源只多一个 key）；**② `qualification_id` 存 64 位 hex 的 TEXT，不是 BLOB(32)**（与 `votes.nullifier` 的口径一致）；**③ 公开输入 5 个，不是 7 个** —— 叶子 / 路径 / 位置全私有，多出来的 `SessionBinding` 由服务端自算；**④ 挑战无状态**（与设计稿一致）；**⑤ D1–D6 已全部拍板**，其中 D5 的 depth=10 是**编译期常量而非配置项** |
 | 验收 | ① 无资格证明的领取请求 → 拒绝（4xx），池槽位不被消耗 —— ✅ `tests/e2e/eligibility_test.go` 的 `TestAPI_EligibilityRequiredForClaim_E2E`；② 有效资格证明 → 领取成功 —— ✅ `TestAPI_EligibilityClaimSucceeds_E2E`；③ 同一份资格证明第二次领取 → 拒绝 —— ✅ `TestAPI_EligibilityCannotBeReused_E2E`；④ 资格证明在不同提案间不可复用 —— ✅ `TestAPI_EligibilityNotReusableAcrossProposals_E2E`；⑤ 领取请求体里不含任何真人身份字段 —— ✅ `TestAPI_EligibilityClaimBodyHasNoIdentityFields_E2E`。**浏览器路径的跨语言证据**：`tests/e2e/wasm_eligibility_test.go` 的 `TestAPI_WASMEligibilityProver_E2E`（node 驱动**真的 WASM 模块**出证明，服务端用**真的资格验证密钥**验过，去重键与 Go 侧自算一致） |
-| **未达成** | ⚠️ **门户的浏览器端路径没有自动化**（仓库无 Playwright）—— 资格领取这条路仍需真浏览器人工点一遍（步骤见 `docs/deployment-checklist.md`）；⚠️ `cmd/loadtest` **不支持**资格证明（只在未开启资格校验的服务上可用）；⚠️ 资格包丢失**无法找回**（成员包是秘密材料，发放靠安全渠道）；⚠️ **真实名单的内容与成员标识形式仍需运营方提供**；⚠️ 单份名单上限 1024 人（`TreeDepth` 是编译期常量） |
+| **未达成** | ✅ **门户的浏览器端路径已有自动化**（2026-10-26，T28：`web/e2e/portal.spec.ts` + Playwright，真浏览器里跑「导入资格文件 → 匿名领取 → 重复领取被拒 → 本地出票 → 提交 → 计票」）—— ⚠️ 但**部署形态**（真域名、反代）仍要人工点一遍（步骤见 `docs/deployment-checklist.md`）；⚠️ `cmd/loadtest` **不支持**资格证明（只在未开启资格校验的服务上可用）；⚠️ 资格包丢失**无法找回**（成员包是秘密材料，发放靠安全渠道）；⚠️ **真实名单的内容与成员标识形式仍需运营方提供**；⚠️ 单份名单上限 1024 人（`TreeDepth` 是编译期常量） |
 | 预估 | 5–7 天（依赖 M2 的电路与 prover） |
 | 依赖 | T13、T14（资格证明要用真实电路与客户端 prover）✅ 均已落地 |
 | 备注 | **这是能力 G 的完成定义的最后一环**（§2.1）—— ✅ 已闭合。不做的话，v0.2.0 就必须继续在 README 里写明「无法保证一人一票」 |
@@ -860,8 +873,8 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 
 ### A.5 M4 · 接口冻结与可审计
 
-> M4 的六张任务卡：T23 / T24 / T25 / T26 / T27 **已落地**，T28 **未做**（仍在 v0.3.0
-> 的名义范围内，排在核心之后）。出口标准见 §3 的 M4。
+> M4 的六张任务卡：T23 / T24 / T25 / T26 / T27 / T28 **已全部落地**（T28 于 2026-10-26）。
+> 出口标准见 §3 的 M4。
 
 #### T23 · 接口收敛与冻结 ✅ 已落地
 
@@ -924,7 +937,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 备注 | §1.3 的 1.0.0 判据第 3 条要求「有一次真实规模投票的完整复盘」—— **这一档还差得远** |
 | **落地核对** | ✅ **全部完成**（2026-10-26）。① **压测工具支持真 prover 与资格领取**（`cmd/loadtest` 的 `-proving-key` / `-eligibility-dir` / `-eligibility-proving-key`）—— 服务端真验签、真验资格。② **真 PostgreSQL + release 模式**下跑出容量数字（脚本 `scripts/capacity-run.sh`，报告 `docs/capacity-report-v0.3.0.md`）。③ **部署清单 §4.1 给出按投票规模的资源配置建议**。<br>⚠️ **过程中修掉三个真实缺陷**：盲签名阶段的槽位冲突回错码（400 → 409 `CREDENTIAL_EXISTS`）、凭证槽位预留不原子（并发领取误报「池空」，PostgreSQL 上改用 `FOR UPDATE SKIP LOCKED`）、数据库连接池默认值形同虚设（只留 2 条空闲连接）。<br>⚠️ **测量方法本身也踩了坑**：每轮票数太少（并发 100 / 200 票）时测量窗口被预热吃光（吞吐从 2300/s 掉到 127/s）；服务端刚启动的第一轮是冷启动（307/s）—— **每轮 ≥ 500 票 + 先热身一轮**，这两条已写进报告与脚本。 |
 
-#### T28 · Playwright 门户 UI 自动化 ⬜ 未做
+#### T28 · Playwright 门户 UI 自动化 ✅ 已落地
 
 | 项 | 内容 |
 |---|---|
@@ -935,6 +948,7 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 预估 | 3–5 天 |
 | 依赖 | 无 |
 | 备注 | ⚠️ **「Playwright 离线装不了」这个前提已不成立**（2026-10-25 实测：`pnpm exec playwright install chromium` 可成功下载浏览器，118.1 MiB）—— 之前记的结论要改 |
+| **落地核对** | ✅ **全部完成**（2026-10-26）。① **引入 Playwright**（`@playwright/test@1.64.1` + `@types/node`，都只是 devDependency；运行时依赖一个没动）+ 配置（`web/playwright.config.ts`）。② **用例**（`web/e2e/portal.spec.ts`）在**真浏览器**里把两条路径走完：配置后端 → 导入资格文件 → 匿名领取（真两段式盲签名）→ **重复领取被拒**（一人一票）→ 大厅选提案 → 浏览器本地出票（真 WASM prover）→ 提交 → 查状态（已投过）→ 等窗口关闭 → 发布结果 → **核对计票还原出所选的选项**。③ **环境脚本**（`scripts/web-e2e.sh`）自己备好一切：两套密钥、资格名单、release 模式服务端（真 verifying key + 强制一人一票）、凭证池、门限解密会话、门户 dev server；`make web-e2e` 一条龙跑完并收尾。④ **CI 接入**：新增 `web-e2e` job（`pnpm exec playwright install --with-deps chromium` + `bash ./scripts/web-e2e.sh run`）。<br>⚠️ **闭合的是「接线没断」，不是「部署形态验过了」** —— 真域名、反向代理、真实浏览器版本仍要人工点一遍（`scripts/browser-acceptance.sh`）。<br>⚠️ **用例的时长被投票窗口框住**：门户的「计票」要求提案**已关闭**（服务端只认 `ends_at` 过去了），「投票」要求窗口**开着** —— 所以窗口必须先开后关，中间那段要装得下浏览器端出证明（十几秒）。窗口 90 秒是在本机实测过的稳妥值；窗口太短会偶发失败，太长则整轮变慢。<br>⚠️ **限流额度要在脚本里拉高**：一整轮 e2e 的请求全来自 `127.0.0.1`，共享一个来源额度 —— 用默认额度（凭证 10 rps / 40 burst）时领取链路会被自己挡下，测到的就成了限流器。 |
 
 ---
 

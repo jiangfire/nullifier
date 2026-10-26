@@ -300,6 +300,8 @@ merkle 根 → 锚点哈希」在 **`internal/tally`**（见 §1.11）。这么�
 | `src/types/` | `portal.ts` `portal-api.ts` |
 | `vitest.config.ts` | 测试配置 + **自写的 `.vue` 编译插件**（见下） |
 | `test/setup.ts` | 测试环境的浏览器全局对象（`localStorage` / `sessionStorage` / `window`） |
+| `playwright.config.ts` | **浏览器端到端测试**（T28）的配置：真浏览器、超时、`workers: 1`（用例之间有顺序依赖） |
+| `e2e/portal.spec.ts` | 门户的两条端到端路径（领凭证 → 本地出票 → 提交 → 查状态 → 计票；资格重复领取被拒）。环境由 `scripts/web-e2e.sh` 备好，参数走环境变量 |
 
 **面板渲染测试**（`src/components/panels/panels.test.ts`）：
 
@@ -311,6 +313,9 @@ merkle 根 → 锚点哈希」在 **`internal/tally`**（见 §1.11）。这么�
 - **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载。抓的是
   「模板引用了不存在的变量」「setup 抛错」「条件分支写反」这一类问题。
 - 覆盖了「服务端不得拿到明文选项」这条底线：面板**不渲染**任何「让服务端代生成凭据」的入口。
+- ✅ **浏览器渲染那一半由 T28 补上**（`web/e2e/portal.spec.ts` + Playwright）：真浏览器里
+  跑门户的关键路径。**两层测试各有分工**：vitest 那层抓模板与状态机，Playwright 那层抓
+  **接线**（跨语言字符串、静态资源、WASM prover、事件绑定）。
 
 **`.vue` 编译插件**（`vitest.config.ts` 内联）：
 
@@ -767,8 +772,10 @@ go run ./cmd/cli credential-claim -proposal <id> \
   -proving-key ./keys/eligibility-proving.key -out ./cred.json
 #   6) 同一个成员再领一次 → 409 ELIGIBILITY_ALREADY_USED（一人一票生效）
 
-# 浏览器里的真实出票验收（真浏览器 + 真服务端，人工跑一次）：
-#   仓库里没有浏览器自动化 —— 这一步只能人工点。脚本已经把前后的活都干了：
+# 浏览器里的真实出票验收（真浏览器 + 真服务端）：
+#   自动化（Playwright，真浏览器，一条龙备环境 + 跑用例 + 收尾）：
+bash ./scripts/web-e2e.sh run                 # = make web-e2e；CI 的 web-e2e job 跑的就是它
+#   人工点一遍（验的是**部署形态**：真域名、反代 —— 自动化验不了）：
 bash ./scripts/browser-acceptance.sh setup    # 备好环境（密钥/名单/提案/凭证池/门户）并打印人工步骤
 bash ./scripts/browser-acceptance.sh verify   # 人工点完之后核对服务端日志与计票结果
 bash ./scripts/browser-acceptance.sh stop     # 停掉后台进程
@@ -828,19 +835,23 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
 
 ## 5. 尚未完成的部分（不要写成生产能力）
 
-- **浏览器端 prover 已在真实浏览器里跑通，但门户面板仍不是「浏览器渲染」回归。** WASM 模块
-  （`cmd/ballot-wasm`）在 node 下端到端跑通（`tests/e2e/wasm_prover_test.go`：
-  init → prove → 提交 → 计票还原），并在 2026-10-25 于**真实浏览器**（Chromium / Electron）
-  里跑通同一套链路：`wasm_exec.js` + `ballot-prover.wasm` + `proving.key` 三个静态资源从门户
-  目录加载，init 11.8~14.3 秒、prove 2.9 秒，产出的密文 / nullifier / proof 被服务端以真
-  verifying key 验签通过（201），计票还原出浏览器端选的那个选项。
-  但**门户面板仍没有浏览器自动化回归**（仓库无 Playwright，见 §1.7）—— 盲区 2 闭合的是
-  「WASM 路径在真实浏览器里可用」，不是「门户有端到端 UI 回归」。
+- **浏览器端 prover 已在真实浏览器里跑通，门户面板也已经有浏览器渲染回归了**（T28，
+  2026-10-26）。WASM 模块（`cmd/ballot-wasm`）在 node 下端到端跑通
+  （`tests/e2e/wasm_prover_test.go`：init → prove → 提交 → 计票还原），并在 2026-10-25 于
+  **真实浏览器**（Chromium / Electron）里跑通同一套链路：`wasm_exec.js` +
+  `ballot-prover.wasm` + `proving.key` 三个静态资源从门户目录加载，init 11.8~14.3 秒、
+  prove 2.9 秒，产出的密文 / nullifier / proof 被服务端以真 verifying key 验签通过（201），
+  计票还原出浏览器端选的那个选项。
+  ✅ **2026-10-26 起这条链路还有了自动化回归**：`scripts/web-e2e.sh` + Playwright
+  （`web/e2e/portal.spec.ts`）在真浏览器里自动跑「领凭证 → 本地出票 → 提交 → 查状态 →
+  计票」与资格路径（导入资格文件 → 匿名领取 → 重复领取被拒），CI 有独立 job（`web-e2e`）。
+  ⚠️ 但它只覆盖**关键路径** —— 视觉细节、响应式布局、可访问性仍靠人工。
 - **「一人一票」的资格证明已落地（T22）**，但还有三处要注意：
   - **门户的浏览器端资格路径已在真浏览器里人工点过一遍**（2026-10-25，Chromium / Electron）：
     导入资格文件 → 领取 201 → **重复领取 409「这份资格已经领过票了 —— 一人一票」** →
-    浏览器本地生成选票 → 提交 201 → 计票还原出所选选项。但仓库无 Playwright，
-    **每次上线仍要人工点一遍**（步骤见 `docs/deployment-checklist.md` §8.1）。
+    浏览器本地生成选票 → 提交 201 → 计票还原出所选选项；✅ **2026-10-26 起也有自动化回归**
+    （T28，见上）。⚠️ **部署形态**（真域名、反代）仍要人工点一遍
+    （步骤见 `docs/deployment-checklist.md` §8.1）。
   - **`cmd/loadtest` 不支持资格证明**（它不会取挑战、也不会出资格证明），因此压测仍然
     只能在 debug 模式跑。
   - **资格包丢了无法恢复**（服务端不存秘密与叶子），补发要重新生成整份名单。

@@ -29,7 +29,7 @@ endif
 	vet fmt fmt-check \
 	web-install web-dev web-build web-test web-lint web-typecheck web-format web-format-check \
 	web-wasm web-proving-key web-eligibility-key eligibility-list \
-	browser-acceptance \
+	browser-acceptance web-e2e \
 	check ci clean
 
 help: ## Show available targets
@@ -161,6 +161,9 @@ eligibility-list: ## Build the offline eligibility-list tool
 
 browser-acceptance: ## Prepare the browser acceptance environment (make browser-acceptance ARGS=setup|verify|stop)
 	bash ./scripts/browser-acceptance.sh $(or $(ARGS),setup)
+
+web-e2e: ## Run the portal end-to-end tests in a real browser (make web-e2e)
+	bash ./scripts/web-e2e.sh $(or $(ARGS),run)
 
 # ---------- 组合目标 ----------
 

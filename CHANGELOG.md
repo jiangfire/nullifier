@@ -49,6 +49,17 @@ v0.2.0 之后的变更。本版的主题是**「接口不再动」** —— 完�
 
 ### 新增
 
+- **门户的浏览器端 UI 自动化（T28）** —— 门户的浏览器路径第一次有了**自动化回归**。
+  - 用例：`web/e2e/portal.spec.ts`（Playwright，**真浏览器**）跑两条路径 ——
+    领凭证 → 浏览器本地生成选票 → 提交 → 查询状态 → **计票还原出所选的选项**；
+    以及资格路径（导入资格文件 → 匿名领取 → **重复领取被拒**「一人一票」）。
+  - 环境脚本：`scripts/web-e2e.sh`（`run` / `setup` / `test` / `stop`）自己备好一切 ——
+    两套密钥、资格名单、**release 模式**的服务端（真 verifying key + 强制一人一票）、
+    凭证池、门限解密会话、门户 dev server。入口：`make web-e2e`。
+  - CI 新增独立 job（`web-e2e`）。
+  - ⚠️ **闭合的是「接线没断」，不是「部署形态验过了」** —— 真域名、反向代理、真实浏览器
+    版本仍要人工点一遍（`scripts/browser-acceptance.sh`，步骤见部署清单 §8 / §8.1）。
+  - ⚠️ **新增两个 devDependency**（`@playwright/test` / `@types/node`）：**运行时依赖一个没动**。
 - **容量报告与压测脚本（T27）** —— 「这台服务能扛多少票」第一次有了带数字的答案。
   - 报告：[`docs/capacity-report-v0.3.0.md`](./docs/capacity-report-v0.3.0.md)
     （吞吐 / 延迟分位 / 错误率 / 资源配置建议）；脚本：`scripts/capacity-run.sh`

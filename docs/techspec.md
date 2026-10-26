@@ -993,6 +993,14 @@ Retry-After: 3
 - **nullifier 现在由 prover 派生**：出票时由 `ballot.ProveBallot` 在本地随机一个秘密
   `s` 并派生 `nullifier = MiMC(s, proposal_id)`，秘密不出本地。门户表单里的 nullifier
   字段仍可手工编辑（低频工具），但正式出票走 prover 这条路。
+- **门户有浏览器级自动化回归**（T28）：`web/e2e/portal.spec.ts` 用 Playwright 在**真浏览器**
+  里跑「领凭证 → 本地出票 → 提交 → 查状态 → 计票」与资格路径（导入资格文件 → 匿名领取
+  → 重复领取被拒）。环境由 `scripts/web-e2e.sh` 备好（两套密钥、资格名单、release 模式服务端、
+  凭证池、解密会话、门户 dev server），入口 `make web-e2e`，CI 独立 job `web-e2e`。
+  - **两层测试分工**：vitest 那层（`panels.test.ts`）抓模板与状态机；Playwright 那层抓**接线**
+    —— 跨语言字符串、静态资源、WASM prover、事件绑定这类问题只有真浏览器能暴露。
+  - ⚠️ **用例时长被投票窗口框住**：计票要求提案已关闭（服务端只认 `ends_at` 过去了），
+    投票要求窗口开着 —— 窗口时长要装得下浏览器端出证明（十几秒）。
 
 ### 7.2 前端信息架构与设计系统
 
@@ -1372,8 +1380,8 @@ make pg-test        # 起库 → 跑集成测试 → 关库
     字段会报出来）；release 模式强制开启，开发模式默认关闭。
   - **门户的浏览器端资格路径已在真浏览器里人工验过一遍**（2026-10-25，Chromium / Electron：
     导入资格文件 → 领取 201 → 重复领取 409 → 本地生成选票 → 提交 201 → 计票还原出所选
-    选项）。仓库里**没有** Playwright，自动化只到 node 驱动 WASM
-    （`tests/e2e/wasm_eligibility_test.go`）—— **每次上线仍要人工点一遍**。
+    选项）。✅ **2026-10-26 起自动化只到真浏览器**（`web/e2e/portal.spec.ts` + Playwright：
+    同样的路径，还多断言「重复领取被拒」）—— **部署形态**（真域名、反代）仍要人工点一遍。
   - **`cmd/loadtest` 不支持资格证明**（见 §8.1）：它不会取挑战、也不会出资格证明。
   - **资格表不许与凭证、票据关联**：`eligibility_uses` 只存去重键。一旦能把资格
     连到票，「分发不泄露身份」这条底线就破了。
