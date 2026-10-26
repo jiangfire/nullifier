@@ -146,6 +146,17 @@ jobs:
         run: pnpm --dir web install --frozen-lockfile
 
       # 真浏览器：Playwright 自带的 Chromium（--with-deps 装系统依赖）。
+      #
+      # ⚠️ **浏览器本体要缓存**：它有 120 MiB，在 GitHub runner 上冷下载实测 **12 分钟**
+      #    （2026-10-26 首次跑 web-e2e job 时量的）—— 比用例本身（2.2 分钟）长得多。
+      #    缓存键按 lockfile 的哈希：依赖变了浏览器版本才可能变，缓存自动失效。
+      #    缓存没命中也只是重新下载，**不会让 job 失败**。
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright/
+          key: ${{ runner.os }}-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
+
       - name: Install the Playwright browser
         run: pnpm --dir web exec playwright install --with-deps chromium
 
