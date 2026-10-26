@@ -81,7 +81,7 @@
   - ⚠️ **全仓口径的复现命令里 `-coverprofile=xxx.out` 必须加引号**（`go test "-coverprofile=whole.out" "-coverpkg=./..." ./...`）—— 否则参数被拆开，profile 写不出来（曾因此把全仓覆盖率误记成 75.5%）；手工聚合 profile 还要自己按块去重
 - **PostgreSQL 集成测试的就绪判据是日志，不是端口**：`tests/integration/persistence_postgres_test.go` 用 `wait.ForLog("database system is ready to accept connections").WithOccurrence(2)`（出现两次 —— 第一次是 initdb 期间的临时服务器，第二次才是对外接受连接的那一个）。**别改回 `wait.ForListeningPort`** —— 它只保证 docker-proxy 接住了宿主机端口，容器里的 PostgreSQL 还在 initdb 时连上去会拿到 `connection reset by peer`（2026-10-26 在 CI 上连挂两次，`main` 因此变红）
 - **篡改 nullifier 要动最低字节**：域元素的规范编码要求值 < r（BN254 的 r 顶字节是 0x30），顶字节恰好是 0x30 的标量（均匀分布里约占 0.81%）翻一位就越界，`isCanonicalScalar` 会拒绝 —— 用例会因「篡改方式不合法」而红，而不是因「验签没过」。这条判据由 `internal/infrastructure/crypto/ballot/encoding_test.go` 的 `TestCanonicalScalarRange` 钉住
-- CI 实际执行：`go test ./...` + `bash ./scripts/check-coverage.sh 80 coverage.ci.out`，**另加** gofmt 检查、前端 lint / tsc / vitest，以及**门户浏览器 e2e**（`bash ./scripts/web-e2e.sh run`，job 名 `web-e2e`）（`.github/workflows/ci.yml`）。⚠️ **Playwright 浏览器缓存按 ref 分域**：每个 ref（含 `main`）的第一次运行都要冷下载 120 MiB（约 12 分钟），之后同一 ref 才命中（约 4 分钟）—— 别把一次慢的 run 当成缓存失效
+- CI 实际执行：`go test ./...` + `bash ./scripts/check-coverage.sh 80 coverage.ci.out`，**另加** gofmt 检查、前端 lint / tsc / vitest，以及**门户浏览器 e2e**（`bash ./scripts/web-e2e.sh run`，job 名 `web-e2e`）（`.github/workflows/ci.yml`）。⚠️ **Playwright 浏览器缓存按 ref 分域**：`main` 的 push run 读不到 PR 分支的缓存，但**PR 的 run 会回退读 base 分支（`main`）的缓存** —— 所以要付冷下载代价（120 MiB，约 12 分钟）的只有 base 分支自己的第一次运行，之后同一 ref 约 4 分钟。别把一次慢的 run 当成缓存失效
 
 ## PR & commit conventions
 
