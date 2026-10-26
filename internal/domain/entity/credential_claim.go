@@ -16,5 +16,14 @@ type CredentialClaim struct {
 	UserPubKey []byte     `gorm:"not null" json:"user_pub_key"`
 	Signature  []byte     `gorm:"not null" json:"signature"`
 	ClaimedAt  *time.Time `gorm:"index" json:"claimed_at"`
+	// ReservedAt 是这个槽位被**预留**的时刻（匿名领取的第一步）。
+	//
+	// 预留是**占位**：槽位在预留期间不会被别的领取者拿走，所以并发领取的人
+	// 各拿各的槽位（没有预留的话，所有人都会拿到「第一个空闲槽位」，
+	// 然后互相撞车）。它不是「已领取」—— 凭证还没签发，槽位最终归零。
+	//
+	// 预留会**过期**（见 usecase 里的 CredentialReservationTTL）：只预留不
+	// 领取的客户端不能永久占住池子。
+	ReservedAt *time.Time `gorm:"index" json:"reserved_at"`
 	CreatedAt  time.Time  `gorm:"not null" json:"created_at"`
 }

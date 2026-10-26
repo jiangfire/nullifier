@@ -278,8 +278,62 @@ func TestAPI_ClaimRetriesWhenSlotTaken_E2E(t *testing.T) {
 	require.Equal(t, 2, reserveCalls, "换一个槽位重来：预留应该被调用两次")
 }
 
+// TestAPI_ClaimRetriesWhenSlotTakenAtBlindSign_E2E 验证**盲签名阶段**撞车时
+// 客户端也会换一个槽位重来。
+//
+// 撞车可以发生在两个地方：attest（槽位在签名前被别人领走）与 blind-sign
+// （签名前一瞬被别人领走）。服务端对两者回的是同一个码 —— 409
+// CREDENTIAL_EXISTS —— 客户端的判据因此只有一条。
+func TestAPI_ClaimRetriesWhenSlotTakenAtBlindSign_E2E(t *testing.T) {
+	const adminToken = "secret"
+
+	var blindSignAttempts int
+	var injectedConflicts int
+	ts, recorded := newBlindSignatureServer(
+		t,
+		adminToken,
+		func(w http.ResponseWriter, r *http.Request) bool {
+			if !strings.HasSuffix(r.URL.Path, "/credentials/blind-sign") {
+				return false
+			}
+			blindSignAttempts++
+			if blindSignAttempts > 1 {
+				return false
+			}
+			// 第一次盲签名假装槽位已经被别人领走。
+			injectedConflicts++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"code":"CREDENTIAL_EXISTS","error":"credential already issued"}`))
+			return true
+		},
+	)
+	proposalID := createProposal(t, ts, adminToken)
+
+	client := testutil.NewBlindClient(ts.URL)
+	client.AdminToken = adminToken
+	require.NoError(t, client.FillCredentialPool(proposalID, 2))
+
+	credential, err := client.ClaimCredential(proposalID, []byte("one-time-public-key"))
+	require.NoError(t, err)
+	require.NotEmpty(t, credential.Signature)
+
+	require.Equal(t, 1, injectedConflicts)
+	require.Equal(t, 2, blindSignAttempts, "第一次被挡下，第二次才签出")
+	reserveCalls := 0
+	for _, item := range *recorded {
+		if strings.HasSuffix(item.Path, "/credentials/claim") {
+			reserveCalls++
+		}
+	}
+	require.Equal(t, 2, reserveCalls, "换一个槽位重来：预留应该被调用两次")
+}
+
 // TestAPI_BlindSignRequiresPoolSlot_E2E 验证公开的盲签名端点不能为「池里没有的
 // user_id」签名 —— 否则签发方就是任意消息的签名预言机。
+//
+// 拒绝时回 **409 CREDENTIAL_EXISTS**：槽位不在「可用」集合里，意味着它已经被
+// 别人领走了 —— 客户端据此换一个槽位重来（与 attest 阶段的冲突同一个信号）。
 func TestAPI_BlindSignRequiresPoolSlot_E2E(t *testing.T) {
 	const adminToken = "secret"
 	ts, _ := newBlindSignatureServer(t, adminToken)
@@ -295,6 +349,11 @@ func TestAPI_BlindSignRequiresPoolSlot_E2E(t *testing.T) {
 			"blinded_message":    base64.StdEncoding.EncodeToString([]byte("blinded")),
 			"issuer_key_version": 1,
 		})
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	var failure struct {
+		Code string `json:"code"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&failure))
+	require.Equal(t, "CREDENTIAL_EXISTS", failure.Code)
 	_ = resp.Body.Close()
 }

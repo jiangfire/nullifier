@@ -32,7 +32,7 @@ func TestCredentialClaimRepository_GetAvailableByUserIDSkipsClaimed(t *testing.T
 	ctx := context.Background()
 	seedClaim(t, repo, "p-1", 1)
 
-	claim, err := repo.TakeAvailable(ctx, "p-1")
+	claim, err := repo.ReserveAvailable(ctx, "p-1", time.Minute)
 	require.NoError(t, err)
 	ok, err := repo.MarkClaimed(ctx, claim.ID, []byte("pub"), []byte("sig"), time.Now().UTC())
 	require.NoError(t, err)

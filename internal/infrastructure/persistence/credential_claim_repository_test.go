@@ -62,7 +62,7 @@ func TestCredentialClaimRepository_MarkClaimedOnlyOnce(t *testing.T) {
 	ctx := context.Background()
 	seedClaim(t, repo, "p-1", 1)
 
-	claim, err := repo.TakeAvailable(ctx, "p-1")
+	claim, err := repo.ReserveAvailable(ctx, "p-1", time.Minute)
 	require.NoError(t, err)
 
 	ok, err := repo.MarkClaimed(ctx, claim.ID, []byte("pub"), []byte("sig"), time.Now().UTC())
@@ -79,73 +79,171 @@ func TestCredentialClaimRepository_MarkClaimedOnlyOnce(t *testing.T) {
 	require.Equal(t, int64(0), count)
 }
 
-func TestCredentialClaimRepository_TakeAvailableSkipsClaimed(t *testing.T) {
+// TestCredentialClaimRepository_ReserveAvailableSkipsReserved 验证预留过的槽位
+// 不会被下一次预留拿走 —— 并发领取的人必须各拿各的。
+func TestCredentialClaimRepository_ReserveAvailableSkipsReserved(t *testing.T) {
 	repo := newClaimRepo(t)
 	ctx := context.Background()
 	seedClaim(t, repo, "p-1", 2)
 
-	first, err := repo.TakeAvailable(ctx, "p-1")
+	first, err := repo.ReserveAvailable(ctx, "p-1", time.Minute)
 	require.NoError(t, err)
-	ok, err := repo.MarkClaimed(ctx, first.ID, []byte("pub"), []byte("sig"), time.Now().UTC())
-	require.NoError(t, err)
-	require.True(t, ok)
+	require.NotNil(t, first.ReservedAt)
 
-	second, err := repo.TakeAvailable(ctx, "p-1")
+	second, err := repo.ReserveAvailable(ctx, "p-1", time.Minute)
 	require.NoError(t, err)
 	require.NotEqual(t, first.ID, second.ID)
+}
+
+// TestCredentialClaimRepository_ReserveAvailableReclaimsExpired 验证过期的预留
+// 可以被重新拿走 —— 只预留不领取的客户端不能永久占住池子。
+func TestCredentialClaimRepository_ReserveAvailableReclaimsExpired(t *testing.T) {
+	repo := newClaimRepo(t)
+	ctx := context.Background()
+	seedClaim(t, repo, "p-1", 1)
+
+	// TTL 为负 → 任何预留都算过期。
+	first, err := repo.ReserveAvailable(ctx, "p-1", -time.Second)
+	require.NoError(t, err)
+
+	second, err := repo.ReserveAvailable(ctx, "p-1", -time.Second)
+	require.NoError(t, err)
+	require.Equal(t, first.ID, second.ID, "过期预留应当可以被重新拿走")
+}
+
+// TestCredentialClaimRepository_ReleaseReservationFreesSlot 验证释放预留后
+// 槽位回到空闲状态（资格被拒时不能白白消耗池子）。
+func TestCredentialClaimRepository_ReleaseReservationFreesSlot(t *testing.T) {
+	repo := newClaimRepo(t)
+	ctx := context.Background()
+	seedClaim(t, repo, "p-1", 1)
+
+	claim, err := repo.ReserveAvailable(ctx, "p-1", time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, repo.ReleaseReservation(ctx, claim.ID))
+
+	// 释放之后，另一个领取者能拿到同一个槽位。
+	again, err := repo.ReserveAvailable(ctx, "p-1", time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, claim.ID, again.ID)
+}
+
+// TestCredentialClaimRepository_GetReservedByUserID 验证「正在预留中」的判定：
+// 新鲜的预留查得到，过期的查不到，没预留的也查不到。
+func TestCredentialClaimRepository_GetReservedByUserID(t *testing.T) {
+	repo := newClaimRepo(t)
+	ctx := context.Background()
+	seedClaim(t, repo, "p-1", 2)
+
+	claim, err := repo.ReserveAvailable(ctx, "p-1", time.Minute)
+	require.NoError(t, err)
+
+	found, err := repo.GetReservedByUserID(ctx, "p-1", claim.UserID, time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, claim.ID, found.ID)
+
+	// 过期的预留不算「正在领」。
+	_, err = repo.GetReservedByUserID(ctx, "p-1", claim.UserID, -time.Second)
+	require.Error(t, err)
+
+	// 没有预留过的槽位也不算。
+	other, err := repo.ReserveAvailable(ctx, "p-1", time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, repo.ReleaseReservation(ctx, other.ID))
+	_, err = repo.GetReservedByUserID(ctx, "p-1", other.UserID, time.Minute)
+	require.Error(t, err)
 }
 
 // 并发领取时，同一个槽位不能被两个人同时拿走。
 //
 // 用文件库而不是 :memory: —— SQLite 的内存库是「每个连接一个」，
 // 并发写会落到不同的库上。
-func TestCredentialClaimRepository_ConcurrentClaimsGetDistinctSlots(t *testing.T) {
+//
+// 这条用例钉住的是**预留的原子性**：N 个并发预留必须拿到 N 个**不同**的槽位，
+// 且**不需要重试**。预留不是原子的（旧实现只 SELECT 不改状态）时，所有人
+// 会拿到同一个槽位，只能靠「撞车 → 重试」兜着 —— 真实投票窗口里几百人同时
+// 领取时，那是一场灾难（每一轮只有一个人能成）。
+func TestCredentialClaimRepository_ConcurrentReservationsGetDistinctSlots(t *testing.T) {
 	repo := newClaimRepoWithDSN(t, filepath.Join(t.TempDir(), "claims.db"))
 	ctx := context.Background()
 	seedClaim(t, repo, "p-1", 8)
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	claimed := map[string]bool{}
+	reserved := map[string]bool{}
 	failures := 0
 
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// 与用例层一致：槽位被抢走就换一个重试。
-			for attempt := 0; attempt < 50; attempt++ {
-				claim, err := repo.TakeAvailable(ctx, "p-1")
-				if err != nil {
-					continue
-				}
-				ok, err := repo.MarkClaimed(
-					ctx, claim.ID, []byte("pub"), []byte("sig"), time.Now().UTC(),
-				)
-				if err != nil || !ok {
-					continue
-				}
+			claim, err := repo.ReserveAvailable(ctx, "p-1", time.Minute)
+			if err != nil {
 				mu.Lock()
-				claimed[claim.ID] = true
+				failures++
 				mu.Unlock()
 				return
 			}
 			mu.Lock()
-			failures++
+			reserved[claim.ID] = true
 			mu.Unlock()
 		}()
 	}
 	wg.Wait()
 
-	require.Zero(t, failures, "每次领取都应当最终拿到一个槽位")
-	require.Len(t, claimed, 8, "8 个槽位应当被 8 次领取各拿一个")
+	require.Zero(t, failures, "每次预留都应当拿到一个槽位")
+	require.Len(t, reserved, 8, "8 次并发预留应当拿到 8 个不同的槽位")
 }
 
-func TestCredentialClaimRepository_TakeAvailableNotFound(t *testing.T) {
+func TestCredentialClaimRepository_ReserveAvailableNotFound(t *testing.T) {
 	repo := newClaimRepo(t)
 
-	_, err := repo.TakeAvailable(context.Background(), "p-missing")
+	_, err := repo.ReserveAvailable(context.Background(), "p-missing", time.Minute)
 	require.Error(t, err)
+}
+
+// TestCredentialClaimRepository_ConcurrentReservationsScaleToPool 把并发预留
+// 拉到真实投票窗口的规模：几百个槽位、几十个并发领取者。
+//
+// 8 槽位 8 并发的小规模用例**测不出**真实缺陷：池子里槽位够多时，
+// 「挑候选 → 条件更新失败 → 重试」的循环会因为所有并发者都盯上同一行
+// （同一批插入的 created_at 完全相同，排序落回随机的 UUID id）而反复空转，
+// 重试次数耗尽就误报「池空」。
+//
+// 这条用例钉住的是：**每一次预留都必须成功，且拿到互不相同的槽位**。
+func TestCredentialClaimRepository_ConcurrentReservationsScaleToPool(t *testing.T) {
+	repo := newClaimRepoWithDSN(t, filepath.Join(t.TempDir(), "scale-claims.db"))
+	ctx := context.Background()
+
+	const slotCount = 205
+	const workers = 32
+	seedClaim(t, repo, "p-scale", slotCount)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	reserved := map[string]bool{}
+	failures := 0
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			claim, err := repo.ReserveAvailable(ctx, "p-scale", time.Minute)
+			if err != nil {
+				mu.Lock()
+				failures++
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			reserved[claim.ID] = true
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	require.Zero(t, failures, "每次预留都应当成功 —— 池子够大就不该报池空")
+	require.Len(t, reserved, workers, "并发预留必须拿到互不相同的槽位")
 }
 
 // 备池一次投几千个槽位是允许的（上限 10000），所以写入必须分批 ——
