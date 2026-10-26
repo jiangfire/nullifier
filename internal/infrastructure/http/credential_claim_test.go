@@ -155,6 +155,9 @@ func TestClaimCredential_MarksSlotClaimed(t *testing.T) {
 
 // TestClaimCredential_BlindSignRejectsUnknownUserID 验证公开的盲签名端点不能
 // 为「池里没有的 user_id」签名 —— 否则签发方就是任意消息的签名预言机。
+//
+// 回的是 **409 CREDENTIAL_EXISTS**：槽位不在「有人正在领」的集合里，意味着
+// 它已经被别人领走了 —— 客户端据此换一个槽位重来（与 attest 阶段同一个信号）。
 func TestClaimCredential_BlindSignRejectsUnknownUserID(t *testing.T) {
 	engine, _, _ := buildFullStackEngineWithVerifier(t, nil)
 	ts := httptest.NewServer(engine)
@@ -173,7 +176,12 @@ func TestClaimCredential_BlindSignRejectsUnknownUserID(t *testing.T) {
 			"issuer_key_version": 1,
 		},
 	)
-	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	require.Equal(t, http.StatusConflict, resp.StatusCode)
+	var failure struct {
+		Code string `json:"code"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&failure))
+	require.Equal(t, "CREDENTIAL_EXISTS", failure.Code)
 	_ = resp.Body.Close()
 }
 

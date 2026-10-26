@@ -110,3 +110,47 @@ jobs:
             fi
           done
           echo "the built portal ships ballot-prover.wasm and wasm_exec.js"
+
+  # 门户端到端测试（T28）：**真浏览器**里走一遍门户的两条路径 ——
+  # 领凭证 → 本地生成选票 → 提交 → 查询状态 → 计票，
+  # 以及资格路径（导入资格文件 → 匿名领取 → 重复领取被拒）。
+  #
+  # 这条链路能挖出 node 驱动的单元测试挖不出的跨语言问题
+  # （盲签名变体名、字段名、编码、响应式 Proxy）。
+  web-e2e:
+    name: web-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
+      # 真浏览器：Playwright 自带的 Chromium（--with-deps 装系统依赖）。
+      - name: Install the Playwright browser
+        run: pnpm --dir web exec playwright install --with-deps chromium
+
+      # SQLite 驱动依赖 cgo，ubuntu-latest 自带 gcc。
+      - name: Run the portal end-to-end tests
+        env:
+          CGO_ENABLED: "1"
+        run: bash ./scripts/web-e2e.sh run

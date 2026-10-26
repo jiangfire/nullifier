@@ -81,8 +81,9 @@ nullifier 把这两个动作拆开:
 
 | 形态 | 说明 |
 |---|---|
-| HTTP API | 18 个 `/api/v1/*` 端点 + `/healthz`,管理面走 Bearer Token |
+| HTTP API | 18 个 `/api/v1/*` 端点 + `/healthz` + `/metrics`,管理面走 Bearer Token |
 | CLI | 16 个命令,复用同一套 HTTP API,不绕过服务端校验（`ballot-prove` 除外 —— 它纯本地出证明） |
+| 审计工具 | `cmd/audit-recompute` —— 拿计票份额**脱离服务端**重算计票与锚点,与库内已发布的结果逐字节比对 |
 | Web 门户 | Vue 3 单页应用,覆盖投票端与运营端全流程 |
 
 ## 快速开始
@@ -218,6 +219,11 @@ internal/di         Wire 装配          internal/config   viper 配置 + 运行
 | `SERVER_ADMIN_BEARER_TOKEN` | `server.admin_bearer_token` | 空 | 为空则启动时生成临时 token 并打印日志 |
 | `SERVER_MODE` | `server.mode` | `release` | `release`/`prod`/`production` 时强制要求 `vk_path` |
 | `SERVER_AUTO_MIGRATE` | `server.auto_migrate` | 非 release 模式 `true` | `release` 模式默认 `false`:改表是独立步骤 |
+| `SERVER_TRUSTED_PROXIES` | `server.trusted_proxies` | 空 | 可信反代网段(CIDR,空格分隔)。**默认空 = 不信任任何代理**;部署在反代后面时必须配,否则伪造 `X-Forwarded-For` 能绕过限流 |
+| `RATE_LIMIT_ENABLED` | `rate_limit.enabled` | release 模式 `true` | **生产模式强制开启**:设成 `false` 会让服务直接启动失败 |
+| `RATE_LIMIT_CREDENTIALS_RPS` / `_BURST` | `rate_limit.credentials.*` | `10` / `40` | 凭证领取链路的额度(每来源) |
+| `RATE_LIMIT_VOTES_RPS` / `_BURST` | `rate_limit.votes.*` | `10` / `40` | 投票提交的额度(每来源)。验签最贵的一组 |
+| `RATE_LIMIT_READ_RPS` / `_BURST` | `rate_limit.read.*` | `50` / `100` | 只读端点的额度(每来源) |
 | `CONFIG_FILE` | —(不是配置项) | 空 | **显式指定配置文件路径**,如 `./configs/config.production.yaml`;指定的文件不存在时服务直接启动失败 |
 
 生产部署参考 `configs/config.production.yaml` 与 `configs/production.env.example`。
@@ -297,7 +303,7 @@ nullifier-server             # 再起服务
 | `GET` | `/healthz` | 健康检查(响应含 `debug` 与 `eligibility` 两个布尔字段) |
 | `GET` | `/api/v1/proposals` | 列出全部提案(按创建时间倒序,含已关闭/未开始) |
 | `GET` | `/api/v1/proposals/open` | 时间窗口内的开放提案 |
-| `POST` | `/api/v1/votes` | 提交匿名投票(7 个字段全部必填;公开输入由服务端自拼,不收 `public_witness`) |
+| `POST` | `/api/v1/proposals/:id/votes` | 提交匿名投票(6 个字段全部必填;**提案 ID 只从路径来**,请求体里不再有 `proposal_id`;公开输入由服务端自拼,不收 `public_witness`) |
 | `POST` | `/api/v1/proposals/:id/vote-status` | 持凭证材料查询是否已投票 |
 | `GET` | `/api/v1/proposals/:id/election-key` | 计票公钥(公开值,客户端本地加密用;未压缩形式 base64) |
 | `GET` | `/api/v1/proposals/:id/results` | 已发布的计票结果 |
@@ -318,6 +324,18 @@ nullifier-server             # 再起服务
 | `POST` | `/api/v1/proposals/:id/credentials/pool` | 往凭证池批量投放待领取槽位 |
 | `POST` | `/api/v1/proposals/:id/decryption/setup` | 初始化门限解密会话 |
 | `POST` | `/api/v1/proposals/:id/results/publish` | 提交份额并发布结果 |
+| `GET` | `/metrics` | Prometheus 指标(只含计数与耗时,**不含任何选票内容或身份**) |
+
+> **接口契约已冻结**(v0.3.0):字段名、端点路径与密文格式从 v0.3.0 起只增不改 ——
+> 完整口径见 [`docs/api-contract-v1.md`](docs/api-contract-v1.md),由
+> `tests/architecture/api_contract_test.go` 拿 Go 与 TS 两侧**双向比对**守着。
+> 改字段名 / 删字段 / 改语义 / 改路径 = 破坏性变更,须走下一个 minor 版本。
+>
+> **限流**:公共端点按「来源 + 路由组」限流,超限返回 **429** + `Retry-After` +
+> `{"error":"rate limit exceeded","code":"RATE_LIMITED"}`。这是**加法** —— 请求与
+> 响应的字段、路径都没变,只是多了一种可能的状态码。客户端按 `Retry-After` 退避
+> 重试即可(投票提交被限流挡下时**没有**进业务层,重试是安全的)。生产模式强制开启,
+> 额度见上面的配置表。
 
 ## 开发
 
@@ -331,6 +349,7 @@ make test              # 全部测试
 make cover             # 覆盖率门槛(THRESHOLD=90 可覆盖默认值)
 make web-lint web-typecheck web-test   # 前端检查
 make loadtest ARGS="-votes 200 -concurrency 20"   # 并发投票压测(需要一个本地 debug 服务)
+make audit-recompute ARGS="-proposal p-1 -shares-file shares.json"   # 离线复算已发布的结果(只读票库)
 make pg-test          # PostgreSQL 集成测试(用 docker-compose 起一个库,跑完关掉)
 ```
 
@@ -353,10 +372,19 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 
 | 口径 | 数值 | 覆盖范围 |
 |---|---|---|
-| 门槛口径 | **81.1%** | `scripts/check-coverage.sh` 选中的 12 个包:usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-eligibility-list / cmd-server(2026-10-25 实测) |
-| 全仓口径 | **72.7%** | `./...` 全部包(2026-10-25 实测) |
+| 门槛口径 | **81.4%** | `scripts/check-coverage.sh` 选中的 17 个包:usecase / config / di / tally / shares / http / http-middleware / crypto / crypto-ballot / metrics / persistence / **ratelimit** / cmd-cli / cmd-keygen / cmd-eligibility-list / cmd-audit-recompute / cmd-server(2026-10-25 实测) |
+| 全仓口径 | **82.5%** | `./...` 全部包(2026-10-25 实测,**含跨包覆盖** —— 别的包的测试跑到这里的代码也算,所以高于门槛口径) |
 
-门槛是**逐包分档**的,每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`,单个包回退会直接让 CI 变红 —— 不再是"一个总和撑着,低覆盖率的包悄悄退化"。当前最低的一档是 `internal/infrastructure/persistence`(63.9%),抬门槛时它会先卡住。**新增代码请一并补测**。
+全仓口径可复现:
+
+```bash
+go test "-coverprofile=whole.out" "-coverpkg=./..." ./...
+go tool cover "-func=whole.out" | tail -1
+```
+
+⚠️ **`-coverprofile=xxx.out` 这类带点的 `=` 参数在 bash / PowerShell 里必须加引号**,否则会被拆成 `-coverprofile=xxx` + `.out`,Go 报 `no required module provides package .out`,profile 写不出来 —— 曾因此把全仓覆盖率误记成 75.5%。另外,手工聚合 profile 必须自己按块去重(`go tool cover` 内部会取 max,直接按目录求和会得到失真的极小值)。
+
+门槛是**逐包分档**的,每个包的最低覆盖率写在 `scripts/coverage-thresholds.txt`,单个包回退会直接让 CI 变红 —— 不再是"一个总和撑着,低覆盖率的包悄悄退化"。当前最低的一档是 `internal/infrastructure/persistence`(65.8%),抬门槛时它会先卡住。**新增代码请一并补测**。
 
 ## 项目状态与限制
 
@@ -365,14 +393,18 @@ CI 定义在 `.github/workflows/ci.yml`,执行 `go vet` + `gofmt` 检查 + `go t
 - **证明链:服务端、CLI、浏览器三侧都通了。** 真实 Groth16 电路(`internal/infrastructure/crypto/ballot/`)、`cmd/keygen` 密钥生成流程、服务端按请求字段自拼公开输入并真实验签都已落地 —— 篡改任一公开输入都会验签失败。**CLI 能本地生成 proof**(`ballot-prove`,用本地 proving key,证明不经过服务端);**浏览器也能**(`cmd/ballot-wasm` 编译成 WASM,门户在 Web Worker 里加载它出票)。`crypto.vk_path` 为空时验证器只要求 proof 非空(开发模式),本地「验证通过」不代表真的验过。
 - **选票密文在客户端生成,CLI 与门户两侧都已闭合。** 服务端只提供公开的计票公钥(`GET /api/v1/proposals/:id/election-key`),落库记录里只有密文。门户的出票入口是「在浏览器本地生成选票」;CLI 是 `ballot-encrypt` + `ballot-prove`。两边的点编码**逐字节一致**,由一组跨语言已知答案向量锁死。端到端证据:`tests/e2e/client_prover_test.go`(CLI)与 `tests/e2e/wasm_prover_test.go`(浏览器 WASM 模块,node 驱动)。**服务端没有任何接收明文选项的入口** —— `ballot-draft`(服务端代加密)已删除,`tests/architecture/` 持续盯着这条底线。
 - **浏览器端 prover 的静态资源要部署时备齐。** `wasm_exec.js`、`ballot-prover.wasm`（约 11.9 MB，gzip 后约 2.8 MB）、`proving.key`（约 1.2 MB）、`eligibility-proving.key`（约 1.1 MB）—— **release 模式下是四个，缺一不可**：`make web-wasm`、`make web-proving-key PK=<路径>`、`make web-eligibility-key PK=<路径>`。首次出票要下载它们并初始化证明器（浏览器实测约 12~14 秒，含编译电路），出证明约 3 秒。**两把 proving key 只在客户端** —— 服务端只拿 verifying key；**它们不是同一把**（选票电路与资格电路各一套 setup）。⚠️ **发布流水线的门户包里默认没有那两把 key**（秘密材料，每套部署要用与自己服务端配对的那对）—— 部署时必须自己补进 `web/dist/`，详见 [`docs/deployment-checklist.md`](./docs/deployment-checklist.md) §1/§6。
-- **门户的浏览器路径已在真实浏览器里跑过（2026-10-25）。** 端到端证据有三条：node 驱动同一个 WASM 模块的自动化用例（`tests/e2e/wasm_prover_test.go`），一次**真实浏览器**（Chromium / Electron）的人工验收（静态资源三件套真实加载 → 出证明 init 11.8~14.3 秒、prove 2.9 秒 → 服务端以真 verifying key 验签通过 201 → 提案关闭后计票还原出所选选项），以及把整套人工流程**固化成脚本**的 `scripts/browser-acceptance.sh`（`setup` 备好环境并逐条打印步骤 → 人在浏览器里点 → `verify` 核对服务端日志与计票 → `stop` 收尾）。⚠️ 但**仓库里仍然没有浏览器自动化**（无 Playwright），门户的 UI 交互仍要人工核对；首次上线仍建议跑一次 `bash ./scripts/browser-acceptance.sh setup` 人工点一遍 —— 上一次真实验收正是靠它挖出了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而不是线路名，领取流程会停在 claim 之后）。
+- **门户的浏览器路径已在真实浏览器里跑过（2026-10-25）。** 端到端证据有三条：node 驱动同一个 WASM 模块的自动化用例（`tests/e2e/wasm_prover_test.go`），一次**真实浏览器**（Chromium / Electron）的人工验收（静态资源三件套真实加载 → 出证明 init 11.8~14.3 秒、prove 2.9 秒 → 服务端以真 verifying key 验签通过 201 → 提案关闭后计票还原出所选选项），以及把整套人工流程**固化成脚本**的 `scripts/browser-acceptance.sh`（`setup` 备好环境并逐条打印步骤 → 人在浏览器里点 → `verify` 核对服务端日志与计票 → `stop` 收尾）。✅ **2026-10-26 起还多了一条自动化**：Playwright 在**真浏览器**里自动跑同一条链路（`web/e2e/portal.spec.ts`，环境脚本 `scripts/web-e2e.sh`，入口 `make web-e2e`，CI 独立 job `web-e2e`）。⚠️ 但自动化验的是「接线没断」，**部署形态**（真域名、反代）仍要人工点一遍 —— 上一次真实验收正是靠它挖出了一个跨语言 bug（盲签名变体名用了 Go 的枚举名而不是线路名，领取流程会停在 claim 之后）。
 - **凭证签名现在会被验证。** 投票落库前会调用签发方验签,伪造签名的请求返回 401。
 - **凭证签发是真两段式盲签名。** 客户端本地盲化(`sha256(user_id ‖ 0x00 ‖ user_pub_key)`),签发方在**签名阶段**只见盲化消息 —— 它没有、也不需要私钥以外的任何客户端秘密。⚠️ 口径:最后一次 attest 时服务端会看到公钥与 `user_id`,因为验签必须重算凭证消息;达成的是「签发方看不到被签内容」,不是「服务端全程不知道客户端是谁」。
 - **凭证不再由 admin 逐个分发。** 改为「凭证池 + 投票人匿名随机领取」：admin 往池里批量投放预签凭证，投票人自己随机领一张（`POST /api/v1/proposals/:id/credentials/claim`），运营方不再天然掌握「哪个凭证给了谁」。**一人一票由资格证明补回**（见下）。
 - **一人一票靠零知识资格证明强制。** 运营方的权威名单做成 Merkle 承诺，**服务端只拿到名单的根** —— 它能验证「这个资格在名单里」，却**无法把资格对应到任何成员**。去重键 `QualificationID = MiMC(Leaf, ProposalID)` 按提案派生，同一提案里同一资格只能领一次（跨提案互不关联），强制点是新表 `eligibility_uses` 的唯一索引。领凭证前先取一次挑战（`eligibility-challenge`），把资格证明带进 claim；**资格不过不消耗池槽位**。CLI 走 `credential-claim -eligibility`，门户在「身份」面板导入资格文件后本地出证明（资格包只留内存，不写 localStorage、不上传）。
   - ⚠️ **release 模式必须配 `crypto.eligibility_root` + `crypto.eligibility_vk_path`，否则启动失败。** 两项必须成对出现 —— 缺了资格校验的服务端只是个能发凭证的服务器。生产部署的三步（生成名单 → 生成资格密钥 → 部署）见上面的「一人一票：资格名单与资格密钥」。
-  - ⚠️ **门户的资格领取路径没有浏览器自动化**（仓库无 Playwright）—— 自动化证据只到 node 驱动的 WASM 模块，真浏览器里人工点一遍仍要做（`bash ./scripts/browser-acceptance.sh setup` 会备好环境并打印步骤，点完跑 `verify` 核对）。⚠️ `cmd/loadtest` 不支持资格证明（只在未开启资格校验的服务上可用）。⚠️ **资格包丢失找不回来**（它是秘密材料）。⚠️ **真实名单的内容与成员标识形式仍需运营方提供**；单份名单上限 1024 人。
+  - ⚠️ **门户的资格领取路径已有浏览器自动化**（2026-10-26，T28：`web/e2e/portal.spec.ts` + Playwright，真浏览器里断言「导入资格文件 → 匿名领取 → **重复领取被拒**」）—— 但**部署形态**仍要人工点一遍（`bash ./scripts/browser-acceptance.sh setup` 会备好环境并打印步骤，点完跑 `verify` 核对）。⚠️ `cmd/loadtest` 不支持资格证明（只在未开启资格校验的服务上可用）。⚠️ **资格包丢失找不回来**（它是秘密材料）。⚠️ **真实名单的内容与成员标识形式仍需运营方提供**；单份名单上限 1024 人。
 - **`decryption/setup` 拒绝"投票开放中"的提案**,运营上必须在 `starts_at` 之前完成初始化。
+- **接口契约已冻结(v0.3.0)。** 凭证领取 / 投票提交 / 密文格式三处接口定版:字段名、端点路径与密文格式(v3,65 字节)从 v0.3.0 起只增不改。冻结的口径写进 [`docs/api-contract-v1.md`](./docs/api-contract-v1.md),并由 `tests/architecture/api_contract_test.go` 拿 Go 的 struct tag 与 TS 的 interface **双向比对** —— 改一边不改另一边,CI 就红。⚠️ **这是破坏性变更**:旧的 `POST /api/v1/votes` 已不存在,投票提交改为 `POST /api/v1/proposals/:id/votes`(提案 ID 只从路径来,请求体里不再有 `proposal_id`)。
+- **已发布的结果可以被重算。** `cmd/audit-recompute` 拿计票份额**脱离服务端**重算计票与锚点,与库内已发布的结果**逐字节**比对,不一致时退出码非 0(可当门禁用)。它与服务端**共用同一份计票算法**(`internal/tally`)—— 两边各写一份算法,漂移了复算结论就没有意义。连接是**只读**的(SQLite `mode=ro` / PostgreSQL `default_transaction_read_only=on`):不是"我们保证不写",是"写不了"。⚠️ **计票份额是秘密材料** —— 凑齐门限份数就能还原全部选票的明文选项。
+- **服务有指标了。** `GET /metrics` 输出 Prometheus 文本格式(需 admin Bearer 令牌):投票接受/被拒(按错误码分)、凭证领取/盲签名/attest、资格证明校验结果、计票发布数、HTTP 请求数与耗时。⚠️ **只暴露计数与耗时** —— 指标里没有任何选票内容、候选人票数或身份(有一条测试把允许出现的标签名逐个钉死)。
+- **公开端点有限流。** 凭证领取 / 投票提交 / 只读端点按「来源 IP + 路由组」各自独立限流,超限返回 **429** + `Retry-After` + `{"code":"RATE_LIMITED"}`。**release 模式强制开启**(显式 `rate_limit.enabled=false` 直接启动失败)。⚠️ 计数键是**加盐哈希**(`SHA-256(每进程随机盐 ‖ 路由组 ‖ 提案ID ‖ IP)`),所以限流状态不跨进程共享 —— **多副本部署下实际额度 = 配额的副本数倍**。⚠️ 部署在反向代理后面**必须**配 `SERVER_TRUSTED_PROXIES`:默认不信任任何代理(gin 默认信任全部,是既有的 `client_ip` 可伪造问题),不配的话伪造 `X-Forwarded-For` 就能绕过限流。⚠️ `cmd/loadtest` 会被限流挡住,测容量前先调高额度。设计稿见 [`docs/t25-ratelimit-design.md`](./docs/t25-ratelimit-design.md)。
 - **生产部署必须显式设置** `SERVER_ADMIN_BEARER_TOKEN` 与 `SERVER_CORS_ALLOWED_ORIGINS`；`release` 模式下缺 admin token 会直接启动失败,**缺 `CRYPTO_ELIGIBILITY_ROOT` / `CRYPTO_ELIGIBILITY_VK_PATH` 也会直接启动失败**(一人一票是硬要求)。`configs/config.production.yaml` **不会**被自动加载(viper 只找 `config.yaml`),用 `CONFIG_FILE=./configs/config.production.yaml` 启动即可 —— **显式指定的文件不存在时服务直接启动失败**,不会静默回退到开发配置;启动日志的 `config_file` 字段会打印实际加载的文件路径,上线先核一眼。详见该文件内的注释。
 
 当前实现口径见 [`docs/techspec.md`](./docs/techspec.md),分层上下文索引见 [`docs/project-map.md`](./docs/project-map.md),产品路线图见 [`docs/roadmap.md`](./docs/roadmap.md)。**上线前请逐项核对** [`docs/deployment-checklist.md`](./docs/deployment-checklist.md)。

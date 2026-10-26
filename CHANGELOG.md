@@ -8,6 +8,180 @@
 
 ---
 
+## [0.3.0] — 2026-10-26
+
+v0.2.0 之后的变更。本版的主题是**「接口不再动」** —— 完成定义与验收证据见
+[`docs/release-plan-v0.3.0.md`](./docs/release-plan-v0.3.0.md)，路线图见
+[`docs/roadmap.md`](./docs/roadmap.md)（里程碑 M4）。
+
+> ⚠️ **升级前必读**：投票提交端点改了路径，旧的 `POST /api/v1/votes` 不再存在 ——
+> 详见下面的「破坏性变更」。此外**升级必须先跑迁移**（新增
+> `credential_claims.reserved_at` 列），不迁移的话凭证槽位的占位机制不工作。
+
+### 破坏性变更
+
+- **投票提交端点从 `POST /api/v1/votes` 改为 `POST /api/v1/proposals/:proposal_id/votes`，
+  请求体里不再有 `proposal_id` 字段。**
+  一个提案 ID 现在只有**一个**来源（路径）。此前两份来源不一致时服务端只能猜，猜错就是
+  「把票投到别的提案去」。旧路径**不再注册**（返回 404）。
+  - 自建客户端需要改路径并去掉请求体里的 `proposal_id`；门户与 CLI 已同步
+    （门户改用 `web/src/lib/api-contract.ts` 里声明的冻结路径）。
+  - 请求体的其余六个字段（`encrypted_vote` / `proof` / `nullifier` / `user_id` /
+    `user_pub_key` / `credential_signature`）**不变**。
+
+> **本版之后**，字段名、端点路径与密文格式**冻结**：响应可新增字段、服务端可新增端点
+> （客户端须忽略不认识的字段）；改字段名 / 删字段 / 改语义 / 改路径 = 破坏性变更，
+> 须走下一个 minor 版本。完整口径见
+> [`docs/api-contract-v1.md`](./docs/api-contract-v1.md)，并由一条**跨语言门禁**守着
+> （`tests/architecture/api_contract_test.go` 拿 Go 的 struct tag 与 TS 的 interface
+> 双向比对，改一边不改另一边 CI 就红）。
+
+- **盲签名阶段的「槽位被别人占用」从 400 `INVALID_REQUEST` 改为 409 `CREDENTIAL_EXISTS`。**
+  - 触发条件不变：客户端预留的槽位在盲签名时已经不在「可用」集合里了（被别人领走，
+    或预留过期后被别人重新预留）。
+  - **为什么改**：客户端的重试判据是「409 + `CREDENTIAL_EXISTS` 才重试」（门户 / CLI /
+    压测工具三处一致）。回 400 的意思是「请求不合法」，客户端**认不出**这个信号，
+    于是直接放弃 —— 并发领取的投票人会拿到一句看不懂的「请求不合法」，而不是
+    「换一个槽位再来」。
+  - 这与 attest 阶段的冲突是**同一个信号**，因此不改冻结契约、不新增错误码、
+    **前端不需要改**（`CREDENTIAL_EXISTS` 早就存在）。
+  - 自建客户端：如果你的客户端对 400 `INVALID_REQUEST` 有重试逻辑，注意区分 —— 现在
+    「槽位被占」会走 409。
+
+### 新增
+
+- **门户的浏览器端 UI 自动化（T28）** —— 门户的浏览器路径第一次有了**自动化回归**。
+  - 用例：`web/e2e/portal.spec.ts`（Playwright，**真浏览器**）跑两条路径 ——
+    领凭证 → 浏览器本地生成选票 → 提交 → 查询状态 → **计票还原出所选的选项**；
+    以及资格路径（导入资格文件 → 匿名领取 → **重复领取被拒**「一人一票」）。
+  - 环境脚本：`scripts/web-e2e.sh`（`run` / `setup` / `test` / `stop`）自己备好一切 ——
+    两套密钥、资格名单、**release 模式**的服务端（真 verifying key + 强制一人一票）、
+    凭证池、门限解密会话、门户 dev server。入口：`make web-e2e`。
+  - CI 新增独立 job（`web-e2e`）。
+  - ⚠️ **闭合的是「接线没断」，不是「部署形态验过了」** —— 真域名、反向代理、真实浏览器
+    版本仍要人工点一遍（`scripts/browser-acceptance.sh`，步骤见部署清单 §8 / §8.1）。
+  - ⚠️ **新增两个 devDependency**（`@playwright/test` / `@types/node`）：**运行时依赖一个没动**。
+- **容量报告与压测脚本（T27）** —— 「这台服务能扛多少票」第一次有了带数字的答案。
+  - 报告：[`docs/capacity-report-v0.3.0.md`](./docs/capacity-report-v0.3.0.md)
+    （吞吐 / 延迟分位 / 错误率 / 资源配置建议）；脚本：`scripts/capacity-run.sh`
+    （`setup` / `run` / `sweep` / `start` / `stop`，跑**真 PostgreSQL + release 模式**）。
+  - 压测工具 `cmd/loadtest` 现在支持**真 prover**（`-proving-key` 出真证明、服务端真验签）
+    与**资格证明领取**（`-eligibility-dir` / `-eligibility-proving-key`）——
+    此前它只能跑 debug 模式的占位证明，量到的不是真实投票路径。
+- **凭证槽位「预留即占位」**（`credential_claims.reserved_at`，TTL 10 分钟）——
+  匿名领取时服务端先把一个空闲槽位**占住**，并发领取的人各拿各的槽位。
+  - TTL 是必需的：只预留不完成领取的客户端（掉线、崩溃、恶意）不能永久占住池子。
+  - PostgreSQL 上用 `FOR UPDATE SKIP LOCKED` 一次完成「挑 + 占」；SQLite 走
+    「挑候选 + 条件更新 + 重试」。
+- **公开端点限流** —— 凭证领取、投票提交、只读端点按「来源 + 路由组」限流，
+  超限返回 **429** + `Retry-After` + `{"error":…,"code":"RATE_LIMITED"}`。
+  - **release 模式下强制开启**：`RATE_LIMIT_ENABLED=false` 会让服务**启动失败**
+    （默认就是开的）。公开端点上最贵的操作是投票 —— 每张票都要验一次 Groth16 proof，
+    不设上限时一个脚本就能把验签算力打满。
+  - **额度按路由组分档**（领取 / 投票 / 只读），默认偏宽松：宁可放过一次攻击，
+    也不要在真实投票窗口里把投票人挡在门外。真实部署规模决定最终值。
+  - **限流器的键是每进程随机盐的哈希** —— 内存里没有明文来源地址（它常驻内存，
+    比日志更容易被转储）。
+  - **桶有空闲清理** —— 不清理就是内存泄漏（攻击者轮换来源地址就能把它撑大）。
+  - ⚠️ **限流是进程内的**：多副本部署时实际额度是配额的**副本数倍**。
+  - ⚠️ **部署在反向代理后面时必须配 `server.trusted_proxies`**：gin 默认**信任所有
+    代理**，不配的话伪造 `X-Forwarded-For` 就能绕过限流（这条同时修掉了日志里
+    `client_ip` 同样可伪造的既有问题）。
+  - 设计稿见 [`docs/t25-ratelimit-design.md`](./docs/t25-ratelimit-design.md)。
+- **审计离线复算工具 `cmd/audit-recompute`** —— 拿计票份额**脱离服务端**重算计票与锚点，
+  与库内已发布的结果**逐字节**比对，不一致时**退出码非 0**（可当门禁用）。
+  - **与服务端共用同一份计票算法**（新包 `internal/tally`）：两边各写一份算法，一旦漂移，
+    复算结论就失去意义 —— 那不是审计，是第二套计票。锚点哈希的公式用 KAT 钉死。
+  - **只读票库**：SQLite 走 `mode=ro`、PostgreSQL 走 `default_transaction_read_only=on`
+    —— 不是「我们保证不写」，是「写不了」。
+  - **不碰服务端**：直接读库，不需要投票服务在跑，也不要 admin token。
+  - ⚠️ **计票份额是秘密材料** —— 凑齐门限份数就能还原全部选票的明文选项。
+- **Prometheus 监控指标** —— `GET /metrics` 输出 Prometheus 文本格式（需 admin Bearer 令牌）：
+  投票接受 / 被拒（按错误码分）、凭证领取 / 盲签名 / attest、资格证明校验结果、
+  计票结果发布数、HTTP 请求数与耗时直方图。
+  - **只暴露计数与耗时**：指标里没有任何选票内容、候选人票数或身份 ——
+    有一条测试把允许出现的标签名**逐个钉死**，多一个标签就是多一条泄漏路径。
+- **冻结的接口契约文档** `docs/api-contract-v1.md` + 跨语言门禁
+  `tests/architecture/api_contract_test.go`（见上面的「破坏性变更」）。
+- **错误码集合的跨语言门禁** `tests/architecture/error_code_test.go` —— Go 侧
+  `MapError` 的码集合 ↔ TS 侧 `PortalErrorCode` 的成员集合，双向比对。
+  服务端加了码而门户不认识时，**两边各自的自测都是绿的**，用户看到的是一句英文原文 ——
+  这正是「两边各拿自己的常量自证是测不出这类问题」的典型，所以要有门禁。
+  顺手补齐了门户本就缺的 `CREDENTIAL_POOL_EMPTY`（凭证池领完）。
+
+### 变更
+
+- ⚠️ **新增数据库列 `credential_claims.reserved_at`（槽位预留时间）** ——
+  **升级前必须先跑迁移**：`nullifier-server -migrate`（release 模式不在启动时改表）。
+  迁移清单见 [`docs/deployment-checklist.md`](./docs/deployment-checklist.md) §4。
+- **新增配置项**：`rate_limit.*`（额度）与 `server.trusted_proxies`（可信代理网段）。
+  两者都有环境变量（`RATE_LIMIT_*` / `SERVER_TRUSTED_PROXIES`）。
+  `server.trusted_proxies` **默认为空 = 不信任任何代理** —— 这会改变
+  `X-Forwarded-For` 的处理口径：反代后面**必须**显式配置。
+- **计票的规范算法从 `internal/usecase/tally.go` 抽到新包 `internal/tally`** ——
+  服务端与审计复算工具调的是同一个 `Compute`。对外行为**不变**。
+- **门限份额的工具抽到新包 `internal/shares`**（哈希、归属校验、文件读取）——
+  CLI 的 `result-publish` 与审计工具共用同一份份额文件格式解析。
+- **`internal/di/wire_gen.go` 补上 `//go:build !wireinject` 约束** —— 此前缺这道约束，
+  `wire` 生成器跑不起来（生成代码与 `wire.go` 同时参与编译而重复声明）。
+  已用它重新生成了装配代码。
+
+### 修复
+
+- **数据库连接池的默认值形同虚设**（`db_env.go`）—— 默认值原先挂在「驱动是 postgres」
+  的分支里，而驱动可以被配置文件里的 `db.driver` 覆盖：那时池参数全是 0，
+  `database/sql` 于是**只保留 2 条空闲连接**，高并发下每个请求都要重开一条数据库连接。
+  默认值改成了与驱动无关地取（25 / 5 / 3600 秒），并建议线上显式配置
+  `db.max_open_conns` / `db.max_idle_conns`（见容量报告的配置建议）。
+- **并发领取凭证会误报「池空」** —— 预留槽位的实现原先是「挑候选 → 条件更新 → 失败重试」，
+  而备池的槽位是批量插入的（同一提案所有槽位 `created_at` 完全相同，排序落回随机的
+  UUID id）：所有并发领取者都盯上同一行，条件更新在行锁上排队失败后重试又挑回同一行，
+  重试次数一耗尽，**池里明明还有几十上百个空槽位却报「池空」**。
+  PostgreSQL 上改用 `FOR UPDATE SKIP LOCKED`（一个事务里一次完成「挑 + 占」），
+  SQLite 走「挑候选 + 条件更新 + 重试」（重试次数提高到 64）。
+  回归测试：`tests/integration/credential_claim_postgres_test.go`（含一条**确定性**用例：
+  锁住一个槽位，断言预留会跳过它而不是排队等锁）。
+- **压测工具的 HTTP 连接池没配** —— Go 默认 `MaxIdleConnsPerHost = 2`，高并发下每个
+  请求都新建 TCP 连接（Windows 上 TIME_WAIT 堆积到 390+）：量到的是客户端的连接 churn，
+  不是服务端的容量（实测单并发吞吐 141 → 257 req/s）。
+- **指标中间件的注册顺序是硬要求**（写在代码注释里）：必须排在错误处理器**之前** ——
+  gin 的中间件先进后出，越早注册的回程越晚，这样才拿得到最终状态码；
+  顺序反了指标里就会全是 200。
+
+### 测试
+
+- **门户的浏览器端路径第一次有了自动化回归**（T28）—— `web/e2e/portal.spec.ts` 用
+  Playwright 在**真浏览器**里跑两条路径：领凭证 → 浏览器本地生成选票 → 提交 → 查询状态 →
+  **计票还原出所选的选项**；以及资格路径（导入资格文件 → 匿名领取 → **重复领取被拒**
+  「一人一票」）。
+  - 环境脚本 `scripts/web-e2e.sh`（`make web-e2e`）自己备好一切：两套密钥、资格名单、
+    **release 模式**服务端（真 verifying key + 强制一人一票）、凭证池、门限解密会话、
+    门户 dev server；跑完自动收尾。
+  - ⚠️ 闭合的是「接线没断」，**不是「部署形态验过了」** —— 真域名、反向代理仍要人工点
+    一遍（`scripts/browser-acceptance.sh`）。
+- **审计复算工具的测试是真密码学端到端**：`cmd/audit-recompute/main_test.go` 造真票库 +
+  真份额，覆盖五种情形（一致 / 篡改计票结果 / 篡改选票 / 外来份额 / 份额不足）。
+- **跨语言错误码集合有门禁**（`tests/architecture/error_code_test.go`）：Go 的 `MapError`
+  码集合与 TS 的 `PortalErrorCode` 成员集合**双向比对**，且每个码都要有中文文案。
+- **冻结契约有门禁**（`tests/architecture/api_contract_test.go`）：Go 的请求体 struct tag
+  与 TS 侧 `web/src/lib/api-contract.ts` 的 interface **逐字段双向比对**，
+  并断言密文格式 v3（`0x03` + 两个压缩点，65 字节）。
+- **限流的行为有 HTTP 级断言**（`internal/infrastructure/http/rate_limit_test.go`）：
+  「伪造 `X-Forwarded-For` 不能绕过」「可信代理生效」「不同路由组额度独立」。
+- **PostgreSQL 上的槽位预留有集成测试**（`tests/integration/credential_claim_postgres_test.go`）：
+  并发预留、过期回收、跳过被锁的槽位。
+- 覆盖率：门槛口径 **80.86%**（17 个受控包逐包分档，合计门槛 77），全仓口径 **81.8%**。
+
+### CI 与发布
+
+- **CI 新增 `web-e2e` job**（`pnpm exec playwright install --with-deps chromium` +
+  `bash ./scripts/web-e2e.sh run`）—— 门户的两条路径在 CI 里真浏览器实跑。
+- **发布流水线（`release.yml`）一行未改** —— v0.2.0 已在 CI 里真跑通过（8 个 job 全绿），
+  本版沿用同一套：5 个平台的二进制 + sha256 + 门户包（含 prover 资源）。
+- 门户包的 `web/package.json` 版本号由流水线按 `VERSION` 注入（单一真相源是 `VERSION`）。
+
+---
+
 ## [0.2.0] — 2026-10-25
 
 v0.1.0 发布之后的变更。本版的完成定义与验收证据见
@@ -558,7 +732,7 @@ v0.1.0 发布之后的变更。本版的完成定义与验收证据见
   `docs/roadmap.md`（产品路线图：v1.0.0 的能力清单、里程碑与决策门）。
 
 > 注：上面的「v1.0.0」是 v0.1.0 发布当时的路线图目标。该目标版本后来改名为
-> **v0.2.0**，见上方 `[未发布]` 段。
+> **v0.2.0**，见上方 `[0.2.0]` 段。
 
 ### 测试
 

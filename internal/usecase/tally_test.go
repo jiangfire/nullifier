@@ -12,6 +12,7 @@ import (
 
 	"anonvote/internal/domain/entity"
 	"anonvote/internal/domain/repository"
+	"anonvote/internal/shares"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -231,7 +232,7 @@ func TestTallyUseCase_PublishResult_RejectOpenProposal(t *testing.T) {
 		Threshold:  2,
 		Trustees:   3,
 		PublicKey:  []byte("public-key"),
-		SharesJSON: `["` + hashShare("share-1") + `","` + hashShare("share-2") + `","` + hashShare("share-3") + `"]`,
+		SharesJSON: `["` + shares.Hash("share-1") + `","` + shares.Hash("share-2") + `","` + shares.Hash("share-3") + `"]`,
 	}))
 
 	_, err := uc.PublishResult(context.Background(), "proposal-1", []string{"share-1", "share-2"})
@@ -345,21 +346,6 @@ func TestTallyUseCase_PublishResult_InvalidShareFormat(t *testing.T) {
 	// One share repeated twice must be rejected instead of surfacing as a 500.
 	_, err = uc.PublishResult(context.Background(), "proposal-1", []string{setup.Shares[0], setup.Shares[0]})
 	require.ErrorIs(t, err, ErrInvalidRequest)
-}
-
-func TestTallyHelpers_UnmarshalAndParse(t *testing.T) {
-	tally, err := unmarshalTally(`[{"candidate":"A","count":1}]`)
-	require.NoError(t, err)
-	assert.Equal(t, 1, tally["A"])
-
-	_, err = unmarshalTally(`{bad-json`)
-	require.Error(t, err)
-
-	_, err = parseSharesJSON("")
-	require.Error(t, err)
-
-	_, err = parseSharesJSON(`[]`)
-	require.Error(t, err)
 }
 
 func TestTallyUseCase_validateDeps(t *testing.T) {
@@ -736,7 +722,7 @@ func cloneTally(in map[string]int) map[string]int {
 func parseSharesForTest(t *testing.T, raw string) []string {
 	t.Helper()
 
-	values, err := parseSharesJSON(raw)
+	values, err := shares.ParseRegistered(raw)
 	require.NoError(t, err)
 	return values
 }

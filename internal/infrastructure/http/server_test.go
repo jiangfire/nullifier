@@ -69,7 +69,7 @@ func TestHandler_WithNilUsecases(t *testing.T) {
 		path   string
 		body   any
 	}{
-		{method: http.MethodPost, path: "/api/v1/votes", body: map[string]any{}},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/votes", body: map[string]any{}},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", body: map[string]any{}},
 		{method: http.MethodGet, path: "/api/v1/proposals/open"},
 		{method: http.MethodGet, path: "/api/v1/proposals"},
@@ -125,9 +125,8 @@ func TestHandler_InvalidPayload(t *testing.T) {
 	}{
 		{
 			method: http.MethodPost,
-			path:   "/api/v1/votes",
+			path:   "/api/v1/proposals/p1/votes",
 			body: map[string]any{
-				"proposal_id":          "p1",
 				"encrypted_vote":       "%%%invalid-base64%%%",
 				"proof":                base64.StdEncoding.EncodeToString([]byte("proof")),
 				"nullifier":            "n1",
@@ -138,9 +137,8 @@ func TestHandler_InvalidPayload(t *testing.T) {
 		},
 		{
 			method: http.MethodPost,
-			path:   "/api/v1/votes",
+			path:   "/api/v1/proposals/p1/votes",
 			body: map[string]any{
-				"proposal_id":          "p1",
 				"encrypted_vote":       base64.StdEncoding.EncodeToString([]byte("cipher")),
 				"proof":                base64.StdEncoding.EncodeToString([]byte("proof")),
 				"nullifier":            strings.Repeat("ab", 32),
@@ -242,7 +240,7 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 		path   string
 		raw    string
 	}{
-		{method: http.MethodPost, path: "/api/v1/votes", raw: "{"},
+		{method: http.MethodPost, path: "/api/v1/proposals/p1/votes", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/credentials", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals", raw: "{"},
 		{method: http.MethodPost, path: "/api/v1/proposals/p1/vote-status", raw: "{"},
@@ -266,9 +264,8 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 	}{
 		{
 			method: http.MethodPost,
-			path:   "/api/v1/votes",
+			path:   "/api/v1/proposals/p1/votes",
 			body: map[string]any{
-				"proposal_id":          "p1",
 				"encrypted_vote":       base64.StdEncoding.EncodeToString([]byte("cipher")),
 				"proof":                "%%%invalid-base64%%%",
 				"nullifier":            "n-proof",
@@ -279,9 +276,8 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 		},
 		{
 			method: http.MethodPost,
-			path:   "/api/v1/votes",
+			path:   "/api/v1/proposals/p1/votes",
 			body: map[string]any{
-				"proposal_id":          "p1",
 				"encrypted_vote":       base64.StdEncoding.EncodeToString([]byte("cipher")),
 				"proof":                base64.StdEncoding.EncodeToString([]byte("proof")),
 				"nullifier":            "n-pub",
@@ -292,9 +288,8 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 		},
 		{
 			method: http.MethodPost,
-			path:   "/api/v1/votes",
+			path:   "/api/v1/proposals/p1/votes",
 			body: map[string]any{
-				"proposal_id":          "p1",
 				"encrypted_vote":       base64.StdEncoding.EncodeToString([]byte("cipher")),
 				"proof":                base64.StdEncoding.EncodeToString([]byte("proof")),
 				"nullifier":            "n-sig",
@@ -490,7 +485,6 @@ func TestHandler_SuccessFlow(t *testing.T) {
 	_ = resp.Body.Close()
 
 	voteReq := map[string]any{
-		"proposal_id":          proposalResp.ID,
 		"encrypted_vote":       base64.StdEncoding.EncodeToString(cipher),
 		"proof":                base64.StdEncoding.EncodeToString([]byte("debug-proof")),
 		"nullifier":            nullifier,
@@ -498,7 +492,7 @@ func TestHandler_SuccessFlow(t *testing.T) {
 		"user_pub_key":         credential.UserPubKey,
 		"credential_signature": credential.Signature,
 	}
-	resp = doPostJSON(t, ts.URL+"/api/v1/votes", voteReq)
+	resp = doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/votes", voteReq)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	_ = resp.Body.Close()
 

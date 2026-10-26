@@ -258,7 +258,7 @@ describe('投票凭据与当前意图的绑定', () => {
 
   it('凭据还指向旧选项时拒绝提交（防止静默投错票）', async () => {
     const calls = stubFetch([
-      { match: (url) => url.includes('/api/v1/votes'), payload: { status: 'ok' } },
+      { match: (url) => url.includes('/votes'), payload: { status: 'ok' } },
     ]);
     const portal = setupPortal();
     bindLocalBallot(portal);
@@ -269,12 +269,12 @@ describe('投票凭据与当前意图的绑定', () => {
     const submitted = await portal.submitVote();
 
     expect(submitted).toBe(false);
-    expect(calls.some((call) => call.url.includes('/api/v1/votes'))).toBe(false);
+    expect(calls.some((call) => call.url.includes('/votes'))).toBe(false);
   });
 
   it('目标一致时正常提交', async () => {
     const calls = stubFetch([
-      { match: (url) => url.includes('/api/v1/votes'), payload: { status: 'ok' } },
+      { match: (url) => url.includes('/votes'), payload: { status: 'ok' } },
     ]);
     const portal = setupPortal();
     bindLocalBallot(portal);
@@ -282,7 +282,7 @@ describe('投票凭据与当前意图的绑定', () => {
     const submitted = await portal.submitVote();
 
     expect(submitted).toBe(true);
-    const voteCall = calls.find((call) => call.url.includes('/api/v1/votes'));
+    const voteCall = calls.find((call) => call.url.includes('/votes'));
     expect(voteCall).toBeDefined();
     expect(voteCall?.body?.encrypted_vote).toBe('cipher-A');
     // 明文选项不该发给服务端。
@@ -338,7 +338,7 @@ describe('凭证与会话卫生', () => {
 
   it('错误提示不自动消失', async () => {
     stubFetch([
-      { match: (url) => url.includes('/api/v1/votes'), payload: { status: 'ok' } },
+      { match: (url) => url.includes('/votes'), payload: { status: 'ok' } },
     ]);
     const portal = setupPortal();
     bindLocalBallot(portal);

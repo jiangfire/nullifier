@@ -40,7 +40,7 @@ func TestMapError(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			status, code := mapError(tc.err)
+			status, code := MapError(tc.err)
 			require.Equal(t, tc.status, status)
 			require.Equal(t, tc.code, code)
 		})

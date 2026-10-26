@@ -10,6 +10,8 @@ cmd/
 ├── keygen/                 # 生成 Groth16 密钥（vk / pk）：选票与资格两套电路
 ├── ballot-wasm/            # 浏览器端 prover 的 WASM 模块（选票 + 资格两套电路）
 ├── eligibility-list/       # 离线名单工具：成员名单 → Merkle 根 + 每人的资格包
+├── audit-recompute/        # 审计离线复算：只读票库，用份额重算计票与锚点
+├── loadtest/               # 并发投票压测工具
 └── server/                 # 服务启动入口
 
 internal/
@@ -25,10 +27,15 @@ internal/
 │   │   ├── eligibility/    # 资格密码学栈：名单 Merkle 承诺、资格电路与证明器
 │   │   └── mimc/           # 选票电路与资格电路共用的 MiMC 实现
 │   ├── http/               # Gin handler / server / middleware
+│   ├── metrics/            # Prometheus 指标（只暴露计数与耗时）
+│   ├── ratelimit/          # 令牌桶限流器（键是加盐哈希，桶有空闲清理）
 │   └── persistence/        # GORM 仓储、迁移、DB 配置
+├── shares/                 # 门限份额：哈希、归属校验、份额文件读取
+├── tally/                  # 计票的规范算法（服务端与审计复算工具共用这一份）
 └── usecase/                # 业务编排
 
 tests/
+├── architecture/           # 架构不变量守卫（含跨语言契约门禁）
 ├── e2e/
 ├── integration/
 └── testutil/
@@ -49,9 +56,24 @@ web/                        # Vue 3 前端门户
     - `VotingUseCase`
     - `ParticipationUseCase`
     - `TallyUseCase`
+- `tally`
+  - **计票的规范算法**：从「密文选票 + 计票私钥」得出计票结论、merkle 根与审计锚点哈希。
+  - **服务端与审计复算工具共用这一份**（`internal/usecase/tally.go` 与
+    `cmd/audit-recompute` 调的是同一个 `tally.Compute`）—— 两边各写一份算法，
+    一旦漂移，复算结论就失去意义：那不是审计，是第二套计票。
+  - 算法细节（merkle 叶子、规范计票 JSON、锚点哈希公式）是**冻结**的，见 §6.2。
+- `shares`
+  - 门限份额的哈希、会话归属校验与份额文件读取。
+  - CLI 的 `result-publish` 与审计复算工具共用同一份文件格式解析 —— 两个 CLI
+    各写一份，格式迟早漂移。
 - `infrastructure`
-  - `persistence`：GORM 仓储、SQLite/PostgreSQL 连接与迁移。
+  - `persistence`：GORM 仓储、SQLite/PostgreSQL 连接与迁移。`DBConfig.ReadOnly`
+    打开只读连接（SQLite `mode=ro` / PostgreSQL `default_transaction_read_only=on`）——
+    审计复算工具用它打开票库：不是「我们保证不写」，是「写不了」。
   - `http`：Gin 路由、请求校验、中间件、错误映射。
+  - `metrics`：Prometheus 指标。**只暴露计数与耗时**，不出现任何选票内容或身份。
+  - `ratelimit`：令牌桶限流器。键是**每进程随机盐**的 SHA-256 哈希 —— 限流器
+    状态常驻内存，里面不该有明文来源地址。桶有空闲清理（不清理就是内存泄漏）。
   - `crypto`：gnark proof verifier、kryptology credential issuer、Merkle root builder。
   - `crypto/ballot`：选票密码学栈 —— BN254 twisted Edwards 群运算、v3 选票密文、
     Fr 上的 Shamir 门限份额、Groth16 选票电路与证明/验证器。选票密文与电路
@@ -159,11 +181,16 @@ web/                        # Vue 3 前端门户
   - `server.mode`
   - `server.cors_allowed_origins`
   - `server.admin_bearer_token`
+  - `server.trusted_proxies`（可信反向代理的网段，CIDR 列表；默认空 = 不信任任何代理）
   - `crypto.vk_path`
   - `crypto.issuer_key_path`
   - `crypto.issuer_rotate_days`
   - `crypto.eligibility_root`（资格名单的 Merkle 树根，64 位十六进制的域元素）
   - `crypto.eligibility_vk_path`（资格电路的 verifying key 路径）
+  - `rate_limit.enabled`
+  - `rate_limit.credentials.rps` / `rate_limit.credentials.burst`
+  - `rate_limit.votes.rps` / `rate_limit.votes.burst`
+  - `rate_limit.read.rps` / `rate_limit.read.burst`
   - `db.driver`
   - `db.path`
   - `db.host`
@@ -174,6 +201,9 @@ web/                        # Vue 3 前端门户
   - `db.sslmode`
 - 资格校验的两个配置项有环境变量：`CRYPTO_ELIGIBILITY_ROOT` /
   `CRYPTO_ELIGIBILITY_VK_PATH`（优先级与其它 `crypto.*` 一致：环境变量高于配置文件）。
+- 限流与可信代理的环境变量：`RATE_LIMIT_ENABLED` / `RATE_LIMIT_CREDENTIALS_RPS` /
+  `RATE_LIMIT_CREDENTIALS_BURST` / `RATE_LIMIT_VOTES_RPS` / `RATE_LIMIT_VOTES_BURST` /
+  `RATE_LIMIT_READ_RPS` / `RATE_LIMIT_READ_BURST` / `SERVER_TRUSTED_PROXIES`。
 
 ### 4.3 运行期校验
 
@@ -182,9 +212,19 @@ web/                        # Vue 3 前端门户
   - **`crypto.eligibility_root` 与 `crypto.eligibility_vk_path` 必须同时必填** ——
     没有名单根与资格验证密钥，服务端就无法强制「同一个人只能领一张票」，
     那时它只是个能发凭证的服务器。这条与 `crypto.vk_path` 是同级的硬要求。
+  - **限流在 release 模式必须开着**：`rate_limit.enabled` **不配时按模式推导** ——
+  release 默认 `true`，debug 默认 `false`；release 模式下**显式**设成 `false` 会让服务
+  **启动失败**。公开端点上最贵的操作是投票（每张票一次 Groth16 验签），
+  不设上限时一个脚本就能把验签算力打满。
+    用「默认开 + 显式关才失败」而不是「不配就失败」：漏配的后果是「没限流」，
+    而硬失败会让所有存量 release 部署升级即宕机。
 - `crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对出现**
   （任何模式都校验）：只配根等于「不校验」，只配密钥则无从校验 ——
   两者只配一个时服务**启动失败**，不静默降级。
+- **限流额度必须为正数**（任何模式，只要限流是开着的）：`rps ≤ 0` 或 `burst ≤ 0`
+  一律启动失败 —— 额度为 0 意味着「全拒」（服务直接不可用），配错比不配更危险。
+- **`server.trusted_proxies` 里的每一项都必须是合法 CIDR**，否则启动失败：
+  网段配错的后果是「限流按错误的来源计数」，宁可启动时说清楚。
 - `server.admin_bearer_token` 若为空，会在启动期自动生成并写回内存配置
 - 自动生成的 token 会通过启动日志打印到控制台，仅对当前进程实例有效
 - 启动日志会打印**实际加载的配置文件路径**（`config_file`）—— 「以为加载了生产
@@ -208,7 +248,8 @@ web/                        # Vue 3 前端门户
   - `Vote`
   - `Proposal`
   - `Credential`
-  - `CredentialClaim`
+  - `CredentialClaim`（**含 v0.3.0 新增的 `reserved_at` 列** —— 凭证槽位的预留时间，
+    TTL 10 分钟；从 v0.2.0 升级**必须先跑迁移**）
   - `EligibilityUse`（资格使用记录 —— 「一人一票」的强制点，见 §3.5）
   - `VoteParticipation`
   - `DecryptionSession`
@@ -221,10 +262,17 @@ web/                        # Vue 3 前端门户
 ### 4.5 连接池
 
 - PostgreSQL 的连接池参数显式配置，不再依赖 `database/sql` 的默认值（不限制连接数）：
-  - `db.max_open_conns`（`DB_MAX_OPEN_CONNS`，默认 25）
-  - `db.max_idle_conns`（`DB_MAX_IDLE_CONNS`，默认 5）
+  - `db.max_open_conns`（`DB_MAX_OPEN_CONNS`，默认 16）
+  - `db.max_idle_conns`（`DB_MAX_IDLE_CONNS`，默认 16）
   - `db.conn_max_lifetime_seconds`（`DB_CONN_MAX_LIFETIME_SECONDS`，默认 3600）
-- 为 0 表示不改动 `database/sql` 的默认值。
+- 为 0 表示不改动 `database/sql` 的默认值 —— ⚠️ **那意味着只保留 2 条空闲连接**：
+  高并发下每个请求都要重开一条数据库连接，量到的是连接开销而不是服务端能力。
+  **默认值必须与驱动无关地取**（`db.driver` 可以被配置文件覆盖，只挂在「驱动是
+  postgres」的分支上的话，覆盖之后池参数会全变成 0）。
+- **不要把池开大**：实测把池从 16 开到 64，第一轮吞吐从 2134/s 掉到 **307/s**
+  （64 条连接要现场建 64 个 PostgreSQL 后端进程，每个约 38 MB），连跑几十轮后吞吐
+  还会回落。投票写路径每请求只占连接约 0.5 ms，16 条连接的理论上限已是 3 万+/s ——
+  远高于实测的 2200/s。实测数据见 [`docs/capacity-report-v0.3.0.md`](./capacity-report-v0.3.0.md)。
 - 优先级与其它 `db.*` 一致：环境变量高于配置文件。
 - 启动日志打印实际生效的连接池参数。
 
@@ -253,12 +301,17 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
 
 ## 5. HTTP API
 
+> ⚠️ **v0.3.0 起，线格式被冻结**：字段名、字段语义、端点路径与密文格式只增不改。
+> 完整口径见 [`api-contract-v1.md`](./api-contract-v1.md)，并由
+> `tests/architecture/api_contract_test.go` 拿 Go 的 struct tag 与 TS 的 interface
+> **双向比对**守着（改一边不改另一边 CI 就红）。
+
 ### 5.1 公共接口
 
 - `GET /healthz`
 - `GET /api/v1/proposals`
 - `GET /api/v1/proposals/open`
-- `POST /api/v1/votes`
+- `POST /api/v1/proposals/:proposal_id/votes`
 - `POST /api/v1/proposals/:proposal_id/vote-status`
 - `GET /api/v1/proposals/:proposal_id/election-key`（计票公钥，公开值）
 - `POST /api/v1/proposals/:proposal_id/credentials/eligibility-challenge`（领取挑战，公开）
@@ -282,6 +335,7 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   - 池子只增不减：重复调用是**继续往池里加**槽位，不是补齐到 `count`。
 - `POST /api/v1/proposals/:proposal_id/decryption/setup`
 - `POST /api/v1/proposals/:proposal_id/results/publish`
+- `GET /metrics`（Prometheus 指标，见 §5.4）
 
 ### 5.3 关键约束
 
@@ -293,8 +347,11 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   - `eligibility` 报出服务端**是否在强制一人一票**（`crypto.eligibility_root`
     是否已配置）。没开的话任何人都能反复领票 —— 这是运营必须能一眼看到的
     运行状态，同样不是敏感信息。
-- `POST /api/v1/votes`
-  - 要求 `proposal_id`、`encrypted_vote`、`proof`、`nullifier`、`user_id`、`user_pub_key`、`credential_signature`，全部必填（HTTP 层与 usecase 层都强制，不存在匿名免凭证投票的路径）
+- `POST /api/v1/proposals/:proposal_id/votes`
+  - **提案 ID 只从路径来**（`c.Param("proposal_id")`），请求体里**没有** `proposal_id`
+    字段 —— 一个提案 ID 只有一个来源，两份不一致时服务端只能猜，猜错就是「把票
+    投到别的提案去」。
+  - 要求 `encrypted_vote`、`proof`、`nullifier`、`user_id`、`user_pub_key`、`credential_signature`，全部必填（HTTP 层与 usecase 层都强制，不存在匿名免凭证投票的路径）
   - **请求体不再有 `public_witness`**：公开输入由服务端按请求字段、提案与计票会话
     自行拼装（`usecase.SubmitVoteRequest.PublicInputs`）。客户端无法自选公开输入，
     因此一份 proof 只能用于它被生成的那份密文，也无法跨提案 / 跨 nullifier 复用。
@@ -335,23 +392,29 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
     - 证明验不过（伪造、名单不对、提案不对、挑战不对）→ 403
       `INVALID_ELIGIBILITY_PROOF`。
     - 同一份资格第二次领 → 409 `ELIGIBILITY_ALREADY_USED`。
-  - **资格不过不消耗池槽位**：顺序是「验资格 → 取槽位（不占位）→ 记资格使用」。
-    唯一约束冲突时槽位还没被标记领取，不会被白白消耗。
+  - **资格不过不消耗池槽位**：顺序是「验资格 → 预留槽位 → 记资格使用」。
+    唯一约束冲突时把预留释放掉，槽位不会被白白消耗。
   - 请求体里**不许出现真人身份字段**（工号、姓名、证件号……）：资格材料里只有
     零知识证明与两个公开输入，服务端从头到尾不知道领票的是谁。
   - 响应：`proposal_id`、`user_id`（池槽位的假名）、`issuer_key_version`、`variant`、
     `modulus`（base64）、`exponent`。
-  - **预留不占位**：服务端取槽位时不改状态，所以并发领取会抢到同一个槽位。撞车的
-    那个由**客户端**换一个槽位重来（最多 5 次，只在 attest 返回 409
-    `CREDENTIAL_EXISTS` 时重试）—— 重试要重新盲化，服务端代劳不了。
-    「预留即占位」没有采用：那会让「只预留不 attest」的客户端永久消耗池槽位，
-    变成一个 DoS。
+  - **预留是占位，但会过期**（`credential_claims.reserved_at`，TTL 10 分钟）：
+    并发领取时各拿各的槽位 —— 不预留的话，所有人都会拿到「第一个空闲槽位」，
+    然后互相撞车（每一轮只有一个人能成，真实投票窗口里几百人同时领取就是灾难）。
+    过期是为了不让「只预留不 attest」的客户端永久占住池子。
+    撞车的残余情形（预留过期、槽位被别人领走）由**客户端**换一个槽位重来
+    （最多 5 次，只在 409 `CREDENTIAL_EXISTS` 时重试）—— 重试要重新盲化，
+    服务端代劳不了。
+  - ⚠️ **「预留即占位」为什么配了 TTL**：不配 TTL 的话，只预留不 attest 的客户端
+    会永久消耗池槽位，变成一个 DoS。TTL 把它限制在「最多占 10 分钟」。
 - `POST /api/v1/proposals/:proposal_id/credentials/blind-sign`（公开）
   - 请求体：`user_id`、`blinded_message`（base64）、`issuer_key_version`。
   - `issuer_key_version` 必填：服务端要用客户端盲化时那一版的私钥签，版本对不上
     解盲结果作废。用请求携带版本，避免改 schema。
-  - **只覆盖池里还空着的槽位**（`user_id` 必须在该提案的可用槽位里），否则签发方就
-    成了「任意消息」的签名预言机。
+  - **只覆盖「正在预留中、且预留未过期」的槽位**（`user_id` 必须命中该提案里一个
+    新鲜的预留），否则签发方就成了「任意消息」的签名预言机。
+    预留过期后槽位可能已被别人重新预留 —— 替它签名等于替别人签名，所以过期的
+    预留不再可签（客户端据此换一个槽位重来）。
   - 服务端在这一步只见盲化消息，见不到被签内容。
 - `POST /api/v1/proposals/:proposal_id/credentials/attest`（公开）
   - 请求体：`user_id`、`user_pub_key`（base64）、`signature`（base64）。
@@ -380,6 +443,106 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   - 同一提案重复发布返回 `409 RESULT_ALREADY_PUBLISHED`
   - 重复提交同一份 share 返回 `400 INVALID_REQUEST`，不会绕过 threshold 计数
   - share 会先校验是否属于当前 session
+
+### 5.4 Prometheus 指标（`GET /metrics`）
+
+Prometheus 文本格式，**要管理员 Bearer 令牌**（`middleware.RequireAdminBearerToken`）。
+指标实例由依赖注入创建（`di.NewMetrics`），handler 是业务事件的发生地，
+server 负责把它暴露成端点。
+
+| 指标 | 标签 | 含义 |
+|---|---|---|
+| `anonvote_http_requests_total` | `method` / `route` / `status` | HTTP 请求数 |
+| `anonvote_http_request_duration_seconds` | `method` / `route` | HTTP 请求耗时直方图 |
+| `anonvote_votes_accepted_total` | —— | 成功入库的选票数 |
+| `anonvote_votes_rejected_total` | `code` | 被拒的投票提交数（错误码与响应体的 `code` 同源） |
+| `anonvote_credential_claims_total` | `result` | 凭证领取请求数（`accepted` / `rejected`） |
+| `anonvote_credential_blind_signs_total` | `result` | 盲签名请求数 |
+| `anonvote_credential_attests_total` | `result` | 凭证 attest 请求数 |
+| `anonvote_eligibility_checks_total` | `result` | 资格证明校验数（`valid` / `invalid`） |
+| `anonvote_rate_limited_total` | `route` | 被限流挡下的请求数 |
+| `anonvote_tally_results_published_total` | —— | 发布出去的计票结果数 |
+
+- **只暴露计数与耗时**：指标里没有任何选票内容、候选人票数、nullifier 或身份 ——
+  `internal/infrastructure/metrics` 的测试把允许出现的标签名**逐个钉死**
+  （`method` / `route` / `status` / `result` / `code`），多一个标签就是多一条泄漏路径。
+- **埋点放在业务事件真正发生的地方**（handler），不从 HTTP 状态码反推；错误码取自
+  `middleware.MapError` —— 与响应体里的 `code` 是**同一份口径**。
+- ⚠️ **中间件注册顺序是硬要求**：`middleware.MetricsMiddleware` 必须排在
+  `middleware.ErrorHandler` **之前** —— gin 的中间件先进后出，越早注册的回程越晚，
+  这样才拿得到最终状态码；顺序反了指标里就会全是 200。
+- `route` 标签用**路由模板**（`/api/v1/proposals/:proposal_id/votes`）而不是原始路径 ——
+  原始路径里带着提案 ID，拿它当标签值会让指标基数爆炸。匹配不到路由时用 `unmatched`。
+- 采集端点自身的请求**不计入** HTTP 请求数（否则请求数会被采集流量本身淹没）。
+- 带标签的指标族在没有样本时整个不出现在采集结果里 —— 这是 Prometheus 的惯例，
+  告警规则用 `or vector(0)` 兜底。
+
+### 5.5 限流（T25）
+
+公开端点此前零防护：一个脚本就能把凭证池领空、把投票端点打满。
+限流实现在 `internal/infrastructure/ratelimit`（令牌桶）+ `middleware/rate_limit.go`
+（gin 中间件），设计稿见 [`t25-ratelimit-design.md`](./t25-ratelimit-design.md)。
+
+**路由组**（额度按组分档，用同一套额度要么挡不住投票端点，要么把只读端点也拖死）：
+
+| 组 | 覆盖的端点 | 默认 rps | 默认 burst |
+|---|---|---|---|
+| `credentials` | `eligibility-challenge` / `claim` / `blind-sign` / `attest` | 10 | 40 |
+| `votes` | `POST /proposals/:proposal_id/votes` | 10 | 40 |
+| `read` | 提案列表 / `vote-status` / `election-key` / `results` / `audit-anchors` | 50 | 100 |
+
+- 默认额度按「500 人 / 5 分钟 / 共用一个出口 IP」推出来 —— 宁可放过一次攻击，
+  也不要在真实投票窗口里把投票人挡在门外。真实部署规模决定最终值。
+- **管理端不限流**：它们有 Bearer 令牌鉴权，128 位令牌暴力不可行。
+- **`/healthz` 与 `/metrics` 不限流**：运维端点被限会直接影响可观测性。
+
+**计数键**：
+
+```
+键 = SHA-256( 每进程随机盐 ‖ 路由组 ‖ 提案ID ‖ 客户端IP )
+```
+
+- 盐每进程随机 → 限流器的内存里**没有明文 IP**（它常驻内存，比日志更容易被转储），
+  副本之间的键也不可关联。
+- 提案 ID 在键里 → A 提案的投票人不该吃掉 B 提案的额度。
+
+**响应**：
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 3
+
+{"error":"rate limit exceeded","code":"RATE_LIMITED"}
+```
+
+- `Retry-After` 是秒数（向上取整，最小 1）。
+- 错误码 `RATE_LIMITED` **不进 `MapError`** —— 那张表映射的是领域错误，
+  限流是传输层的保护措施；但**文案**仍走 `publicErrorMessage`，客户端看到的是同一套错误体。
+- 这是**加法**：冻结端点的请求/响应字段与路径都不变，只是多了一种可能的状态码
+  （决策 V3-D8）。客户端要处理 429 与 `Retry-After`。
+
+**客户端 IP 的可信性**（最容易被跳过也最致命的一环）：
+
+- gin v1.12.0 的**默认**行为是**信任所有代理**（`0.0.0.0/0`），`c.ClientIP()` 会取
+  `X-Forwarded-For` 的**第一个**值 —— 攻击者每个请求换一个头就能完全绕过限流。
+- `server.trusted_proxies`（CIDR 列表，**默认空 = 不信任任何代理**）在启动时交给
+  `engine.SetTrustedProxies`。这同时修掉了日志里 `client_ip` 同样可伪造的既有问题。
+- 部署在反向代理后面时**必须显式配置**，否则所有请求会被算到代理的同一个 IP 上
+  （fail-closed：偏严而不是偏松，但真实投票窗口里会误伤）。
+
+**内存与清理**：
+
+- 限流器是**进程内**的：多副本部署时每个副本独立计数，**实际额度是配额的副本数倍**。
+- 桶按空闲时长定期清理（`Limiter.StartCleanup`，由 server 随生命周期启停）——
+  不清理就是内存泄漏（攻击者轮换来源地址就能把它撑大）。
+- 限流状态**不落库、不进日志、不进指标**。
+
+**已知边界**：
+
+- 不做分布式限流（不引入 Redis 等外部依赖）。
+- 限流**不是**一人一票的替代品：资格证明管「谁能领」，限流管「单个来源能打多快」。
+- 压测（`cmd/loadtest`）从单一主机发起，会被限流挡住 —— 测容量时要先把额度调高
+  或关掉限流（见 §7.7）。
 
 ## 6. 密码学实现边界
 
@@ -420,6 +583,26 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   恢复用拉格朗日插值。门限解密与密文格式因此不需要任何域转换。
 - 份额格式：4 字节大端下标 + 32 字节取值，共 36 字节。
 - 份额不落明文：`decryption_sessions.shares_json` 只存份额的哈希。
+
+### 6.2.1 计票的规范算法（冻结）
+
+实现在 `internal/tally`。**服务端的计票链路与审计复算工具调的是同一个
+`tally.Compute`** —— 两边各写一份算法，一旦漂移，复算结论就失去意义。
+
+以下三处是**冻结**的（改动 = 破坏性变更，库里已发布的锚点会与重算结果对不上）：
+
+| 项 | 口径 |
+|---|---|
+| merkle 叶子 | `nullifier + "\|" + cipher`（UTF-8 字节拼接） |
+| 规范计票 JSON | `[{"candidate":<名称>,"count":<票数>}]`，**候选名升序** |
+| 锚点哈希 | `SHA-256(proposalID + "\|" + base64(merkleRoot) + "\|" + 规范计票 JSON)`，小写 hex |
+
+- 空票集（一个提案没有票）时，merkle 叶子是占位串 `empty-vote-set`。
+- 锚点哈希的公式由一条 KAT 测试钉死（`internal/tally/tally_test.go` 的
+  `TestAnchorHash_KAT`）—— 改了公式，测试立刻红。
+- 审计复算工具（`cmd/audit-recompute`）拿计票份额还原私钥后走同一个 `Compute`，
+  再与库内已发布的结果**逐字节**比对（票数 / 计票 JSON / merkle 根 / 锚点哈希），
+  不一致时**退出码非 0**。
 
 ### 6.3 选票电路（真实 Groth16）
 
@@ -660,9 +843,16 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   `user_id` → 管理端客户端本地盲化 → 管理端 blind-sign → attest。管理端 blind-sign
   走全局路径 `/api/v1/credentials/blind-sign`，因为 gin 的路由树不允许同一路径挂
   两套中间件。
-- **槽位竞争的解法在客户端**：预留不占位 → 并发领取会抢同一个槽位 → attest 返回
-  409 `CREDENTIAL_EXISTS` → 客户端换一个槽位重来（最多 5 次）。409 还有另一种语义
-  `CREDENTIAL_POOL_EMPTY`（池领完了），那个**不重试**。
+- **槽位竞争的解法是「服务端占位 + 客户端兜底」**：领取时服务端**预留**一个槽位
+  （`credential_claims.reserved_at`，TTL 10 分钟）—— 并发领取各拿各的槽位；
+  残余的撞车（预留过期、槽位被别人领走）由**客户端**换一个槽位重来（最多 5 次，
+  认 409 `CREDENTIAL_EXISTS`）。409 还有另一种语义 `CREDENTIAL_POOL_EMPTY`
+  （池领完了），那个**不重试**。
+  - ⚠️ **「盲签名阶段的撞车也回 409 `CREDENTIAL_EXISTS`**」：早先这里回的是
+    400 `INVALID_REQUEST`，而客户端的判据是「409 + `CREDENTIAL_EXISTS` 才重试」
+    —— 认不出 400 的投票人会直接放弃，拿到一句看不懂的「请求不合法」。
+    现在与 attest 阶段是**同一个信号**，三端（门户 / CLI / 压测工具）判据一致，
+    不改冻结契约。
 - **「一人一票」已落地**（见 §6.11）：资格证明把「服务端能去重」与「服务端不知道是谁」
   同时成立，门户与 CLI 两侧都能出资格证明。
 
@@ -803,6 +993,14 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
 - **nullifier 现在由 prover 派生**：出票时由 `ballot.ProveBallot` 在本地随机一个秘密
   `s` 并派生 `nullifier = MiMC(s, proposal_id)`，秘密不出本地。门户表单里的 nullifier
   字段仍可手工编辑（低频工具），但正式出票走 prover 这条路。
+- **门户有浏览器级自动化回归**（T28）：`web/e2e/portal.spec.ts` 用 Playwright 在**真浏览器**
+  里跑「领凭证 → 本地出票 → 提交 → 查状态 → 计票」与资格路径（导入资格文件 → 匿名领取
+  → 重复领取被拒）。环境由 `scripts/web-e2e.sh` 备好（两套密钥、资格名单、release 模式服务端、
+  凭证池、解密会话、门户 dev server），入口 `make web-e2e`，CI 独立 job `web-e2e`。
+  - **两层测试分工**：vitest 那层（`panels.test.ts`）抓模板与状态机；Playwright 那层抓**接线**
+    —— 跨语言字符串、静态资源、WASM prover、事件绑定这类问题只有真浏览器能暴露。
+  - ⚠️ **用例时长被投票窗口框住**：计票要求提案已关闭（服务端只认 `ends_at` 过去了），
+    投票要求窗口开着 —— 窗口时长要装得下浏览器端出证明（十几秒）。
 
 ### 7.2 前端信息架构与设计系统
 
@@ -832,7 +1030,7 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   `CREDENTIAL_EXISTS` / `CREDENTIAL_POOL_EMPTY` / `USER_ALREADY_VOTED` /
   `INVALID_CREDENTIAL` / `DECRYPTION_SESSION_EXISTS` / `RESULT_ALREADY_PUBLISHED` /
   `ELIGIBILITY_REQUIRED` / `INVALID_ELIGIBILITY_PROOF` / `ELIGIBILITY_ALREADY_USED` /
-  `ELIGIBILITY_NOT_ENABLED` / `INTERNAL_ERROR`），
+  `ELIGIBILITY_NOT_ENABLED` / `RATE_LIMITED` / `INTERNAL_ERROR`），
   `error` 是面向开发者的英文或原始 Go error 细节。
 - 前端不再直接透传 `error`：`src/lib/api.ts` 把 `code` 一并带出，
   `src/lib/error-messages.ts` 的 `describeApiError(message, code, fallback)` 负责翻译，
@@ -844,7 +1042,12 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
   - 未命中已知短语的 `INVALID_REQUEST` 去掉 `invalid request: ` 前缀后透出后端细节，
     避免吞掉真实原因。
 - 所有失败出口统一走 `describeApiError`，不再有组件内的英文硬编码特例。
-- CLI 输出保持纯文本命令结果，不做中文化。
+- **错误码集合是跨语言契约**：`tests/architecture/error_code_test.go` 把 Go 侧
+  `MapError` 的码集合与 TS 侧 `PortalErrorCode` 的成员集合**双向比对**。
+  服务端加了码而门户不认识时，**两边各自的自测都是绿的**，用户看到的是一句英文原文 ——
+  这正是「两边各拿自己的常量自证是测不出这类问题」的典型，所以要有门禁。
+- CLI 输出保持纯文本命令结果，不做中文化；`RATE_LIMITED` 单独给一句
+  「等一等就好」的话（别让它看起来像服务端坏了）。
 
 ### 7.4 CLI
 
@@ -916,6 +1119,38 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
     工具产物 → 客户端出证明 → 服务端用 root.json 验签通过。
 - Makefile 目标：`make eligibility-list`（构建名单工具）、
   `make web-eligibility-key PK=<路径>`（把资格 proving key 放进门户静态目录）。
+
+### 7.6 审计离线复算（`cmd/audit-recompute`）
+
+投票结束后，拿计票份额**脱离服务端**重算计票与锚点，与库内已发布的结果
+**逐字节**比对。
+
+```bash
+go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件>
+go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件> -json
+```
+
+- **只读票库**：`DBConfig.ReadOnly` → SQLite `mode=ro` /
+  PostgreSQL `default_transaction_read_only=on`。不是「我们保证不写」，是「写不了」。
+- **不碰服务端**：直接读库，不需要投票服务在跑，也不要 admin token。默认读服务端
+  同一份配置（`CONFIG_FILE` / `configs/config.yaml` / 环境变量）指向的同一个库；
+  `-db` 可覆盖 SQLite 路径，`-driver` 可切 postgres。
+- **份额校验与服务端完全一致**（同一份 `internal/shares` 代码）：份额必须属于本会话，
+  同一份份额不能重复计入门限份数。
+- **退出码可当门禁用**：`0` 一致 / `1` 审计未通过（结论不一致）/ `2` 用法或运行错误。
+- ⚠️ **计票份额是秘密材料** —— 凑齐门限份数就能还原全部选票的明文选项。
+- Makefile 目标：`make audit-recompute ARGS="-proposal p-1 -shares-file shares.json"`。
+
+### 7.7 压测工具（`cmd/loadtest`）
+
+并发投票压测工具，**只走 HTTP API**（不绕过服务端校验），凭证领取走真两段式盲签名
+（与门户/CLI 同一条链路）。防重投失守时退出码非 0。
+
+- 报告里给出状态码分布（含 `429/RATE_LIMITED`）、延迟分位与重复投票计数。
+- ⚠️ **压测会被限流挡住**：所有请求来自同一台机器，共享同一个来源额度。
+  测服务端容量时**必须**先把额度调高（`RATE_LIMIT_*`）或把限流关掉
+  （`RATE_LIMIT_ENABLED=false`，仅 debug 模式允许），否则测出来的是限流阈值，
+  不是服务端的容量。真正的容量数字见路线图 T27。
 
 ## 8. 测试策略
 
@@ -1145,8 +1380,8 @@ make pg-test        # 起库 → 跑集成测试 → 关库
     字段会报出来）；release 模式强制开启，开发模式默认关闭。
   - **门户的浏览器端资格路径已在真浏览器里人工验过一遍**（2026-10-25，Chromium / Electron：
     导入资格文件 → 领取 201 → 重复领取 409 → 本地生成选票 → 提交 201 → 计票还原出所选
-    选项）。仓库里**没有** Playwright，自动化只到 node 驱动 WASM
-    （`tests/e2e/wasm_eligibility_test.go`）—— **每次上线仍要人工点一遍**。
+    选项）。✅ **2026-10-26 起自动化只到真浏览器**（`web/e2e/portal.spec.ts` + Playwright：
+    同样的路径，还多断言「重复领取被拒」）—— **部署形态**（真域名、反代）仍要人工点一遍。
   - **`cmd/loadtest` 不支持资格证明**（见 §8.1）：它不会取挑战、也不会出资格证明。
   - **资格表不许与凭证、票据关联**：`eligibility_uses` 只存去重键。一旦能把资格
     连到票，「分发不泄露身份」这条底线就破了。

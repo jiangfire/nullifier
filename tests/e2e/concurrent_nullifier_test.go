@@ -175,7 +175,6 @@ func TestAPI_ConcurrentSameNullifier_E2E(t *testing.T) {
 			defer wg.Done()
 			credential := credentials[index]
 			body, marshalErr := json.Marshal(map[string]any{
-				"proposal_id":          proposalResp.ID,
 				"encrypted_vote":       base64.StdEncoding.EncodeToString(ciphertext),
 				"proof":                base64.StdEncoding.EncodeToString([]byte("dev-proof")),
 				"nullifier":            nullifier,
@@ -188,7 +187,7 @@ func TestAPI_ConcurrentSameNullifier_E2E(t *testing.T) {
 				return
 			}
 			<-start
-			req, reqErr := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/votes", bytes.NewReader(body))
+			req, reqErr := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/votes", bytes.NewReader(body))
 			if reqErr != nil {
 				outcomes[index] = outcome{status: 0, code: "request:" + reqErr.Error()}
 				return

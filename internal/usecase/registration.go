@@ -255,6 +255,18 @@ func (uc *RegisterUseCase) verifyEligibility(
 	return nil
 }
 
+// CredentialReservationTTL 是槽位预留的有效期。
+//
+// 预留是「占位」：领取流程要走三步（预留 → 盲签名 → 落库），这段时间里
+// 槽位不能被别人拿走 —— 否则并发领取的人会抢到同一个槽位（服务端不预留
+// 的话，所有人都会拿到「第一个空闲槽位」，最后只有一个人成功，其余全部
+// 要重新盲化再来一遍；真实投票窗口里几百人同时领取，那会是一场灾难）。
+//
+// 但预留不能永久有效：只预留不领取的客户端（掉线、崩溃、恶意）不能把池子
+// 永久占死。十分钟足够走完三步（正常是毫秒级），也足够覆盖「浏览器在
+// Worker 里初始化 prover」这种慢路径。
+const CredentialReservationTTL = 10 * time.Minute
+
 // ReserveCredential 匿名预留一个凭证池槽位。
 //
 // 预留请求里**不含任何身份信息**：服务端随机给出一个未领取的槽位，运营方因此
@@ -297,16 +309,16 @@ func (uc *RegisterUseCase) ReserveCredential(
 		)
 	}
 
-	claim, err := uc.claimRepo.TakeAvailable(ctx, proposalID)
+	claim, err := uc.claimRepo.ReserveAvailable(ctx, proposalID, CredentialReservationTTL)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return nil, fmt.Errorf("%w: no credential available", ErrCredentialPoolEmpty)
 		}
-		return nil, fmt.Errorf("take available credential: %w", err)
+		return nil, fmt.Errorf("reserve credential slot: %w", err)
 	}
 
-	// 资格使用记录放在取槽位之后：唯一约束冲突时（同一份资格第二次来领），
-	// 槽位还没被标记领取，不会被白白消耗。
+	// 资格使用记录放在预留之后：唯一约束冲突时（同一份资格第二次来领），
+	// 槽位还没被标记领取 —— 把预留释放掉就不会被白白消耗。
 	if eligibilityEnabled {
 		// 少了去重仓储就等于「一人一票」没生效 —— 宁可报错，也不能悄悄放行。
 		if uc.eligibilityRepo == nil {
@@ -319,6 +331,7 @@ func (uc *RegisterUseCase) ReserveCredential(
 			UsedAt:          time.Now().UTC(),
 		}
 		if err := uc.eligibilityRepo.RecordUse(ctx, use); err != nil {
+			_ = uc.claimRepo.ReleaseReservation(ctx, claim.ID)
 			if errors.Is(err, repository.ErrDuplicateEligibilityUse) {
 				return nil, fmt.Errorf("%w: this eligibility has already been used", ErrEligibilityAlreadyUsed)
 			}
@@ -370,13 +383,29 @@ func (uc *RegisterUseCase) BlindSignCredential(
 		if uc.claimRepo == nil {
 			return nil, errors.New("credential claim repository is not configured")
 		}
-		// 公开端点只能为池里还空着的槽位盲签：否则签发方会变成「任意消息」的
-		// 签名预言机。
-		if _, err := uc.claimRepo.GetAvailableByUserID(ctx, proposalID, userID); err != nil {
+		// 公开端点只能为**有人正在领**的槽位盲签：否则签发方会变成「任意
+		// 消息」的签名预言机。
+		//
+		// 槽位不在预留中只有两种可能：被别人领走了（并发撞车），或者预留过期
+		// 了（客户端太慢，槽位可能已被别人重新预留）。两种都意味着「换一个
+		// 槽位重来」—— 跟 attest 阶段的冲突是**同一个**信号：409
+		// CREDENTIAL_EXISTS，客户端据此重试。
+		if _, err := uc.claimRepo.GetReservedByUserID(
+			ctx, proposalID, userID, CredentialReservationTTL,
+		); err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
-				return nil, fmt.Errorf(
-					"%w: no credential slot available for this user_id", ErrInvalidRequest,
-				)
+				// 槽位已经不在「可用」集合里了 —— 别人把它领走了。
+				//
+				// 预留**是占位**（占位会让「只预留不 attest」的客户端变成耗尽
+				// 池子的 DoS，所以预留会过期），但并发领取时两个客户端仍可能
+				// 拿到同一个 user_id。**这跟 attest 阶段的冲突是同一个信号**：
+				// 「换一个槽位重来」—— 客户端（门户 / CLI / 压测工具）都认
+				// 409 CREDENTIAL_EXISTS 并重试。
+				//
+				// 之前这里回的是 400 INVALID_REQUEST：客户端的判据是
+				// 「409 + CREDENTIAL_EXISTS 才重试」，认不出 400，于是直接放弃
+				// —— 并发领取的投票人会拿到一句看不懂的「请求不合法」。
+				return nil, ErrCredentialAlreadyIssued
 			}
 			return nil, fmt.Errorf("look up credential slot: %w", err)
 		}

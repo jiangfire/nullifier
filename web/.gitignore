@@ -16,6 +16,12 @@ public/eligibility-proving.key
 # Profile
 .rspack-profile-*/
 
+# Playwright 的产物（失败时的 trace / 截图、HTML 报告）
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # IDE
 .vscode/*
 !.vscode/extensions.json

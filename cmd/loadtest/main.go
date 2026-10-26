@@ -20,13 +20,16 @@
 // 交回解盲后的签名由服务端验签落库），与门户、CLI 完全同一条链路 —— 压测用的
 // 就是真实协议，不会因为「服务端给个假凭证」而把并发写路径测歪。
 //
-// ⚠️ **压测工具自己没有 prover**（门户与 CLI 都有，那是 v0.2.0 的事）：它只能跑在
-// **开发模式**（服务端未加载 crypto.vk_path，只要求 proof 非空）的服务上。
-// release 模式下所有请求都会因验签失败被拒 —— 报告里的状态分布会如实反映这一点。
+// ⚠️ **默认模式没有 prover**（门户与 CLI 都有）：它只能跑在**开发模式**
+// （服务端未加载 crypto.vk_path，只要求 proof 非空）的服务上。给
+// `-proving-key` 之后会走**真证明**路径：本地加密、派生 nullifier、出 Groth16
+// 证明，再并发提交 —— 这时服务端会真验签，测出来的才是真实投票路径的容量。
 //
-// ⚠️ 同样地，它只在**未开启资格校验**（crypto.eligibility_root 未配置）的
-// 服务上可用：匿名领取现在要带资格证明，而这个工具不带。开了资格校验时
-// 领取会返回 ELIGIBILITY_REQUIRED，报告里的状态分布同样会如实反映。
+// ⚠️ **默认模式也不带资格证明**，所以它只能在**未开启资格校验**
+// （crypto.eligibility_root 未配置）的服务上可用。给 `-eligibility-dir` 之后会
+// 用名单目录里的成员包逐个领凭证（一人一票路径），这时可以跑 release 模式的服务。
+//
+// 两把 key 的口径与门户、CLI 完全一致：proving key **只在客户端**，不进服务端。
 package main
 
 import (
@@ -39,17 +42,25 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	domaincrypto "anonvote/internal/domain/crypto"
+	"anonvote/internal/domain/entity"
 	cryptoinfra "anonvote/internal/infrastructure/crypto"
 	"anonvote/internal/infrastructure/crypto/ballot"
+	"anonvote/internal/infrastructure/crypto/eligibility"
+
+	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
+	gnarkLogger "github.com/consensys/gnark/logger"
 )
 
 // devProofBase64 是 "dev-proof" 的 base64 编码。开发模式下服务端只要求
@@ -65,6 +76,29 @@ type options struct {
 	duplicates  int
 	openDelay   time.Duration
 	asJSON      bool
+
+	// provingKeyPath 是**选票** proving key（只在客户端）。
+	// 给了就出真证明；不给则发占位 proof（只够跑开发模式的服务）。
+	provingKeyPath string
+	// eligibilityDir 是资格名单目录（`cmd/eligibility-list` 的产物）。
+	// 给了就逐个用成员包领凭证（一人一票路径），可以跑 release 模式的服务。
+	eligibilityDir string
+	// eligibilityKeyPath 是**资格** proving key（只在客户端）。
+	eligibilityKeyPath string
+	// proveWorkers 是并行出证明的 worker 数（默认 CPU 核数）。
+	proveWorkers int
+	// optionIndex 是投票的选项下标（从 0 开始）。
+	optionIndex uint64
+}
+
+// ballotMaterial 是一张准备好的选票：密文 + nullifier + 证明。
+//
+// 真证明路径下三者**一一对应**：证明绑在这份密文与这个 nullifier 上，
+// 换任何一个都验不过（服务端按请求里的密文与 nullifier 自拼公开输入）。
+type ballotMaterial struct {
+	ciphertext string // base64
+	nullifier  string // 规范 hex
+	proof      string // base64
 }
 
 type credential struct {
@@ -105,13 +139,69 @@ type report struct {
 	// 真实压测（几百个请求）不会触发；但拿它测个位数请求时会出现 —— 那时报告
 	// 里写「0 req/s」会被误读成「没跑」，所以单独标出来而不是假装测到了 0。
 	TimingResolutionLimited bool `json:"timing_resolution_limited"`
+
+	// RealProof 表示这一轮走的是**真证明**路径（服务端会真验签）。
+	// false 表示发的是占位 proof —— 那时测的是「不验签时服务端能吞多快」，
+	// 与真实投票路径不是一回事，读报告时不能混为一谈。
+	RealProof bool `json:"real_proof"`
+	// Eligibility 表示这一轮走的是**资格证明**领取（一人一票路径）。
+	Eligibility bool `json:"eligibility"`
+	// ProofGeneration 是**客户端**出证明的总耗时。
+	//
+	// 它**不计入**下面的吞吐与延迟：吞吐测的是服务端能验多少张票，
+	// 出证明是客户端的活（浏览器里更慢）。分开放是因为两者混在一起
+	// 会让人以为「服务端只能每秒处理这么少」。
+	ProofGeneration string `json:"proof_generation"`
+	// ProofsGenerated 是这一轮真实生成的证明数。
+	ProofsGenerated int `json:"proofs_generated"`
+	// ProveWorkers 是并行出证明的 worker 数。
+	ProveWorkers int `json:"prove_workers"`
 }
 
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
+// newHTTPClient 造一个压测专用的 HTTP 客户端。
+//
+// **必须显式配连接池**：Go 默认 Transport 的 MaxIdleConnsPerHost 只有 2，
+// 并发度一高，每个 worker 都要现开一条 TCP 连接（用完就关）。那量出来的是
+// **客户端的连接churn**，不是服务端的容量 —— 高并发下客户端自己成了瓶颈，
+// 数字会随并发度升高反而**变差**（吞吐降下来、延迟飙上去），看起来像服务端
+// 扛不住。真实部署里客户端在别的机器上，不存在这个瓶颈。
+//
+// 空闲连接数按并发度给（上限 256），并全部走 keep-alive。
+func newHTTPClient(concurrency int) *http.Client {
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	idle := concurrency
+	if idle > 256 {
+		idle = 256
+	}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          idle,
+		MaxIdleConnsPerHost:   idle,
+		MaxConnsPerHost:       0,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return &http.Client{Timeout: 30 * time.Second, Transport: transport}
+}
+
 func run(args []string) int {
+	// gnark 的默认 logger 往 **stdout** 写日志（编译电路、出证明的 INFO 行）。
+	// 那些日志混在报告前面，`-json` 的输出就不是合法 JSON 了 —— 报告要能被
+	// 机器读，就不能往 stdout 掺别的东西。挪到 stderr：stdout 只留报告。
+	gnarkLogger.SetOutput(os.Stderr)
+
 	opts := options{}
 	fs := flag.NewFlagSet("nullifier-loadtest", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -123,7 +213,24 @@ func run(args []string) int {
 	fs.IntVar(&opts.duplicates, "duplicates", 5, "用同一个 nullifier 并发提交的次数（防重投复核）")
 	fs.DurationVar(&opts.openDelay, "open-delay", 5*time.Second, "新建提案时距窗口打开的延迟")
 	fs.BoolVar(&opts.asJSON, "json", false, "以 JSON 输出报告")
+	fs.StringVar(
+		&opts.provingKeyPath, "proving-key", "",
+		"选票 proving key（只在客户端）。给了就出真证明，服务端会真验签",
+	)
+	fs.StringVar(
+		&opts.eligibilityDir, "eligibility-dir", "",
+		"资格名单目录（cmd/eligibility-list 的产物）。给了就带资格证明领凭证",
+	)
+	fs.StringVar(
+		&opts.eligibilityKeyPath, "eligibility-proving-key", "",
+		"资格 proving key（只在客户端，配合 -eligibility-dir）",
+	)
+	fs.IntVar(&opts.proveWorkers, "prove-workers", 0, "并行出证明的 worker 数（默认 CPU 核数）")
+	fs.Uint64Var(&opts.optionIndex, "option", 0, "投票的选项下标（从 0 开始）")
 	if err := fs.Parse(args); err != nil {
+		// 参数错误要说清楚是**哪个**参数 —— 只打印用法的话，调用方只能自己
+		// 一个个试（`-open-delay 5` 与 `-open-delay 5s` 的差别就是这么来的）。
+		fmt.Fprintf(os.Stderr, "参数错误: %v\n", err)
 		usage()
 		return 2
 	}
@@ -138,11 +245,36 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, "必须提供 -admin-token（建提案、初始化解密会话、投凭证池都要管理令牌）")
 		return 2
 	}
+	if strings.TrimSpace(opts.eligibilityDir) != "" && strings.TrimSpace(opts.eligibilityKeyPath) == "" {
+		fmt.Fprintln(os.Stderr, "必须提供 -eligibility-proving-key（资格 proving key，只在客户端）")
+		return 2
+	}
+	if strings.TrimSpace(opts.eligibilityKeyPath) != "" && strings.TrimSpace(opts.eligibilityDir) == "" {
+		fmt.Fprintln(os.Stderr, "必须提供 -eligibility-dir（资格名单目录）")
+		return 2
+	}
+	if opts.proveWorkers <= 0 {
+		opts.proveWorkers = runtime.NumCPU()
+	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := newHTTPClient(opts.concurrency)
 	proposalID, err := prepareProposal(client, &opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "准备提案失败: %v\n", err)
+		return 1
+	}
+
+	numOptions, err := fetchNumOptions(client, &opts, proposalID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "取提案选项数失败: %v\n", err)
+		return 1
+	}
+
+	// 门限解密会话与凭证池必须在投票窗口打开**之前**准备好（服务端的硬性约束）。
+	// 所以这两步排在出证明之前 —— 出证明很慢（真证明路径下每张票约 0.1 秒），
+	// 放在前面会把窗口拖过去，服务端直接拒绝初始化。
+	if err := setupDecryptionAndPool(client, &opts, proposalID); err != nil {
+		fmt.Fprintf(os.Stderr, "准备解密会话与凭证池失败: %v\n", err)
 		return 1
 	}
 
@@ -157,12 +289,16 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "取计票公钥失败: %v\n", err)
 		return 1
 	}
-	ciphertext, _, err := ballot.EncryptBallotWithUncompressedKey(electionKey, 0)
+
+	// 选票材料：真证明路径下每张票一份密文 + nullifier + 证明。
+	materials, generation, err := prepareBallots(
+		&opts, proposalID, electionKey, numOptions,
+		opts.voteCount+opts.duplicates, opts.duplicates,
+	)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "本地加密选票失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "准备选票失败: %v\n", err)
 		return 1
 	}
-	encodedCiphertext := base64.StdEncoding.EncodeToString(ciphertext)
 
 	// 窗口还没打开时投票会被拒 —— 明确等到窗口开始。
 	if err := waitForWindow(client, &opts, proposalID); err != nil {
@@ -172,18 +308,13 @@ func run(args []string) int {
 
 	// 第一轮：每个请求一个不同的凭证与 nullifier。
 	votePhase := runVotes(
-		client, &opts, proposalID, encodedCiphertext, credentials[:opts.voteCount], "",
+		client, &opts, proposalID, credentials[:opts.voteCount], materials[:opts.voteCount],
 	)
 	// 第二轮：同一个 nullifier、不同凭证 —— 唯一索引必须只放行一张。
-	duplicateNullifier, err := randomNullifier()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "生成 nullifier 失败: %v\n", err)
-		return 1
-	}
 	duplicatePhase := runVotes(
-		client, &opts, proposalID, encodedCiphertext,
+		client, &opts, proposalID,
 		credentials[opts.voteCount:opts.voteCount+opts.duplicates],
-		duplicateNullifier,
+		materials[opts.voteCount:],
 	)
 
 	voted, err := countVotedCredentials(client, &opts, proposalID)
@@ -193,6 +324,11 @@ func run(args []string) int {
 	}
 
 	result := buildReport(&opts, proposalID, votePhase, duplicatePhase, voted)
+	result.RealProof = strings.TrimSpace(opts.provingKeyPath) != ""
+	result.Eligibility = strings.TrimSpace(opts.eligibilityDir) != ""
+	result.ProofGeneration = generation.elapsed.String()
+	result.ProofsGenerated = generation.count
+	result.ProveWorkers = opts.proveWorkers
 	if opts.asJSON {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
@@ -252,26 +388,50 @@ func prepareProposal(client *http.Client, opts *options) (string, error) {
 	return created.ID, nil
 }
 
-// prepareCredentials 初始化解密会话、往池里投槽位，然后匿名领取凭证。
-func prepareCredentials(client *http.Client, opts *options, proposalID string) ([]credential, error) {
-	// 初始化门限解密会话：必须在投票窗口打开之前。
+// setupDecryptionAndPool 初始化门限解密会话并往凭证池投槽位。
+//
+// 这两步**必须在投票窗口打开之前**做完：服务端拒绝给「投票开放中」的提案
+// 初始化解密会话（那时票已经投出去了，解不开）。所以它们排在出证明之前。
+func setupDecryptionAndPool(client *http.Client, opts *options, proposalID string) error {
 	if err := postJSON(
 		client, opts,
 		"/api/v1/proposals/"+url.PathEscape(proposalID)+"/decryption/setup",
 		map[string]any{"threshold": 2, "trustees": 3},
 		true, nil,
 	); err != nil {
-		return nil, fmt.Errorf("初始化解密会话: %w", err)
+		return fmt.Errorf("初始化解密会话: %w", err)
 	}
-
-	need := opts.voteCount + opts.duplicates
 	if err := postJSON(
 		client, opts,
 		"/api/v1/proposals/"+url.PathEscape(proposalID)+"/credentials/pool",
-		map[string]any{"count": need},
+		map[string]any{"count": opts.voteCount + opts.duplicates},
 		true, nil,
 	); err != nil {
-		return nil, fmt.Errorf("投凭证池: %w", err)
+		return fmt.Errorf("投凭证池: %w", err)
+	}
+	return nil
+}
+
+// prepareCredentials 匿名领取凭证（每个请求一张）。
+//
+// 给了 `-eligibility-dir` 时走**资格证明**领取（一人一票路径）：每个成员包
+// 领一张 —— 这样才能在**开启资格校验**的服务上跑（release 模式必开）。
+// 没给时是纯匿名领取，只能跑未开启资格校验的服务。
+func prepareCredentials(client *http.Client, opts *options, proposalID string) ([]credential, error) {
+	need := opts.voteCount + opts.duplicates
+
+	if strings.TrimSpace(opts.eligibilityDir) != "" {
+		members, err := loadMemberPackages(opts.eligibilityDir)
+		if err != nil {
+			return nil, err
+		}
+		if len(members) < need {
+			return nil, fmt.Errorf(
+				"资格名单只有 %d 个成员，压测需要 %d 个（票数 + 防重投复核）",
+				len(members), need,
+			)
+		}
+		return claimCredentialsWithEligibility(client, opts, proposalID, members[:need])
 	}
 
 	credentials := make([]credential, 0, need)
@@ -280,13 +440,173 @@ func prepareCredentials(client *http.Client, opts *options, proposalID string) (
 		if err != nil {
 			return nil, err
 		}
-		cred, err := claimCredential(client, opts, proposalID, pubKey)
+		cred, err := claimCredential(client, opts, proposalID, pubKey, nil)
 		if err != nil {
 			return nil, fmt.Errorf("领取凭证: %w", err)
 		}
 		credentials = append(credentials, cred)
 	}
 	return credentials, nil
+}
+
+// loadMemberPackages 读资格名单目录里的成员包。
+//
+// 文件名形如 `eligibility-<成员>.json`（`cmd/eligibility-list` 的产物）。
+// 按文件名排序 —— 顺序稳定，重复跑压测时「哪个成员领哪张票」也可复现。
+func loadMemberPackages(dir string) ([]eligibility.MemberPackage, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("读取资格名单目录: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "eligibility-") {
+			continue
+		}
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("资格名单目录 %s 里没有成员包（eligibility-*.json）", dir)
+	}
+	packages := make([]eligibility.MemberPackage, 0, len(names))
+	for _, name := range names {
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return nil, fmt.Errorf("读取成员包 %s: %w", name, err)
+		}
+		var pack eligibility.MemberPackage
+		if err := json.Unmarshal(raw, &pack); err != nil {
+			return nil, fmt.Errorf("解析成员包 %s: %w", name, err)
+		}
+		packages = append(packages, pack)
+	}
+	return packages, nil
+}
+
+// eligibilityChallengeResponse 是领取挑战端点的响应。
+type eligibilityChallengeResponse struct {
+	ProposalID string `json:"proposal_id"`
+	Root       string `json:"root"`
+	Depth      int    `json:"depth"`
+	Challenge  string `json:"challenge"`
+}
+
+// claimCredentialsWithEligibility 用成员包逐个领凭证（一人一票路径）。
+//
+// 三步：① 取一次领取挑战（**root 以服务端为准**）→ ② 本地出资格证明 →
+// ③ 带着资格材料去领（资格不过**不消耗**池槽位）。
+//
+// 领取是**并行**的：每个成员都要出一次 Groth16 证明（资格电路约 6860 条约束），
+// 串行下来光是出证明就要几分钟 —— 那是客户端的成本，不该拖住压测本身。
+func claimCredentialsWithEligibility(
+	client *http.Client,
+	opts *options,
+	proposalID string,
+	members []eligibility.MemberPackage,
+) ([]credential, error) {
+	prover, err := eligibility.NewProver(opts.eligibilityKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("加载资格 proving key 失败: %w", err)
+	}
+
+	credentials := make([]credential, len(members))
+	errs := make([]error, len(members))
+	runParallel(len(members), opts.proveWorkers, func(index int) {
+		pubKey, keyErr := randomBase64(32)
+		if keyErr != nil {
+			errs[index] = keyErr
+			return
+		}
+		material, materialErr := buildEligibilityMaterial(
+			client, opts, proposalID, prover, members[index],
+		)
+		if materialErr != nil {
+			errs[index] = materialErr
+			return
+		}
+		cred, claimErr := claimCredential(client, opts, proposalID, pubKey, material)
+		if claimErr != nil {
+			errs[index] = claimErr
+			return
+		}
+		credentials[index] = cred
+	})
+	for index, claimErr := range errs {
+		if claimErr != nil {
+			return nil, fmt.Errorf("领取凭证（第 %d 个成员）: %w", index+1, claimErr)
+		}
+	}
+	return credentials, nil
+}
+
+// buildEligibilityMaterial 备好领取请求里的资格材料。
+//
+// 与 CLI 的同名步骤完全一致：挑战向服务端要（root 一律以服务端为准），
+// 证明在本地出 —— proving key 只在客户端，服务端拿到的只有证明本身。
+func buildEligibilityMaterial(
+	client *http.Client,
+	opts *options,
+	proposalID string,
+	prover *eligibility.Prover,
+	pack eligibility.MemberPackage,
+) (map[string]any, error) {
+	var challenge eligibilityChallengeResponse
+	path := "/api/v1/proposals/" + url.PathEscape(proposalID) + "/credentials/eligibility-challenge"
+	if err := postJSON(client, opts, path, map[string]any{}, false, &challenge); err != nil {
+		return nil, fmt.Errorf("获取领取挑战失败: %w", err)
+	}
+	result, err := prover.ProveEligibility(eligibility.ClientEligibilityRequest{
+		MemberPackage: pack,
+		ProposalID:    proposalID,
+		Challenge:     challenge.Challenge,
+		Root:          challenge.Root,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("生成资格证明失败: %w", err)
+	}
+	return map[string]any{
+		"eligibility_proof": base64.StdEncoding.EncodeToString(result.Proof),
+		"qualification_id":  result.QualificationID,
+		"challenge":         challenge.Challenge,
+	}, nil
+}
+
+// runParallel 把 [0, total) 的下标分给 workers 个 goroutine。
+//
+// 压测里的并行度有两条线：**提交**的并发度（`-concurrency`）测的是服务端能吞
+// 多少请求；**出证明**的并行度（`-prove-workers`）是客户端自己的资源分配。
+// 两者分开 —— 用提交并发度去出证明，会让客户端先把自己压死，测出来的就不是
+// 服务端的能力了。
+func runParallel(total int, workers int, work func(index int)) {
+	if total <= 0 {
+		return
+	}
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > total {
+		workers = total
+	}
+	queue := make(chan int)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i += 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range queue {
+				work(index)
+			}
+		}()
+	}
+	for i := range total {
+		queue <- i
+	}
+	close(queue)
+	wg.Wait()
 }
 
 // credentialReservation 是「预留签发权」的响应。
@@ -334,11 +654,14 @@ const claimMaxAttempts = 5
 //
 // 客户端从头到尾没把公钥发给服务端 —— 服务端一旦知道公钥就能算出消息原文，
 // 盲化当场失效。
+//
+// extra 是可选的资格材料（证明 + 去重键 + 挑战）：没有资格校验的服务不需要。
 func claimCredential(
 	client *http.Client,
 	opts *options,
 	proposalID string,
 	userPubKeyBase64 string,
+	extra map[string]any,
 ) (credential, error) {
 	userPubKey, err := base64.StdEncoding.DecodeString(userPubKeyBase64)
 	if err != nil {
@@ -347,7 +670,7 @@ func claimCredential(
 
 	var lastErr error
 	for attempt := 0; attempt < claimMaxAttempts; attempt++ {
-		cred, err := claimCredentialOnce(client, opts, proposalID, userPubKey)
+		cred, err := claimCredentialOnce(client, opts, proposalID, userPubKey, extra)
 		if err == nil {
 			return cred, nil
 		}
@@ -365,15 +688,21 @@ func claimCredentialOnce(
 	opts *options,
 	proposalID string,
 	userPubKey []byte,
+	extra map[string]any,
 ) (credential, error) {
 	escaped := url.PathEscape(proposalID)
 
-	// ① 预留签发权。请求体是空的：服务端只给 user_id 与签发方公钥。
+	// ① 预留签发权。请求体里没有公钥：服务端只给 user_id 与签发方公钥。
+	//    资格材料（如果开了资格校验）也在这一步带上 —— 资格不过不消耗槽位。
+	body := make(map[string]any, len(extra))
+	for key, value := range extra {
+		body[key] = value
+	}
 	var reservation credentialReservation
 	if err := postJSON(
 		client, opts,
 		"/api/v1/proposals/"+escaped+"/credentials/claim",
-		map[string]any{},
+		body,
 		false,
 		&reservation,
 	); err != nil {
@@ -460,6 +789,185 @@ func fetchElectionKey(client *http.Client, opts *options, proposalID string) ([]
 	return base64.StdEncoding.DecodeString(key.PublicKey)
 }
 
+// fetchNumOptions 取提案的选项数。
+//
+// 它进公开输入：客户端与服务端必须用**同一个**数，否则证明验不过。
+// 复用已有提案时尤其重要 —— 那个提案不一定是压测工具自己建的那个。
+func fetchNumOptions(client *http.Client, opts *options, proposalID string) (int, error) {
+	var listed struct {
+		Items []struct {
+			ID      string   `json:"id"`
+			Options []string `json:"options"`
+		} `json:"items"`
+	}
+	if err := getJSON(client, opts, "/api/v1/proposals", &listed); err != nil {
+		return 0, err
+	}
+	for _, item := range listed.Items {
+		if item.ID != proposalID {
+			continue
+		}
+		if len(item.Options) == 0 {
+			return 0, errors.New("提案没有选项")
+		}
+		return len(item.Options), nil
+	}
+	return 0, fmt.Errorf("提案 %s 不在提案列表里", proposalID)
+}
+
+// proofGeneration 记录**客户端**出证明的耗时与数量。
+type proofGeneration struct {
+	elapsed time.Duration
+	count   int
+}
+
+// prepareBallots 备好这一轮要提交的选票材料。
+//
+// 默认（没有 `-proving-key`）：所有请求共用一份密文，nullifier 每个请求随机
+// 生成，proof 是占位值 —— 只能跑**开发模式**（服务端不验签）的服务。
+//
+// 有 `-proving-key`：每张票一份密文 + 派生好的 nullifier + **真证明**。
+// 服务端会按请求里的密文与 nullifier 自拼公开输入并真验签 —— 这时测出来的
+// 才是真实投票路径的容量。
+//
+// 最后 `duplicates` 份材料**共用一个 nullifier**（同一个秘密派生）：防重投复核
+// 要的就是「同一个 nullifier 被并发提交多次，只有一次能成」。
+//
+// 出证明是**客户端**的活（浏览器里更慢），所以单独计时、单独汇报：混进
+// 服务端的吞吐里会让人以为「服务端只能每秒处理这么少」。
+func prepareBallots(
+	opts *options,
+	proposalID string,
+	electionKey []byte,
+	numOptions int,
+	count int,
+	duplicates int,
+) ([]ballotMaterial, proofGeneration, error) {
+	if strings.TrimSpace(opts.provingKeyPath) == "" {
+		ciphertext, _, err := ballot.EncryptBallotWithUncompressedKey(electionKey, opts.optionIndex)
+		if err != nil {
+			return nil, proofGeneration{}, fmt.Errorf("本地加密选票失败: %w", err)
+		}
+		encoded := base64.StdEncoding.EncodeToString(ciphertext)
+		materials := make([]ballotMaterial, count)
+		// 防重投那一组共用一个 nullifier。
+		shared, err := randomNullifier()
+		if err != nil {
+			return nil, proofGeneration{}, err
+		}
+		for index := range materials {
+			nullifier := shared
+			if index < count-duplicates {
+				generated, err := randomNullifier()
+				if err != nil {
+					return nil, proofGeneration{}, err
+				}
+				nullifier = generated
+			}
+			materials[index] = ballotMaterial{
+				ciphertext: encoded,
+				nullifier:  nullifier,
+				proof:      devProofBase64,
+			}
+		}
+		return materials, proofGeneration{}, nil
+	}
+
+	prover, err := ballot.NewProver(opts.provingKeyPath)
+	if err != nil {
+		return nil, proofGeneration{}, fmt.Errorf("加载选票 proving key 失败: %w", err)
+	}
+	// 服务端拼公开输入时用的是压缩公钥：客户端要转成同一形式，
+	// 两边算出来的公开输入才逐字段相同。
+	compressedKey, err := ballot.CompressPoint(electionKey)
+	if err != nil {
+		return nil, proofGeneration{}, fmt.Errorf("压缩计票公钥失败: %w", err)
+	}
+	proposalField := ballot.DeriveProposalField(proposalID)
+
+	// 防重投那一组共用一个 nullifier 秘密。
+	sharedSecret, err := ballot.GenerateNullifierSecret()
+	if err != nil {
+		return nil, proofGeneration{}, err
+	}
+	var sharedElement fr.Element
+	sharedElement.SetBytes(sharedSecret)
+
+	materials := make([]ballotMaterial, count)
+	errs := make([]error, count)
+	started := time.Now()
+	runParallel(count, opts.proveWorkers, func(index int) {
+		secretElement := sharedElement
+		if index < count-duplicates {
+			secret, secretErr := ballot.GenerateNullifierSecret()
+			if secretErr != nil {
+				errs[index] = secretErr
+				return
+			}
+			secretElement.SetBytes(secret)
+		}
+		material, materialErr := proveBallot(
+			opts, proposalID, proposalField, compressedKey, electionKey,
+			numOptions, secretElement, prover,
+		)
+		if materialErr != nil {
+			errs[index] = materialErr
+			return
+		}
+		materials[index] = material
+	})
+	elapsed := time.Since(started)
+	for index, proveErr := range errs {
+		if proveErr != nil {
+			return nil, proofGeneration{}, fmt.Errorf("出证明（第 %d 张）: %w", index+1, proveErr)
+		}
+	}
+	return materials, proofGeneration{elapsed: elapsed, count: count}, nil
+}
+
+// proveBallot 为一张选票出证明：加密 → 派生 nullifier → 拼公开输入 → 出证明。
+//
+// 公开输入与服务端用**同一套**拼装逻辑（ballot.BuildPublicInputs）——
+// 两边算出来的公开输入逐字段相同，证明才验得过。
+func proveBallot(
+	opts *options,
+	proposalID string,
+	proposalField fr.Element,
+	compressedKey []byte,
+	electionKey []byte,
+	numOptions int,
+	secretElement fr.Element,
+	prover *ballot.Prover,
+) (ballotMaterial, error) {
+	ciphertext, nonce, err := ballot.EncryptBallotWithUncompressedKey(
+		electionKey, opts.optionIndex,
+	)
+	if err != nil {
+		return ballotMaterial{}, fmt.Errorf("本地加密选票失败: %w", err)
+	}
+	nullifier := ballot.DeriveNullifier(secretElement, proposalField)
+	nullifierBytes := nullifier.Bytes()
+	inputs, err := ballot.BuildPublicInputs(entity.BallotStatement{
+		ProposalID:        proposalID,
+		Nullifier:         nullifierBytes[:],
+		ElectionPublicKey: compressedKey,
+		Ciphertext:        ciphertext,
+		NumOptions:        numOptions,
+	})
+	if err != nil {
+		return ballotMaterial{}, fmt.Errorf("拼公开输入失败: %w", err)
+	}
+	proof, err := prover.Prove(inputs, opts.optionIndex, nonce, secretElement)
+	if err != nil {
+		return ballotMaterial{}, fmt.Errorf("出证明失败: %w", err)
+	}
+	return ballotMaterial{
+		ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+		nullifier:  ballot.EncodeScalarHex(nullifier),
+		proof:      base64.StdEncoding.EncodeToString(proof),
+	}, nil
+}
+
 // waitForWindow 等到投票窗口打开。
 //
 // 服务端没有「按 ID 取单个提案」的公开端点，用提案列表（公开只读）定位。
@@ -496,14 +1004,16 @@ func waitForWindow(client *http.Client, opts *options, proposalID string) error 
 	}
 }
 
-// runVotes 并发提交选票。fixedNullifier 非空时所有请求都用它（防重投复核）。
+// runVotes 并发提交选票。
+//
+// credentials 与 materials 一一对应：第 i 个请求用第 i 张凭证与第 i 份材料。
+// 防重投复核那一轮的材料**共用同一个 nullifier** —— 唯一索引必须只放行一张。
 func runVotes(
 	client *http.Client,
 	opts *options,
 	proposalID string,
-	encodedCiphertext string,
 	credentials []credential,
-	fixedNullifier string,
+	materials []ballotMaterial,
 ) phaseResult {
 	outcomes := make([]outcome, len(credentials))
 	queue := make(chan int)
@@ -518,7 +1028,9 @@ func runVotes(
 		go func() {
 			defer wg.Done()
 			for index := range queue {
-				outcomes[index] = submitVote(client, opts, proposalID, encodedCiphertext, credentials[index], fixedNullifier)
+				outcomes[index] = submitVote(
+					client, opts, proposalID, credentials[index], materials[index],
+				)
 			}
 		}()
 	}
@@ -536,23 +1048,13 @@ func submitVote(
 	client *http.Client,
 	opts *options,
 	proposalID string,
-	encodedCiphertext string,
 	cred credential,
-	fixedNullifier string,
+	material ballotMaterial,
 ) outcome {
-	nullifier := fixedNullifier
-	if nullifier == "" {
-		generated, err := randomNullifier()
-		if err != nil {
-			return outcome{status: 0, code: "nullifier: " + err.Error()}
-		}
-		nullifier = generated
-	}
 	payload := map[string]any{
-		"proposal_id":          proposalID,
-		"encrypted_vote":       encodedCiphertext,
-		"proof":                devProofBase64,
-		"nullifier":            nullifier,
+		"encrypted_vote":       material.ciphertext,
+		"proof":                material.proof,
+		"nullifier":            material.nullifier,
 		"user_id":              cred.userID,
 		"user_pub_key":         cred.pubKey,
 		"credential_signature": cred.signature,
@@ -561,8 +1063,10 @@ func submitVote(
 	if err != nil {
 		return outcome{status: 0, code: "marshal: " + err.Error()}
 	}
+	// 提案 ID 走路径，不走请求体（见 docs/api-contract-v1.md）。
+	votePath := "/api/v1/proposals/" + url.PathEscape(proposalID) + "/votes"
 	request, err := http.NewRequest(
-		http.MethodPost, strings.TrimRight(opts.baseURL, "/")+"/api/v1/votes", bytes.NewReader(body),
+		http.MethodPost, strings.TrimRight(opts.baseURL, "/")+votePath, bytes.NewReader(body),
 	)
 	if err != nil {
 		return outcome{status: 0, code: "request: " + err.Error()}
@@ -686,6 +1190,7 @@ func printReport(result report) {
 	fmt.Printf("=== 压测报告 ===\n")
 	fmt.Printf("提案:        %s\n", result.ProposalID)
 	fmt.Printf("请求:        %d 张票，并发度 %d\n", result.Votes, result.Concurrency)
+	fmt.Printf("证明模式:    %s\n", proofModeLabel(result))
 	fmt.Printf("总耗时:      %s\n", result.Duration)
 	if result.TimingResolutionLimited {
 		fmt.Printf("吞吐:        低于计时分辨率（这一轮太快，耗时与吞吐都测不准）\n")
@@ -705,6 +1210,26 @@ func printReport(result report) {
 		"落库核对:    %d 个凭证已投票（预期 %d 个）\n",
 		result.VotedCredential, result.ExpectedVoted,
 	)
+	if result.RealProof {
+		fmt.Printf(
+			"客户端出证明: %s（%d 份，%d 并行）—— 不计入上面的吞吐与延迟\n",
+			result.ProofGeneration, result.ProofsGenerated, result.ProveWorkers,
+		)
+	}
+}
+
+// proofModeLabel 说清这一轮测的是哪条路径。
+//
+// 「占位证明」与「真证明」的数字**不能混着比**：前者服务端不验签，量的是
+// 「不验签时能吞多快」；后者才是真实投票路径的成本。
+func proofModeLabel(result report) string {
+	if !result.RealProof {
+		return "占位证明（服务端不验签，只能跑开发模式）"
+	}
+	if result.Eligibility {
+		return "真证明 + 资格证明领取（release 模式形态）"
+	}
+	return "真证明（服务端真验签）"
 }
 
 func countSlice(labels []string) map[string]int {
@@ -860,5 +1385,23 @@ func usage() {
   -concurrency    并发度，默认 20
   -duplicates     用同一个 nullifier 并发提交的次数（防重投复核），默认 5
   -open-delay     新建提案时距窗口打开的延迟，默认 5s
-  -json           以 JSON 输出报告`)
+  -json           以 JSON 输出报告
+
+  -proving-key          选票 proving key（只在客户端）。给了就出真证明，
+                        服务端会真验签 —— 只能跑配了 verifying key 的服务
+  -eligibility-dir      资格名单目录（cmd/eligibility-list 的产物）。
+                        给了就带资格证明领凭证，可跑 release 模式的服务
+  -eligibility-proving-key
+                        资格 proving key（只在客户端，配合 -eligibility-dir）
+  -prove-workers        并行出证明的 worker 数，默认 CPU 核数
+  -option               投票的选项下标（从 0 开始），默认 0
+
+示例（开发模式，量「不验签时能吞多快」）:
+  nullifier-loadtest -admin-token dev-admin-token -votes 200 -concurrency 20
+
+示例（真实投票路径：真证明 + 资格证明 + release 模式）:
+  nullifier-loadtest -admin-token "$TOKEN" \
+    -proving-key keys/proving.key \
+    -eligibility-dir elig -eligibility-proving-key keys/eligibility-proving.key \
+    -votes 50 -concurrency 10`)
 }

@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"anonvote/internal/domain/entity"
+	"anonvote/internal/infrastructure/http/middleware"
+	"anonvote/internal/infrastructure/metrics"
+	"anonvote/internal/infrastructure/ratelimit"
 	"anonvote/internal/usecase"
 
 	"github.com/gin-gonic/gin"
@@ -23,7 +26,76 @@ type Handler struct {
 	participationUC *usecase.ParticipationUseCase
 	tallyUC         *usecase.TallyUseCase
 	validate        *validator.Validate
+	metrics         *metrics.Metrics
+	rateLimits      *RateLimits
 	logger          *zap.Logger
+}
+
+// RateLimits 是各路由组的限流器。
+//
+// 三个字段都可以是 nil —— 那表示该组不限流（开发模式、单元测试）。
+type RateLimits struct {
+	// Credentials 覆盖凭证领取链路。
+	Credentials *ratelimit.Limiter
+	// Votes 覆盖投票提交端点。
+	Votes *ratelimit.Limiter
+	// Read 覆盖只读端点。
+	Read *ratelimit.Limiter
+}
+
+// WithRateLimits 接入限流器，返回自身便于链式调用。
+func (h *Handler) WithRateLimits(l *RateLimits) *Handler {
+	if l != nil {
+		h.rateLimits = l
+	}
+	return h
+}
+
+// RateLimits 返回 handler 持有的限流器集合。
+//
+// server 用它启动空闲桶的清理 —— 限流器的状态是常驻内存的，
+// 攻击者轮换来源地址就能把它撑大。
+func (h *Handler) RateLimits() *RateLimits {
+	return h.rateLimits
+}
+
+// StartCleanup 启动各限流器的空闲桶清理，直到 stop 通道被关闭。
+func (l *RateLimits) StartCleanup(stop <-chan struct{}) {
+	if l == nil {
+		return
+	}
+	for _, limiter := range []*ratelimit.Limiter{l.Credentials, l.Votes, l.Read} {
+		if limiter != nil {
+			go limiter.StartCleanup(stop)
+		}
+	}
+}
+
+// limits 返回限流器集合；没配置时返回空集合（各组都是 nil = 放行）。
+func (h *Handler) limits() RateLimits {
+	if h.rateLimits == nil {
+		return RateLimits{}
+	}
+	return *h.rateLimits
+}
+
+// WithMetrics 接入指标实例，返回自身便于链式调用。
+//
+// 业务事件就发生在这个 handler 里 —— 投票被接受还是被拒、凭证领没领走、
+// 结果发没发布 —— 所以指标在这里记，而不是从 HTTP 状态码反推。
+func (h *Handler) WithMetrics(m *metrics.Metrics) *Handler {
+	if m != nil {
+		h.metrics = m
+	}
+	return h
+}
+
+// Metrics 返回 handler 持有的指标实例。
+//
+// server 用它把指标暴露成 GET /metrics：指标实例由依赖注入创建并共享给
+// handler 与其它埋点处，server 只负责把它端出来。
+func (h *Handler) Metrics() *metrics.Metrics {
+	return h.metrics
 }
 
 func NewHandler(
@@ -54,16 +126,30 @@ func NewHandlerWithTally(
 		participationUC: participationUC,
 		tallyUC:         tallyUC,
 		validate:        validator.New(),
+		metrics:         metrics.New(),
 		logger:          logger,
 	}
 }
 
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
-	r.POST("/votes", h.SubmitVote)
-	r.GET("/proposals", h.ListProposals)
-	r.GET("/proposals/open", h.ListOpenProposals)
-	r.POST("/proposals/:proposal_id/vote-status", h.GetVoteStatus)
-	r.GET("/proposals/:proposal_id/election-key", h.GetElectionKey)
+	// 限流按**路由组**挂：领取 / 投票 / 只读三种流量的攻击面差很多，
+	// 用同一套额度要么挡不住投票端点，要么把只读端点也一起拖死。
+	//
+	// 额度是配置项（rate_limit.*），默认偏宽松 —— 宁可放过一次攻击，
+	// 也不要在真实投票窗口里把投票人挡在门外。推导见 docs/t25-ratelimit-design.md。
+	limits := h.limits()
+	credentials := middleware.RateLimit(limits.Credentials, "credentials", h.metrics)
+	votes := middleware.RateLimit(limits.Votes, "votes", h.metrics)
+	read := middleware.RateLimit(limits.Read, "read", h.metrics)
+
+	// 投票提交与其他提案级端点同形：提案 ID 走路径，不走请求体 ——
+	// 同一个提案 ID 只有**一个**来源，客户端不可能把两个提案搞混。
+	// 这条路径在 v0.3.0 被冻结（见 docs/api-contract-v1.md）。
+	r.POST("/proposals/:proposal_id/votes", votes, h.SubmitVote)
+	r.GET("/proposals", read, h.ListProposals)
+	r.GET("/proposals/open", read, h.ListOpenProposals)
+	r.POST("/proposals/:proposal_id/vote-status", read, h.GetVoteStatus)
+	r.GET("/proposals/:proposal_id/election-key", read, h.GetElectionKey)
 	// 匿名领取凭证：真两段式盲签名，三步走。
 	//   ① claim      —— 预留一个池槽位，拿到 user_id 与签发方公钥（不签名）
 	//   ② blind-sign —— 服务端对**盲化后**的消息做盲签名
@@ -72,16 +158,22 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	//
 	// 开启资格校验时，claim 之前多一步：先拿一次性的领取挑战（④ eligibility-
 	// challenge），把资格证明钉在本次会话上。
-	r.POST("/proposals/:proposal_id/credentials/eligibility-challenge", h.IssueEligibilityChallenge)
-	r.POST("/proposals/:proposal_id/credentials/claim", h.ReserveCredential)
-	r.POST("/proposals/:proposal_id/credentials/blind-sign", h.BlindSignCredential)
-	r.POST("/proposals/:proposal_id/credentials/attest", h.AttestCredential)
-	r.GET("/proposals/:proposal_id/results", h.GetResult)
-	r.GET("/proposals/:proposal_id/audit-anchors", h.ListAuditAnchors)
+	r.POST("/proposals/:proposal_id/credentials/eligibility-challenge", credentials, h.IssueEligibilityChallenge)
+	r.POST("/proposals/:proposal_id/credentials/claim", credentials, h.ReserveCredential)
+	r.POST("/proposals/:proposal_id/credentials/blind-sign", credentials, h.BlindSignCredential)
+	r.POST("/proposals/:proposal_id/credentials/attest", credentials, h.AttestCredential)
+	r.GET("/proposals/:proposal_id/results", read, h.GetResult)
+	r.GET("/proposals/:proposal_id/audit-anchors", read, h.ListAuditAnchors)
 }
 
+// submitVotePayload 是投票提交的请求体。
+//
+// ⚠️ 这里**没有** `proposal_id`：它只从路径来（`/proposals/:proposal_id/votes`）。
+// 一个提案 ID 只有**一个**来源 —— 请求体里再放一份，两份不一致时
+// 服务端只能猜，而猜错就是「把票投到别的提案去」。
+//
+// 字段名在 v0.3.0 被冻结（见 docs/api-contract-v1.md）。
 type submitVotePayload struct {
-	ProposalID          string `json:"proposal_id" validate:"required"`
 	EncryptedVote       string `json:"encrypted_vote" validate:"required,base64"`
 	Proof               string `json:"proof" validate:"required,base64"`
 	Nullifier           string `json:"nullifier" validate:"required"`
@@ -96,38 +188,44 @@ func (h *Handler) SubmitVote(c *gin.Context) {
 		return
 	}
 
+	proposalID := c.Param("proposal_id")
+	if proposalID == "" {
+		h.rejectVote(c, fmt.Errorf("%w: proposal_id is required", usecase.ErrInvalidRequest))
+		return
+	}
+
 	var payload submitVotePayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
-		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		h.rejectVote(c, fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
 		return
 	}
 	if err := h.validate.Struct(payload); err != nil {
-		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		h.rejectVote(c, fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
 		return
 	}
 
 	encryptedVote, err := base64.StdEncoding.DecodeString(payload.EncryptedVote)
 	if err != nil {
-		c.Error(fmt.Errorf("%w: encrypted_vote must be base64", usecase.ErrInvalidRequest))
+		h.rejectVote(c, fmt.Errorf("%w: encrypted_vote must be base64", usecase.ErrInvalidRequest))
 		return
 	}
 	proofBytes, err := base64.StdEncoding.DecodeString(payload.Proof)
 	if err != nil {
-		c.Error(fmt.Errorf("%w: proof must be base64", usecase.ErrInvalidRequest))
+		h.rejectVote(c, fmt.Errorf("%w: proof must be base64", usecase.ErrInvalidRequest))
 		return
 	}
 	userPubKey, err := base64.StdEncoding.DecodeString(payload.UserPubKey)
 	if err != nil {
-		c.Error(fmt.Errorf("%w: user_pub_key must be base64", usecase.ErrInvalidRequest))
+		h.rejectVote(c, fmt.Errorf("%w: user_pub_key must be base64", usecase.ErrInvalidRequest))
 		return
 	}
 	credentialSignature, err := base64.StdEncoding.DecodeString(payload.CredentialSignature)
 	if err != nil {
-		c.Error(fmt.Errorf("%w: credential_signature must be base64", usecase.ErrInvalidRequest))
+		h.rejectVote(c, fmt.Errorf("%w: credential_signature must be base64", usecase.ErrInvalidRequest))
 		return
 	}
 	req := &usecase.SubmitVoteRequest{
-		ProposalID:          payload.ProposalID,
+		ProposalID:          proposalID,
 		EncryptedVote:       encryptedVote,
 		Proof:               &entity.Proof{Data: proofBytes},
 		Nullifier:           payload.Nullifier,
@@ -136,13 +234,24 @@ func (h *Handler) SubmitVote(c *gin.Context) {
 		CredentialSignature: credentialSignature,
 	}
 	if err := h.votingUC.Submit(c.Request.Context(), req); err != nil {
-		c.Error(err)
+		h.rejectVote(c, err)
 		return
 	}
 
+	h.metrics.RecordVoteAccepted()
 	c.JSON(http.StatusCreated, gin.H{
 		"status": "ok",
 	})
+}
+
+// rejectVote 记录一次被拒的投票提交，并把错误交给错误处理器。
+//
+// 错误码取自 middleware.MapError —— 与响应体里的 code 是同一份口径，
+// 这样指标里的 code 标签与客户端看到的能对上。
+func (h *Handler) rejectVote(c *gin.Context, err error) {
+	_, code := middleware.MapError(err)
+	h.metrics.RecordVoteRejected(code)
+	c.Error(err)
 }
 
 // reserveCredentialPayload 是管理端预留签发权的请求体。
@@ -308,12 +417,12 @@ func (h *Handler) ReserveCredential(c *gin.Context) {
 	var payload claimCredentialPayload
 	// 空请求体是合法的（没开启资格校验时的既有形态）：EOF 不算错误。
 	if err := c.ShouldBindJSON(&payload); err != nil && !errors.Is(err, io.EOF) {
-		c.Error(fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
+		h.rejectClaim(c, fmt.Errorf("%w: %v", usecase.ErrInvalidRequest, err))
 		return
 	}
 	material, err := parseEligibilityMaterial(payload)
 	if err != nil {
-		c.Error(err)
+		h.rejectClaim(c, err)
 		return
 	}
 
@@ -323,10 +432,30 @@ func (h *Handler) ReserveCredential(c *gin.Context) {
 		material,
 	)
 	if err != nil {
-		c.Error(err)
+		// 带资格材料来的，说明服务端确实做了校验 —— 记下这次校验的结果。
+		// 没带材料时压根没发生校验，不计数。
+		if material != nil && !errors.Is(err, usecase.ErrEligibilityNotEnabled) {
+			if errors.Is(err, usecase.ErrInvalidEligibilityProof) {
+				h.metrics.RecordEligibilityCheck(metrics.ResultInvalid)
+			} else {
+				// 证明本身过了校验（被去重键挡下来也算过了）。
+				h.metrics.RecordEligibilityCheck(metrics.ResultValid)
+			}
+		}
+		h.rejectClaim(c, err)
 		return
 	}
+	if material != nil {
+		h.metrics.RecordEligibilityCheck(metrics.ResultValid)
+	}
+	h.metrics.RecordCredentialClaim(metrics.ResultAccepted)
 	c.JSON(http.StatusCreated, reservationResponse(reservation))
+}
+
+// rejectClaim 记录一次被拒的凭证领取，并把错误交给错误处理器。
+func (h *Handler) rejectClaim(c *gin.Context, err error) {
+	h.metrics.RecordCredentialClaim(metrics.ResultRejected)
+	c.Error(err)
 }
 
 // parseEligibilityMaterial 从请求体里解析资格材料。
@@ -388,9 +517,11 @@ func (h *Handler) BlindSignCredential(c *gin.Context) {
 		usecase.BlindSignScopePoolSlot,
 	)
 	if err != nil {
+		h.metrics.RecordCredentialBlindSign(metrics.ResultRejected)
 		c.Error(err)
 		return
 	}
+	h.metrics.RecordCredentialBlindSign(metrics.ResultAccepted)
 	c.JSON(http.StatusOK, gin.H{
 		"blind_signature": base64.StdEncoding.EncodeToString(blindSignature),
 	})
@@ -477,9 +608,11 @@ func (h *Handler) AttestCredential(c *gin.Context) {
 		signature,
 	)
 	if err != nil {
+		h.metrics.RecordCredentialAttest(metrics.ResultRejected)
 		c.Error(err)
 		return
 	}
+	h.metrics.RecordCredentialAttest(metrics.ResultAccepted)
 	c.JSON(http.StatusCreated, credentialResponse(credential))
 }
 
@@ -731,6 +864,7 @@ func (h *Handler) PublishResult(c *gin.Context) {
 		return
 	}
 
+	h.metrics.RecordTallyResultPublished()
 	c.JSON(http.StatusCreated, gin.H{
 		"proposal_id":  result.ProposalID,
 		"total_votes":  result.TotalVotes,

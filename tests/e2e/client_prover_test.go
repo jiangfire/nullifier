@@ -180,8 +180,7 @@ func TestAPI_ClientSideProof_E2E(t *testing.T) {
 	// 也不能把票落库）。
 	tamperedProof := append([]byte(nil), proof...)
 	tamperedProof[0] ^= 0x01
-	resp = postJSON(t, ts.URL+"/api/v1/votes", map[string]any{
-		"proposal_id":          proposalResp.ID,
+	resp = postJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/votes", map[string]any{
 		"encrypted_vote":       base64.StdEncoding.EncodeToString(ciphertext),
 		"proof":                base64.StdEncoding.EncodeToString(tamperedProof),
 		"nullifier":            nullifierHex,
@@ -203,8 +202,7 @@ func TestAPI_ClientSideProof_E2E(t *testing.T) {
 			"ends_at":   time.Now().UTC().Add(30 * time.Minute),
 		}).Error)
 
-	resp = postJSON(t, ts.URL+"/api/v1/votes", map[string]any{
-		"proposal_id":          proposalResp.ID,
+	resp = postJSON(t, ts.URL+"/api/v1/proposals/"+proposalResp.ID+"/votes", map[string]any{
 		"encrypted_vote":       base64.StdEncoding.EncodeToString(ciphertext),
 		"proof":                base64.StdEncoding.EncodeToString(proof),
 		"nullifier":            nullifierHex,

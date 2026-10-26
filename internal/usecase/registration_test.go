@@ -73,10 +73,19 @@ func (m *credentialClaimRepositoryMock) Save(ctx context.Context, claims []*enti
 	return args.Error(0)
 }
 
-func (m *credentialClaimRepositoryMock) TakeAvailable(ctx context.Context, proposalID string) (*entity.CredentialClaim, error) {
-	args := m.Called(ctx, proposalID)
+func (m *credentialClaimRepositoryMock) ReserveAvailable(
+	ctx context.Context,
+	proposalID string,
+	ttl time.Duration,
+) (*entity.CredentialClaim, error) {
+	args := m.Called(ctx, proposalID, ttl)
 	claim, _ := args.Get(0).(*entity.CredentialClaim)
 	return claim, args.Error(1)
+}
+
+func (m *credentialClaimRepositoryMock) ReleaseReservation(ctx context.Context, claimID string) error {
+	args := m.Called(ctx, claimID)
+	return args.Error(0)
 }
 
 func (m *credentialClaimRepositoryMock) GetAvailableByUserID(
@@ -85,6 +94,17 @@ func (m *credentialClaimRepositoryMock) GetAvailableByUserID(
 	userID string,
 ) (*entity.CredentialClaim, error) {
 	args := m.Called(ctx, proposalID, userID)
+	claim, _ := args.Get(0).(*entity.CredentialClaim)
+	return claim, args.Error(1)
+}
+
+func (m *credentialClaimRepositoryMock) GetReservedByUserID(
+	ctx context.Context,
+	proposalID string,
+	userID string,
+	ttl time.Duration,
+) (*entity.CredentialClaim, error) {
+	args := m.Called(ctx, proposalID, userID, ttl)
 	claim, _ := args.Get(0).(*entity.CredentialClaim)
 	return claim, args.Error(1)
 }
@@ -125,7 +145,7 @@ func TestRegisterUseCase_ReserveCredential(t *testing.T) {
 	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
 
 	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
-	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
+	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
 		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
 		Once()
 	issuer.On("IssuerPublicKey", mock.Anything).Return(testIssuerKey(), nil).Once()
@@ -148,7 +168,7 @@ func TestRegisterUseCase_ReserveCredential_PoolEmpty(t *testing.T) {
 	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
 
 	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
-	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
+	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
 		Return((*entity.CredentialClaim)(nil), repository.ErrNotFound).
 		Once()
 
@@ -197,7 +217,7 @@ func TestRegisterUseCase_BlindSignCredential(t *testing.T) {
 	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
 
 	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
-	claimRepo.On("GetAvailableByUserID", mock.Anything, "p-1", "pseudonym-1").
+	claimRepo.On("GetReservedByUserID", mock.Anything, "p-1", "pseudonym-1", mock.Anything).
 		Return(&entity.CredentialClaim{ID: "slot-1", UserID: "pseudonym-1"}, nil).
 		Once()
 	issuer.On("BlindSign", mock.Anything, 1, []byte("blinded")).
@@ -213,6 +233,10 @@ func TestRegisterUseCase_BlindSignCredential(t *testing.T) {
 
 // TestRegisterUseCase_BlindSignCredential_RejectsSlotlessUserID 验证公开端点不能
 // 为「池里没有的 user_id」盲签名 —— 否则签发方就是任意消息的签名预言机。
+//
+// 拒绝时回的是 **ErrCredentialAlreadyIssued**（→ 409 CREDENTIAL_EXISTS），不是
+// ErrInvalidRequest：槽位不在「可用」集合里，意味着它被别人领走了 ——
+// 与 attest 阶段的槽位冲突是同一个信号，客户端据此换一个槽位重来。
 func TestRegisterUseCase_BlindSignCredential_RejectsSlotlessUserID(t *testing.T) {
 	repo := new(credentialRepositoryMock)
 	proposalRepo := new(proposalRepositoryMock)
@@ -221,14 +245,14 @@ func TestRegisterUseCase_BlindSignCredential_RejectsSlotlessUserID(t *testing.T)
 	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
 
 	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
-	claimRepo.On("GetAvailableByUserID", mock.Anything, "p-1", "not-in-pool").
+	claimRepo.On("GetReservedByUserID", mock.Anything, "p-1", "not-in-pool", mock.Anything).
 		Return((*entity.CredentialClaim)(nil), repository.ErrNotFound).
 		Once()
 
 	signature, err := uc.BlindSignCredential(
 		context.Background(), "p-1", "not-in-pool", []byte("blinded"), 1, BlindSignScopePoolSlot,
 	)
-	assert.ErrorIs(t, err, ErrInvalidRequest)
+	assert.ErrorIs(t, err, ErrCredentialAlreadyIssued)
 	assert.Nil(t, signature)
 	issuer.AssertNotCalled(t, "BlindSign", mock.Anything, mock.Anything, mock.Anything)
 }

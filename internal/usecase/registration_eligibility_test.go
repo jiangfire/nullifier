@@ -137,7 +137,7 @@ func TestRegisterUseCase_ReserveCredential_RequiresEligibility(t *testing.T) {
 	reservation, err := uc.ReserveCredential(context.Background(), "p-1", nil)
 	assert.ErrorIs(t, err, ErrEligibilityRequired)
 	assert.Nil(t, reservation)
-	claimRepo.AssertNotCalled(t, "TakeAvailable", mock.Anything, mock.Anything)
+	claimRepo.AssertNotCalled(t, "ReserveAvailable", mock.Anything, mock.Anything, mock.Anything)
 }
 
 // TestRegisterUseCase_ReserveCredential_InvalidEligibilityProof 验证资格证明
@@ -172,7 +172,7 @@ func TestRegisterUseCase_ReserveCredential_InvalidEligibilityProof(t *testing.T)
 	reservation, err := uc.ReserveCredential(context.Background(), "p-1", material)
 	assert.ErrorIs(t, err, ErrInvalidEligibilityProof)
 	assert.Nil(t, reservation)
-	claimRepo.AssertNotCalled(t, "TakeAvailable", mock.Anything, mock.Anything)
+	claimRepo.AssertNotCalled(t, "ReserveAvailable", mock.Anything, mock.Anything, mock.Anything)
 }
 
 // TestRegisterUseCase_ReserveCredential_RecordsEligibilityUse 验证资格使用会被
@@ -198,7 +198,7 @@ func TestRegisterUseCase_ReserveCredential_RecordsEligibilityUse(t *testing.T) {
 	eligibility.On("Enabled").Return(true).Once()
 	eligibility.On("Root").Return(testEligibilityRoot, 10, nil).Once()
 	eligibility.On("Verify", mock.Anything, mock.Anything).Return(nil).Once()
-	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
+	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
 		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
 		Once()
 	eligibilityRepo.On("RecordUse", mock.Anything, mock.MatchedBy(
@@ -236,15 +236,18 @@ func TestRegisterUseCase_ReserveCredential_EligibilityAlreadyUsed(t *testing.T) 
 	eligibility.On("Enabled").Return(true).Once()
 	eligibility.On("Root").Return(testEligibilityRoot, 10, nil).Once()
 	eligibility.On("Verify", mock.Anything, mock.Anything).Return(nil).Once()
-	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
+	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
 		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
 		Once()
 	eligibilityRepo.On("RecordUse", mock.Anything, mock.Anything).
 		Return(repository.ErrDuplicateEligibilityUse).Once()
+	// 资格已被用过 → 槽位不能被白白消耗：预留要释放掉。
+	claimRepo.On("ReleaseReservation", mock.Anything, "slot-1").Return(nil).Once()
 
 	reservation, err := uc.ReserveCredential(context.Background(), "p-1", material)
 	assert.ErrorIs(t, err, ErrEligibilityAlreadyUsed)
 	assert.Nil(t, reservation)
+	claimRepo.AssertExpectations(t)
 }
 
 // TestRegisterUseCase_ReserveCredential_RejectsMaterialWhenDisabled 验证服务端
@@ -296,7 +299,7 @@ func TestRegisterUseCase_ReserveCredential_RequiresUseRepository(t *testing.T) {
 	eligibility.On("Enabled").Return(true).Once()
 	eligibility.On("Root").Return(testEligibilityRoot, 10, nil).Once()
 	eligibility.On("Verify", mock.Anything, mock.Anything).Return(nil).Once()
-	claimRepo.On("TakeAvailable", mock.Anything, "p-1").
+	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
 		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
 		Once()
 

@@ -94,7 +94,7 @@ func TestProviders_WiringSmoke(t *testing.T) {
 	require.NotNil(t, participationUC)
 	require.NotNil(t, tallyUC)
 
-	handler := NewHTTPHandler(votingUC, registerUC, proposalUC, participationUC, tallyUC, logger)
+	handler := NewHTTPHandler(votingUC, registerUC, proposalUC, participationUC, tallyUC, NewMetrics(), NewRateLimits(cfg), logger)
 	server := NewHTTPServer(cfg, handler, logger)
 	require.NotNil(t, server)
 	require.NotNil(t, server.Engine())

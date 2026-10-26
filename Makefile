@@ -24,12 +24,12 @@ endif
 .DEFAULT_GOAL := help
 
 .PHONY: help \
-	deps tidy build run cli loadtest \
+	deps tidy build run cli loadtest audit-recompute \
 	test test-short cover pg-test \
 	vet fmt fmt-check \
 	web-install web-dev web-build web-test web-lint web-typecheck web-format web-format-check \
 	web-wasm web-proving-key web-eligibility-key eligibility-list \
-	browser-acceptance \
+	browser-acceptance web-e2e \
 	check ci clean
 
 help: ## Show available targets
@@ -59,6 +59,9 @@ cli: ## Run the CLI (make cli ARGS="help")
 
 loadtest: ## Run the concurrent voting load test (make loadtest ARGS="-votes 200")
 	$(GO) run ./cmd/loadtest $(ARGS)
+
+audit-recompute: ## Recompute a published tally offline (make audit-recompute ARGS="-proposal p-1 -shares-file shares.json")
+	$(GO) run ./cmd/audit-recompute $(ARGS)
 
 # ---------- 测试 ----------
 
@@ -158,6 +161,9 @@ eligibility-list: ## Build the offline eligibility-list tool
 
 browser-acceptance: ## Prepare the browser acceptance environment (make browser-acceptance ARGS=setup|verify|stop)
 	bash ./scripts/browser-acceptance.sh $(or $(ARGS),setup)
+
+web-e2e: ## Run the portal end-to-end tests in a real browser (make web-e2e)
+	bash ./scripts/web-e2e.sh $(or $(ARGS),run)
 
 # ---------- 组合目标 ----------
 

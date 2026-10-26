@@ -267,12 +267,15 @@ func TestRun_CommandsThatWriteFiles(t *testing.T) {
 
 		req := <-requests
 		require.Equal(t, http.MethodPost, req.Method)
-		require.Equal(t, "/api/v1/votes", req.Path)
+		// 提案 ID 走路径，不走请求体（见 docs/api-contract-v1.md）。
+		require.Equal(t, "/api/v1/proposals/p1/votes", req.Path)
 
 		var body map[string]any
 		require.NoError(t, json.Unmarshal([]byte(req.Body), &body))
 		require.Equal(t, "cipher", body["encrypted_vote"])
 		require.Equal(t, "u-1", body["user_id"])
+		require.NotContains(t, body, "proposal_id",
+			"提案 ID 只从路径来 —— 请求体里再放一份，两个来源可能打架")
 	})
 
 	t.Run("decrypt-setup 落盘", func(t *testing.T) {
@@ -563,39 +566,6 @@ func TestHelpers_WriteAndReadJSON(t *testing.T) {
 	require.Equal(t, "b", out["a"])
 
 	require.Error(t, readJSON(filepath.Join(t.TempDir(), "missing.json"), &out))
-}
-
-func TestHelpers_LoadShares(t *testing.T) {
-	t.Parallel()
-
-	dir := t.TempDir()
-
-	values, err := loadShares("s1, s2", "")
-	require.NoError(t, err)
-	require.Equal(t, []string{"s1", "s2"}, values)
-
-	jsonPath := filepath.Join(dir, "shares.json")
-	require.NoError(t, os.WriteFile(jsonPath, []byte(`["s1","s2"]`), 0o600))
-	values, err = loadShares("", jsonPath)
-	require.NoError(t, err)
-	require.Equal(t, []string{"s1", "s2"}, values)
-
-	textPath := filepath.Join(dir, "shares.txt")
-	require.NoError(t, os.WriteFile(textPath, []byte("s1 s2\ns3"), 0o600))
-	values, err = loadShares("", textPath)
-	require.NoError(t, err)
-	require.Equal(t, []string{"s1", "s2", "s3"}, values)
-
-	emptyPath := filepath.Join(dir, "empty.txt")
-	require.NoError(t, os.WriteFile(emptyPath, []byte("  \n "), 0o600))
-	_, err = loadShares("", emptyPath)
-	require.Error(t, err)
-
-	_, err = loadShares("", "")
-	require.Error(t, err)
-
-	_, err = loadShares("", filepath.Join(dir, "missing.txt"))
-	require.Error(t, err)
 }
 
 func TestHelpers_EnvOrDefault(t *testing.T) {

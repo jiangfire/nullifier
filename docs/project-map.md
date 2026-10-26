@@ -37,10 +37,11 @@
 | `cmd/keygen/main.go` | 生成 Groth16 密钥，**两套电路各一把**：`-circuit ballot`（默认）出 `verifying.key`（0644，服务端用）/ `proving.key`（0600，**只在客户端侧**）；`-circuit eligibility` 出 `eligibility-verifying.key` / `eligibility-proving.key`；打印 verifying key 的 sha256 指纹；默认不覆盖已有文件（`-force` 才覆盖） |
 | `cmd/eligibility-list/main.go` | **离线名单工具**（不联网、不连服务端）：`-members <名单文件> -out <目录>` → `root.json`（给服务端配 `crypto.eligibility_root`）+ 每成员一份 `eligibility-<member_id>.json`（0600，成员本人保管）。两份产物必须分开保管 |
 | `cmd/cli/main.go` | 16 个子命令的 CLI 客户端，**只走 HTTP API**，不绕过服务端校验 |
+| `cmd/audit-recompute/main.go` | **审计离线复算工具**（见 §1.11）：`-proposal <id> (-shares <a,b> \| -shares-file <文件>)` → 只读打开票库 → 用份额还原私钥 → 重算计票与锚点 → 与库内已发布的结果**逐字节**比对；退出码 `0` 一致 / `1` 审计未通过 / `2` 用法或运行错误。**与服务端共用同一份计票算法**（`internal/tally`） |
 | `cmd/ballot-wasm/main.go` | **浏览器端 prover 的 WASM 模块**（`GOOS=js GOARCH=wasm` 构建，见 §1.10）。在全局对象上注册 `nullifierProver`（**四个** API：`init` / `prove` / `initEligibility` / `proveEligibility` —— 选票与资格两套电路在同一个模块里）；非 js/wasm 平台有同名 stub，让 `go build ./...` 照常通过 |
-| `internal/di/providers.go` | 全部 Wire provider 的实现体（logger/db/各仓储/各 usecase/handler）；密码学的装配点在这里：`NewProofVerifier` `NewEncrypter` `NewThresholdCrypto` `NewNullifierGenerator` `NewCredentialIssuer` `NewEligibilityService` `NewEligibilityUseRepository` |
-| `internal/di/wire.go` + `wire_gen.go` | Wire 声明与生成产物。**当前是手工同步的**（见陷阱） |
-| `internal/config/config.go` | viper 加载 + 运行期校验；`server.mode` 推导 `Config.DebugMode`（`isDebugMode`），release/prod/production 走 `IsReleaseMode`；`CONFIG_FILE` 显式指定配置文件路径；`crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对**，且在 release 模式下**两者都必填** |
+| `internal/di/providers.go` | 全部 Wire provider 的实现体（logger/db/各仓储/各 usecase/handler/指标）；密码学的装配点在这里：`NewProofVerifier` `NewEncrypter` `NewThresholdCrypto` `NewNullifierGenerator` `NewCredentialIssuer` `NewEligibilityService` `NewEligibilityUseRepository` |
+| `internal/di/wire.go` + `wire_gen.go` | Wire 声明与生成产物。**生成器现在能跑了**（见陷阱） |
+| `internal/config/config.go` | viper 加载 + 运行期校验；`server.mode` 推导 `Config.DebugMode`（`isDebugMode`），release/prod/production 走 `IsReleaseMode`；`CONFIG_FILE` 显式指定配置文件路径；`crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对**，且在 release 模式下**两者都必填**；`rate_limit.*` 与 `server.trusted_proxies`（T25，release 模式下限流**强制开启**） |
 | `internal/config/admin_token.go` | admin bearer token 兜底生成（32 字节随机，base64url） |
 
 **模式**：usecase 构造函数是纯 DI 传参，无全局变量；logger 允许为 nil（自动降级 `zap.NewNop()`）。
@@ -50,8 +51,17 @@
 - `internal/config/config.go` 的 `load()` —— `server.mode` 默认 `release`；release/prod/production **强制要求** `crypto.vk_path` **和** `server.admin_bearer_token`（`IsReleaseMode`），**并且强制要求 `crypto.eligibility_root` 与 `crypto.eligibility_vk_path` 同时存在**（没有它们服务端无法强制一人一票）。配置文件缺失时服务直接启动失败，这是有意的兜底。
 - `internal/config/config.go` 的 `load()` —— `crypto.eligibility_root` 与 `crypto.eligibility_vk_path` **必须成对出现**（任何模式）：只配一个 → 启动失败，不静默降级成「不校验」。
 - `internal/config/config.go` 的 `load()` —— 配置文件默认找名为 `config.*` 的文件（`SetConfigName("config")`）；**`CONFIG_FILE` 环境变量可以显式指定路径**（`ConfigFileEnvVar`），生产环境用它加载 `configs/config.production.yaml`。显式文件不存在 → 启动失败。
-- **`internal/di/wire_gen.go` 目前是手工同步的**：本仓库离线跑不了 wire 生成器（`go.sum` 里 `github.com/google/subcommands` 只有 `/go.mod` 哈希，缺模块内容哈希，`go run github.com/google/wire/cmd/wire` 需要联网补依赖）。改了 `internal/di/wire.go` 必须**手工**改 `wire_gen.go`，provider 的声明顺序与实参顺序要一起对齐。
+- **`internal/di/wire_gen.go` 现在能用生成器重新生成了**（2026-10-25 修好）：此前缺
+  `//go:build !wireinject` 约束，`wire.go` 与 `wire_gen.go` 会同时参与编译而重复声明
+  `InitializeServer`，生成器根本跑不起来 —— 于是装配代码一直是**手工同步**的。
+  现在：`go run github.com/google/wire/cmd/wire ./internal/di` 可直接重生成。
+  ⚠️ `wire_gen.go` 的 build 约束**不能删** —— 删了生成器又会跟 `wire.go` 撞车。
 - `go.mod` 里还留着 `go.dedis.ch/kyber/v3`，但仓库里已经**没有任何 Go 文件引用它**（`kyber_elgamal.go` 已删）；`go mod tidy` 会把它摘掉。
+- ⚠️ **`go mod tidy` 在本仓库会顺手抬 go 指令版本**（2026-10-25 实测：`go 1.25.4` → `go 1.26.0`）
+  并升级一批无关依赖。**加依赖请用 `go get <包>@<版本>` 定点加**，别直接跑 tidy。
+  ⚠️ **`go get` 也会抬**：它按新依赖声明的 go 版本走 —— `golang.org/x/time@v0.16.0`
+  要求 go 1.26.0，加它就把指令抬上去了。选 **v0.15.0**（要求 go 1.25.0），
+  既能用又不抬高使用者的最低 Go 版本。
 
 ### 1.2 领域层 —— `internal/domain/`
 
@@ -104,30 +114,62 @@
 
 **陷阱**：`voting.go` 有**两条保存路径**——仓储实现了 `atomicVoteParticipationSaver` 就走事务（`SaveWithParticipation`），否则退化成先存票再存参与状态的非原子路径。目前 GORM 仓储实现了事务路径，mock 仓储没有。
 
+**计票算法不在这一层**：`tally.go` 的 `PublishResult` 只做编排，实际的「解密 → 计数 →
+merkle 根 → 锚点哈希」在 **`internal/tally`**（见 §1.11）。这么切是因为审计复算工具
+要调**同一个**算法 —— 两边各写一份，漂移了复算结论就没有意义。
+
+### 1.3.1 共用算法层 —— `internal/tally/` + `internal/shares/`
+
+两个**没有 HTTP、没有 GORM** 的小包，被服务端与命令行工具共用：
+
+| 包 | 负责 | 为什么共用 |
+|---|---|---|
+| `internal/tally` | 计票的规范算法：`Compute`（解密 → 计数 → merkle 根 → 锚点哈希）、`MarshalCanonicalTally`、`VoteLeaf`、`AnchorHash`、`Compare`（与已发布结论逐字节比对） | 服务端的计票链路与 `cmd/audit-recompute` 必须算**同一个**结果 |
+| `internal/shares` | 门限份额：`Hash` / `HashList` / `ParseRegistered` / `EnsureBelongToSession` / `EncodeList` / `DecodeList` / `Load`（读份额文件） | 服务端的份额校验与审计工具的份额校验必须**同一套口径**（同一份份额不能重复计入门限份数）；CLI 与审计工具也要吃同一种份额文件 |
+
+**冻结**：`internal/tally` 里的三处算法细节（merkle 叶子、规范计票 JSON、锚点哈希公式）
+是**冻结**的 —— 改了库里已发布的锚点就与重算结果对不上。锚点哈希的公式由一条 KAT
+测试钉死（`internal/tally/tally_test.go` 的 `TestAnchorHash_KAT`）。
+
 ### 1.4 HTTP 层 —— `internal/infrastructure/http/`
 
 | 文件 | 职责 |
 |---|---|
-| `server.go` | 建 engine、挂 4 个中间件、注册公共组与 admin 组；`GET /healthz` 返回 `{"status":"ok","debug":<bool>,"eligibility":<bool>}`（`eligibility` = 服务端是否在强制一人一票） |
-| `handler.go` | 全部 handler；DTO 定义与绑定都在这里 |
+| `server.go` | 建 engine、挂 5 个中间件、注册公共组与 admin 组；`GET /healthz` 返回 `{"status":"ok","debug":<bool>,"eligibility":<bool>}`（`eligibility` = 服务端是否在强制一人一票）；`GET /metrics`（**要 admin Bearer 令牌**） |
+| `handler.go` | 全部 handler；DTO 定义与绑定都在这里。业务事件的指标埋点也在这里（`h.metrics.RecordVoteAccepted()` 等） |
 | `middleware/admin_auth.go` | Bearer Token 鉴权 |
 | `middleware/cors.go` | 白名单 Origin 精确匹配 |
-| `middleware/error_handler.go` | 错误 → `{error, code}` 统一响应 |
+| `middleware/error_handler.go` | 错误 → `{error, code}` 统一响应。`MapError` 是**唯一**的错误码口径（响应体的 `code` 与指标的 `code` 标签同源） |
 | `middleware/recovery.go` | panic 兜底 |
 | `middleware/request_logger.go` | 请求日志（只记 method/path/status/latency/ip，**不记 header 和 body**） |
+| `middleware/metrics.go` | HTTP 请求数与耗时。⚠️ **必须挂在 `ErrorHandler` 之前** —— gin 的中间件先进后出，越早注册的回程越晚，这样才拿得到最终状态码 |
+| `internal/infrastructure/metrics/metrics.go` | Prometheus 指标集。**只暴露计数与耗时** —— 允许出现的标签名被一条测试逐个钉死 |
+| `middleware/rate_limit.go` | 限流中间件（T25）：超限返回 **429** + `Retry-After` + `{"error":…,"code":"RATE_LIMITED"}`。限流是**传输层**的保护措施，**不经过 `MapError`**（那张表映射领域错误），但文案仍走 `publicErrorMessage` |
+| `internal/infrastructure/ratelimit/ratelimit.go` | 令牌桶限流器。键是**每进程随机盐**的 SHA-256 哈希（内存里没有明文来源地址）；桶有空闲清理（`StartCleanup`，由 server 随生命周期启停） |
+
+**限流的路由分组**（`handler.go` 的 `RegisterRoutes` 挂限流中间件）：
+
+| 组 | 覆盖的端点 | 默认 rps / burst |
+|---|---|---|
+| `credentials` | `eligibility-challenge` / `claim` / `blind-sign` / `attest` | 10 / 40 |
+| `votes` | `POST /proposals/:id/votes` | 10 / 40 |
+| `read` | 提案列表 / `vote-status` / `election-key` / `results` / `audit-anchors` | 50 / 100 |
+
+管理端、`/healthz`、`/metrics` **不限流**（前者有 Bearer 令牌鉴权，后两者被限会直接影响可观测性）。设计稿见 [`t25-ratelimit-design.md`](./t25-ratelimit-design.md)。
 
 **路由表**（`server.go` 的 `NewServer` + `handler.go` 的 `RegisterRoutes`）：
 
 | 方法 | 路径 | 鉴权 |
 |---|---|---|
 | GET | `/healthz` | 无 |
-| POST | `/api/v1/votes` | 无 |
+| GET | `/metrics` | **admin Bearer 令牌**（Prometheus 指标，只含计数与耗时） |
+| POST | `/api/v1/proposals/:id/votes` | 无（**提案 ID 只从路径来**，请求体里没有 `proposal_id`） |
 | GET | `/api/v1/proposals` | 无 |
 | GET | `/api/v1/proposals/open` | 无 |
 | POST | `/api/v1/proposals/:id/vote-status` | 无（需凭证材料） |
 | POST | `/api/v1/proposals/:id/credentials/eligibility-challenge` | 无（领凭证前取一次挑战） |
-| POST | `/api/v1/proposals/:id/credentials/claim` | 无（匿名领取凭证，**只预留**；开启资格校验时带三件资格材料） |
-| POST | `/api/v1/proposals/:id/credentials/blind-sign` | 无（**只签池里还空着的槽位**） |
+| POST | `/api/v1/proposals/:id/credentials/claim` | 无（匿名领取凭证，**预留一个槽位**；开启资格校验时带三件资格材料） |
+| POST | `/api/v1/proposals/:id/credentials/blind-sign` | 无（**只签「正在预留中且未过期」的槽位**） |
 | POST | `/api/v1/proposals/:id/credentials/attest` | 无（先验签再落库） |
 | GET | `/api/v1/proposals/:id/results` | 无 |
 | GET | `/api/v1/proposals/:id/audit-anchors` | 无 |
@@ -150,7 +192,7 @@
 **陷阱**：
 - `middleware/admin_auth.go` 用 `!=` 做字符串比较，**不是常数时间比较**。
 - `middleware/error_handler.go` 的 `publicErrorMessage` —— `INVALID_REQUEST` 直接回 `err.Error()`，会把内部错误细节透出；其他 code 都做了归一化。改文案时注意前后端 `error-messages.ts` 的映射是按英文短语正则匹配的。
-- 错误码枚举是**前后端契约**：`INVALID_REQUEST` `NOT_FOUND` `UNAUTHORIZED` `DOUBLE_VOTING` `CREDENTIAL_EXISTS` `CREDENTIAL_POOL_EMPTY` `USER_ALREADY_VOTED` `INVALID_CREDENTIAL` `DECRYPTION_SESSION_EXISTS` `RESULT_ALREADY_PUBLISHED` `ELIGIBILITY_REQUIRED` `INVALID_ELIGIBILITY_PROOF` `ELIGIBILITY_ALREADY_USED` `ELIGIBILITY_NOT_ENABLED` `INTERNAL_ERROR`。
+- 错误码枚举是**前后端契约**：`INVALID_REQUEST` `NOT_FOUND` `UNAUTHORIZED` `DOUBLE_VOTING` `CREDENTIAL_EXISTS` `CREDENTIAL_POOL_EMPTY` `USER_ALREADY_VOTED` `INVALID_CREDENTIAL` `DECRYPTION_SESSION_EXISTS` `RESULT_ALREADY_PUBLISHED` `ELIGIBILITY_REQUIRED` `INVALID_ELIGIBILITY_PROOF` `ELIGIBILITY_ALREADY_USED` `ELIGIBILITY_NOT_ENABLED` `RATE_LIMITED` `INTERNAL_ERROR`。**两边必须一致** —— 由 `tests/architecture/error_code_test.go` 双向比对（Go 的 `MapError` 码集合 ↔ TS 的 `PortalErrorCode` 成员集合）。服务端加了码而门户不认识时，**两边各自的自测都是绿的**，用户看到的是英文原文。
 
 ### 1.5 持久化层 —— `internal/infrastructure/persistence/`
 
@@ -166,8 +208,9 @@
 
 **陷阱**：
 - `db.go` 的 `applyPoolConfig` —— PostgreSQL 的**连接池参数**由 `db.max_open_conns` / `db.max_idle_conns` / `db.conn_max_lifetime_seconds` 配置（默认 25 / 5 / 3600 秒），为 0 表示不改动 `database/sql` 默认值。
+- ⚠️ **连接池参数的默认值不能挂在「驱动是 postgres」那个分支里**：`db.driver` 可以被配置文件覆盖（`config.go` 用 viper 读 `db.driver` 覆盖 env 分支的结果），那时 env 分支拿到的还是默认的 sqlite，池参数就全成了 0 —— `applyPoolConfig` 一个都不设，`database/sql` 于是**只保留 2 条空闲连接**，高并发下每个请求都要重开一条数据库连接，量到的是连接开销而不是服务端能力（`db_env.go` 的默认值因此改成了与驱动无关地取）。**线上务必显式配 `db.max_open_conns` / `db.max_idle_conns`**（结论见 `docs/capacity-report-v0.3.0.md`）。
 - `db.go` 的 `newSQLiteDB` —— SQLite 文件库**没开 WAL**，也没设 busy timeout。
-- `migration.go` 的 `AutoMigrate` —— 每次迁移都会回填 `options_json`（`WHERE options_json IS NULL OR = ''` → `'[]'`）。**release 模式启动不再自动迁移**，改表要走独立的 `nullifier-server -migrate` 步骤（`config.AutoMigrate` / `di.Migrate`）。新表 `eligibility_uses`（`id` / `proposal_id` / `qualification_id` / `used_at`，唯一索引 `(proposal_id, qualification_id)`）也在迁移清单里，`SchemaReady` 会检查它。
+- `migration.go` 的 `AutoMigrate` —— 每次迁移都会回填 `options_json`（`WHERE options_json IS NULL OR = ''` → `'[]'`）。**release 模式启动不再自动迁移**，改表要走独立的 `nullifier-server -migrate` 步骤（`config.AutoMigrate` / `di.Migrate`）。新表 `eligibility_uses`（`id` / `proposal_id` / `qualification_id` / `used_at`，唯一索引 `(proposal_id, qualification_id)`）也在迁移清单里，`SchemaReady` 会检查它。**`credential_claims.reserved_at`（槽位预留时间）也是 v0.3.0 新增的列** —— 升级前必须先跑迁移。
 - `db_env.go` 的 `GetDBConfigFromEnv` —— `GO_ENV=test` 时 SQLite 强制切 `:memory:`。
 
 ### 1.6 密码学层 —— `internal/infrastructure/crypto/`
@@ -257,6 +300,8 @@
 | `src/types/` | `portal.ts` `portal-api.ts` |
 | `vitest.config.ts` | 测试配置 + **自写的 `.vue` 编译插件**（见下） |
 | `test/setup.ts` | 测试环境的浏览器全局对象（`localStorage` / `sessionStorage` / `window`） |
+| `playwright.config.ts` | **浏览器端到端测试**（T28）的配置：真浏览器、超时、`workers: 1`（用例之间有顺序依赖） |
+| `e2e/portal.spec.ts` | 门户的两条端到端路径（领凭证 → 本地出票 → 提交 → 查状态 → 计票；资格重复领取被拒）。环境由 `scripts/web-e2e.sh` 备好，参数走环境变量 |
 
 **面板渲染测试**（`src/components/panels/panels.test.ts`）：
 
@@ -268,6 +313,9 @@
 - **这不是浏览器渲染**：没有 CSS、没有事件绑定、没有客户端挂载。抓的是
   「模板引用了不存在的变量」「setup 抛错」「条件分支写反」这一类问题。
 - 覆盖了「服务端不得拿到明文选项」这条底线：面板**不渲染**任何「让服务端代生成凭据」的入口。
+- ✅ **浏览器渲染那一半由 T28 补上**（`web/e2e/portal.spec.ts` + Playwright）：真浏览器里
+  跑门户的关键路径。**两层测试各有分工**：vitest 那层抓模板与状态机，Playwright 那层抓
+  **接线**（跨语言字符串、静态资源、WASM prover、事件绑定）。
 
 **`.vue` 编译插件**（`vitest.config.ts` 内联）：
 
@@ -427,6 +475,41 @@ nonce 与 nullifier 秘密**只在这一次调用里出现**。
 - **实测耗时**（node 驱动同一个模块）：初始化 7.6 秒、出证明 2.25 秒、证明 128 字节。
   初始化那 7.6 秒是编译电路，因此必须放进 Worker，否则界面会卡住。
 
+### 1.11 审计离线复算 —— `cmd/audit-recompute/main.go`
+
+投票结束后，拿计票份额**脱离服务端**重算计票与锚点，与库内已发布的结果**逐字节**比对。
+
+```
+只读打开票库 → 读提案/选票/会话/已发布结果/锚点
+  → 校验份额属于本会话（internal/shares，与服务端同一份代码）
+  → 门限还原计票私钥
+  → tally.Compute（internal/tally，与服务端同一个函数）
+  → tally.Compare：票数 / 计票 JSON / merkle 根 / 锚点哈希
+  → 锚点表 vs 结果表是否自相矛盾
+```
+
+| 退出码 | 含义 |
+|---|---|
+| `0` | 复算结论与已发布结论**逐字节一致** |
+| `1` | **审计未通过** —— 有对不上的地方（可当门禁用） |
+| `2` | 用法错误或运行失败（库打不开、份额不足、还原私钥失败……） |
+
+**关键性质**：
+- **只读票库**：`persistence.DBConfig.ReadOnly` → SQLite `mode=ro` /
+  PostgreSQL `default_transaction_read_only=on`。不是「我们保证不写」，是「写不了」。
+  ⚠️ WAL 形态的 SQLite 也要能读 —— 已实证（`internal/infrastructure/persistence/db_readonly_test.go`）。
+- **不碰服务端**：直接读库，不需要投票服务在跑，也不要 admin token。默认读服务端
+  同一份配置指向的同一个库（`config.LoadForMigration`）。
+- **与服务端共用同一份计票算法**（`internal/tally.Compute`）—— 这是整个工具的意义所在。
+
+**陷阱**：
+- ⚠️ **计票份额是秘密材料** —— 门限份数凑齐就能还原全部选票的明文选项。份额文件用完
+  按秘密材料处理。
+- 复算**跑不完**也是一种审计失败：库里的票解不开（密文被改过）→ `report.Failure`
+  非空 → 退出码 `1`（不是 `2`）。用合法份额还原出的私钥解不开一张票，只可能是票坏了。
+- 门限私钥还原用 `ballot.RecoverSecret`，它**不做**份额归属校验 —— 归属校验在
+  `shares.EnsureBelongToSession`，两步都要走。
+
 ---
 
 ## 2. 关键流程
@@ -520,17 +603,19 @@ publish        → 提案必须已关闭（isProposalClosed）
 5. **密文格式 v2 → v3 与 v0.1.0 不兼容。** v3 是 BN254 twisted Edwards 上的指数 ElGamal（`0x03` + 两个压缩点 = 65 字节），v2 是 ed25519 上的 DH 混合封装（HKDF-SHA256 派生）。旧密文既解不开，也不该再用于真实投票。
 6. **加密的是选项下标，不是选项文本。** 下标是电路里可做范围检查的小整数（上限 `ballot.MaxOptions` = 256），选项文本可能很长且不唯一。解密方 `DecryptBallotOption` 拿 `numOptions` 在选项集合里逐个比对。
 7. **曲线点的子群检查不能省。** BN254 twisted Edwards 的余因子是 8，小阶点会让解密方泄漏私钥低位比特。`ballot/group.go` 的 `parsePoint` 对每个外部点都做 `isInSubGroup`（用子群阶乘点看是否回到单位元）。
-8. **`internal/di/wire_gen.go` 是手工同步的。** wire 生成器在本仓库离线不可用（`go.sum` 里 `github.com/google/subcommands` 只有 `/go.mod` 哈希，缺模块内容哈希）。改 `internal/di/wire.go` 必须手工同步 `wire_gen.go`。
+8. **`internal/di/wire_gen.go` 可以用生成器重新生成**：`go run github.com/google/wire/cmd/wire ./internal/di`。此前缺 `//go:build !wireinject` 约束，生成器跑不起来，装配代码一直靠手工同步 —— **改了 `wire.go` 就重新生成，别手工改**。
 9. **服务端曾经有一条「代用户选票」的妥协路径，现在没有了。** 它是 `ballot-draft`（服务端拿明文选项去加密）—— 已连同 `usecase/tally.go` 的 `EncryptVoteOption` / `PrepareBallotDraft` / `proposalOptionIndex` 一起删除。**没有例外、没有豁免机制**：`tests/architecture/` 盯着「请求体不得有明文选项字段」「usecase 不得有接受明文选项的入口」「这条链不许复活」「ballot-draft 端点不许复活」。真要恢复它，先想清楚是不是该改的是客户端。
 10. **只比对签名是不够的。** 拿一张合法凭证换个 `user_id` 重放，逐字节比对签名会通过。`usecase/voting.go` 因此在落库前调 `issuer.VerifyCredential`，失败 → 401。
 11. **两段式盲签名的服务端只做两件事。** `kryptology_credential_issuer.go` 没有 `Issue` 了：签发方只给公钥（`IssuerPublicKey`）与对**盲化消息**签名（`BlindSign`）。**服务端在 attest 之前绝不能拿到 `user_pub_key`** —— 它一旦知道公钥就能算出凭证消息原文，盲化当场失效（它手上有私钥，根本不需要解盲）。因此 `credentials/claim` 的请求体里**没有 `user_pub_key`**（旧版本收它的字段一律忽略），只有可选的三件资格材料（`eligibility_proof` / `qualification_id` / `challenge`，见陷阱 30）。
-12. **公开的盲签名端点必须绑定池槽位。** `credentials/blind-sign` 只为该提案里**还空着的** `user_id` 签名，否则签发方就是「任意消息」的签名预言机。管理端可以覆盖任意 `user_id`，走的是另一个路径 `/api/v1/credentials/blind-sign`（gin 的路由树不允许同一路径挂两套中间件）。
-13. **预留不占位 → 并发领取会抢同一个槽位。** 服务端取槽位时不改状态，所以两个客户端可能拿到同一个 `user_id`，后到 attest 的那个会撞 409 `CREDENTIAL_EXISTS`。**重试必须在客户端**（新协议下重试要重新盲化，服务端代劳不了）：换槽位重来，最多 5 次，只在 409 `CREDENTIAL_EXISTS` 时重试 —— 409 还有 `CREDENTIAL_POOL_EMPTY`（池领完了），那个不重试。
-    - 为什么不改成「预留即占位」：那会让「只预留不 attest」的客户端永久消耗池槽位，变成一个 DoS。
+12. **公开的盲签名端点必须绑定池槽位。** `credentials/blind-sign` 只为该提案里**正在预留中、且预留未过期**的 `user_id` 签名，否则签发方就是「任意消息」的签名预言机。管理端可以覆盖任意 `user_id`，走的是另一个路径 `/api/v1/credentials/blind-sign`（gin 的路由树不允许同一路径挂两套中间件）。
+13. **领取槽位必须「占位」，占位又要会过期。** 现在的做法：领取时服务端**预留**一个槽位（`credential_claims.reserved_at`，TTL 10 分钟）—— 并发领取各拿各的槽位，不再抢同一个。残余的撞车（预留过期、槽位被别人领走）由**客户端**换槽位重来：最多 5 次，只在 409 `CREDENTIAL_EXISTS` 时重试（409 还有 `CREDENTIAL_POOL_EMPTY`，那个不重试）。
+    - **TTL 是必需的**：只预留不 attest 的客户端（掉线、崩溃、恶意）不能永久占住池子 —— 那是一个 DoS。十分钟足够走完三步。
+    - **盲签名阶段的撞车也回 409 `CREDENTIAL_EXISTS`**（与 attest 阶段同一个信号）：早先这里回 400 `INVALID_REQUEST`，而客户端的判据是「409 + `CREDENTIAL_EXISTS` 才重试」—— 认不出 400 的投票人会直接放弃，拿到一句看不懂的「请求不合法」。
+    - **PostgreSQL 上必须用 `FOR UPDATE SKIP LOCKED`**（见 `credential_claim_repository.go` 的 `reserveWithSkipLocked`）：挑候选与占位放在同一个事务里，被别人锁住的行直接跳过。没有它，所有并发者会盯上同一行（批量插入的槽位 `created_at` 完全相同，排序落回随机的 UUID id），条件更新在行锁上排队失败后重试又挑回同一行 —— 重试次数耗尽，**池里明明还有几十上百个空槽位却报「池空」**。SQLite 没有行级锁，走 `reserveWithRetry` 的「挑候选 + 条件更新 + 重试」。
 14. **凭证改为匿名随机领取后，服务端单靠凭证无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。**这一条已由 T22 的资格证明补回**（见 §2.4）：服务端对**去重键**去重，而不是对凭证去重；去重键由成员零知识地出示，服务端不知道它属于谁。
 15. **`configs/config.production.yaml` 不会被自动加载** —— viper 默认只找 `config.*`。**已给出一条明确路径**：`CONFIG_FILE=./configs/config.production.yaml` 启动即可（`internal/config/config.go` 的 `ConfigFileEnvVar`）。显式指定的文件不存在时**直接启动失败**，不会静默回退到开发配置。启动日志的 `config_file` 字段会打印实际加载的文件路径。
 16. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项 —— release 模式下留空会打一条启动告警（同源部署留空是合法的，所以不阻止启动）。
-17. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（**11 个受控包**：usecase / config / di / http / http-middleware / crypto / crypto-ballot / persistence / cmd-cli / cmd-keygen / cmd-server），合计门槛见表内 `total` 行（77）。单个包回退会直接让 CI 变红。门槛本身还比各包当前水位低约 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。最低的一档是 `internal/infrastructure/persistence`（门槛 58）。
+17. **覆盖率门槛是逐包分档的**，门槛值写在 `scripts/coverage-thresholds.txt`（**17 个受控包**：usecase / config / di / tally / shares / http / http-middleware / crypto / crypto-ballot / metrics / persistence / ratelimit / cmd-cli / cmd-keygen / cmd-eligibility-list / cmd-audit-recompute / cmd-server），合计门槛见表内 `total` 行（77）。单个包回退会直接让 CI 变红。门槛本身还比各包当前水位低约 2 个百分点 —— 抬门槛是逐版本的事，别一次拉满。最低的一档是 `internal/infrastructure/persistence`（门槛 58）。**新增受控包时要同步改这张表** —— 新包不入表等于不受门槛约束。
 18. **窗口期语义在两个用例里各写了一份**：`isProposalOpenForVoting`（`voting.go`）和 `isProposalClosed`（`tally.go`）。改时间规则要同时改两处。
 19. **release 模式不再启动即改表** —— 必须先跑 `nullifier-server -migrate`，忘了会直接启动失败（`persistence.SchemaReady` 检查）。开发模式仍然自动迁移。
 20. **admin token 的存放位置**：CLI 优先读 `NULLIFIER_ADMIN_TOKEN` 环境变量（`cmd/cli/main.go`），`-admin-token` 只是兜底；门户存 `sessionStorage`，不落 `localStorage`。
@@ -568,6 +653,13 @@ publish        → 提案必须已关闭（isProposalClosed）
    - **为什么是「一人一票」级别的事**：资格包是「谁拿到谁就能领这一票」。运营方按 root 声称的人数分发，被覆盖掉的那个人要么拿不到包，要么拿到**别人的**包 —— 两个人就能领同一票。
    - **现在的口径**：撞名在**写盘前**就被拒（`checkMemberFileNames`），报错点名是哪两个标识撞到了哪个文件，并给出改法（用只含字母数字与 `-_.` 的标识）；**带不带 `-force` 都拒绝**。落盘顺序也改了：**成员包先写、`root.json` 最后写** —— 失败时目录里没有 root，不会留下一份可被误上线的名单。
    - **守法**：改 `sanitizeFileName` 的规则、改文件名格式、加成员标识种类时，先想「两个不同的标识会不会归一到同一个名字」；改完跑 `cmd/eligibility-list` 的测试（`TestGenerateListRejectsCollidingFileNames` / `TestGenerateListWritesOnePackagePerMember`）。
+42. **gin 默认信任所有代理 —— `c.ClientIP()` 是可以伪造的。** gin v1.12.0 的默认 `trustedProxies` 是 `["0.0.0.0/0", "::/0"]`，`ClientIP()` 会取 `X-Forwarded-For` 的**第一个**值。后果有两个：① 任何按 IP 做的限流都能被一个请求头绕过去；② `middleware/request_logger.go` 记的 `client_ip` 也是可伪造的。修法是 `server.trusted_proxies`（CIDR 列表，**默认空 = 不信任任何代理**），启动时交给 `engine.SetTrustedProxies`。
+   - **部署在反向代理后面时必须显式配置**，否则所有请求会被算到代理的同一个 IP 上 —— 限流会误伤真实投票人（fail-closed：偏严而不是偏松）。
+   - **守法**：加任何依赖来源地址的逻辑（限流、审计、限速）之前，先确认 `server.trusted_proxies` 这条链是通的；改配置时记得 `net.ParseCIDR` 校验会让服务**启动失败**（网段配错的后果是「限流按错误的来源计数」）。
+43. **限流的键是加盐哈希，内存里没有明文 IP。** 限流器状态常驻内存，比日志更容易被转储、备份或顺手 dump —— 里面存着明文来源地址是不合适的。仓库已经有一条硬规矩（匿名领取凭证时不记录来源 IP），限流器不能另开一个口子。盐每进程随机：哈希不可逆 → 内存里还原不出 IP；副本之间的键也不可关联。
+   - **守法**：往限流器里加字段时别把明文来源塞进 `digest` 的输入之外的地方（比如别拿它做日志或指标标签）。
+44. **限流是进程内的，多副本下额度按副本数放大。** 没有 Redis 等外部状态：一个副本一份计数，实际额度 = 配额的**副本数倍**。别把「多副本」当成「额度是全局的」。
+45. **压测会被限流挡住。** `cmd/loadtest` 的所有请求来自同一台机器，共享同一个来源额度 —— 测服务端容量时**先调高额度或关掉限流**，否则测出来的是限流阈值而不是服务端容量（关限流只允许在 debug 模式）。这条与陷阱 38 是一对：压测工具是「服务端扛不扛得住」的唯一证据来源，它被限流挡住，容量结论同样失真。
 
 ---
 
@@ -580,7 +672,33 @@ go vet ./...
 gofmt -l ./cmd ./internal ./tests      # 应无输出
 go test ./...                          # Windows 需 CGO_ENABLED=1
 bash ./scripts/check-coverage.sh 80 coverage.ci.out   # 用 Git Bash，不是 WSL
-#   覆盖率门槛按包分档，逐包判定；门槛值见 scripts/coverage-thresholds.txt（12 个包）
+#   覆盖率门槛按包分档，逐包判定；门槛值见 scripts/coverage-thresholds.txt（17 个包）
+
+# 冻结的接口契约门禁：Go 的 struct tag ↔ TS 的 interface 双向比对 + 密文格式定版
+#   （改了字段名 / 删字段 / 改路径 / 改密文格式而不同步另一边，就会红）
+go test ./tests/architecture/ -run TestVoteSubmitRequestFieldsMatch -v
+go test ./tests/architecture/ -run TestCiphertextFormatIsFinalized -v
+
+# 错误码集合的跨语言门禁：Go 的 MapError ↔ TS 的 PortalErrorCode 双向比对
+#   （服务端加了码而门户不认识，两边各自的自测都是绿的 —— 用户看到英文原文）
+go test ./tests/architecture/ -run TestErrorCodes -v
+
+# 限流：超限 429、不同来源互不影响、伪造 X-Forwarded-For 不能绕过
+go test ./internal/infrastructure/ratelimit/ -v
+go test ./internal/infrastructure/http/ -run TestRateLimit -v
+go test ./internal/infrastructure/http/middleware/ -run TestRateLimit -v
+go test ./internal/config/ -run 'RateLimit|TrustedProxies' -v
+
+# 计票的规范算法（锚点哈希的 KAT —— 改了公式就会红）
+go test ./internal/tally/ -run TestAnchorHash_KAT -v
+
+# 审计离线复算：一致 → 0；篡改计票结果 / 篡改选票 → 1（审计未通过）
+go test ./cmd/audit-recompute/ -v
+go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件>   # 人工跑一遍
+
+# 指标：只暴露计数与耗时（允许出现的标签名被逐个钉死）
+go test ./internal/infrastructure/metrics/ -v
+go test ./internal/infrastructure/http/ -run TestMetricsEndpoint -v
 
 # 只跑选票密码学栈（真实 Groth16：加解密往返、证明往返、篡改公开输入、越界选项、错 nullifier 秘密）
 go test ./internal/infrastructure/crypto/ballot/ -v
@@ -654,8 +772,10 @@ go run ./cmd/cli credential-claim -proposal <id> \
   -proving-key ./keys/eligibility-proving.key -out ./cred.json
 #   6) 同一个成员再领一次 → 409 ELIGIBILITY_ALREADY_USED（一人一票生效）
 
-# 浏览器里的真实出票验收（真浏览器 + 真服务端，人工跑一次）：
-#   仓库里没有浏览器自动化 —— 这一步只能人工点。脚本已经把前后的活都干了：
+# 浏览器里的真实出票验收（真浏览器 + 真服务端）：
+#   自动化（Playwright，真浏览器，一条龙备环境 + 跑用例 + 收尾）：
+bash ./scripts/web-e2e.sh run                 # = make web-e2e；CI 的 web-e2e job 跑的就是它
+#   人工点一遍（验的是**部署形态**：真域名、反代 —— 自动化验不了）：
 bash ./scripts/browser-acceptance.sh setup    # 备好环境（密钥/名单/提案/凭证池/门户）并打印人工步骤
 bash ./scripts/browser-acceptance.sh verify   # 人工点完之后核对服务端日志与计票结果
 bash ./scripts/browser-acceptance.sh stop     # 停掉后台进程
@@ -715,19 +835,23 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
 
 ## 5. 尚未完成的部分（不要写成生产能力）
 
-- **浏览器端 prover 已在真实浏览器里跑通，但门户面板仍不是「浏览器渲染」回归。** WASM 模块
-  （`cmd/ballot-wasm`）在 node 下端到端跑通（`tests/e2e/wasm_prover_test.go`：
-  init → prove → 提交 → 计票还原），并在 2026-10-25 于**真实浏览器**（Chromium / Electron）
-  里跑通同一套链路：`wasm_exec.js` + `ballot-prover.wasm` + `proving.key` 三个静态资源从门户
-  目录加载，init 11.8~14.3 秒、prove 2.9 秒，产出的密文 / nullifier / proof 被服务端以真
-  verifying key 验签通过（201），计票还原出浏览器端选的那个选项。
-  但**门户面板仍没有浏览器自动化回归**（仓库无 Playwright，见 §1.7）—— 盲区 2 闭合的是
-  「WASM 路径在真实浏览器里可用」，不是「门户有端到端 UI 回归」。
+- **浏览器端 prover 已在真实浏览器里跑通，门户面板也已经有浏览器渲染回归了**（T28，
+  2026-10-26）。WASM 模块（`cmd/ballot-wasm`）在 node 下端到端跑通
+  （`tests/e2e/wasm_prover_test.go`：init → prove → 提交 → 计票还原），并在 2026-10-25 于
+  **真实浏览器**（Chromium / Electron）里跑通同一套链路：`wasm_exec.js` +
+  `ballot-prover.wasm` + `proving.key` 三个静态资源从门户目录加载，init 11.8~14.3 秒、
+  prove 2.9 秒，产出的密文 / nullifier / proof 被服务端以真 verifying key 验签通过（201），
+  计票还原出浏览器端选的那个选项。
+  ✅ **2026-10-26 起这条链路还有了自动化回归**：`scripts/web-e2e.sh` + Playwright
+  （`web/e2e/portal.spec.ts`）在真浏览器里自动跑「领凭证 → 本地出票 → 提交 → 查状态 →
+  计票」与资格路径（导入资格文件 → 匿名领取 → 重复领取被拒），CI 有独立 job（`web-e2e`）。
+  ⚠️ 但它只覆盖**关键路径** —— 视觉细节、响应式布局、可访问性仍靠人工。
 - **「一人一票」的资格证明已落地（T22）**，但还有三处要注意：
   - **门户的浏览器端资格路径已在真浏览器里人工点过一遍**（2026-10-25，Chromium / Electron）：
     导入资格文件 → 领取 201 → **重复领取 409「这份资格已经领过票了 —— 一人一票」** →
-    浏览器本地生成选票 → 提交 201 → 计票还原出所选选项。但仓库无 Playwright，
-    **每次上线仍要人工点一遍**（步骤见 `docs/deployment-checklist.md` §8.1）。
+    浏览器本地生成选票 → 提交 201 → 计票还原出所选选项；✅ **2026-10-26 起也有自动化回归**
+    （T28，见上）。⚠️ **部署形态**（真域名、反代）仍要人工点一遍
+    （步骤见 `docs/deployment-checklist.md` §8.1）。
   - **`cmd/loadtest` 不支持资格证明**（它不会取挑战、也不会出资格证明），因此压测仍然
     只能在 debug 模式跑。
   - **资格包丢了无法恢复**（服务端不存秘密与叶子），补发要重新生成整份名单。
@@ -745,9 +869,15 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
 - **一人一票已由资格证明强制**（T22）：服务端对去重键去重，而不是对凭证去重；
   成员零知识地出示资格，服务端不知道它属于谁。详见 §2.4 与 §3 陷阱 30–34。
 - **门户与 CLI 的匿名性文案与实现仍有落差**（见 §1.7 陷阱）。
+- **限流已落地（T25）**，但它**不是**容量结论：
+  - 限流是**进程内**的，多副本下额度按副本数放大；**没有**分布式限流。
+  - 额度是**按来源地址**计的：机构集中投票时所有人共用一个出口 IP，额度要按实际
+    规模调高（部署清单 §3.1 有推导过程）。
+  - `cmd/loadtest` 会被限流挡住 —— 测容量前先调高额度或关掉限流。
+  设计稿见 [`docs/t25-ratelimit-design.md`](./t25-ratelimit-design.md)。
 - **容量数字只有 SQLite 一份，且不是规划。** `cmd/loadtest` 能跑出可复现的吞吐与防重投结论，
   但 SQLite 的单写者模型会把并发写串行化，数字反映的是存储层；**压测工具自己没有 prover**
   （门户与 CLI 都有），所以它只能在 debug 模式跑。按路线图 §2.2，真正的容量规划
-  （阈值、限流、PG 基准）属 v0.3.0。
+  （PG 基准、资源配置建议）属 v0.3.0 的 T27，**尚未做**。
 
 > 完整的问题清单、证据与修复顺序见 `docs/release-review-2026-10-20.md`；v0.2.0 的能力矩阵与任务状态见 [`docs/roadmap.md`](./roadmap.md) §4.1。

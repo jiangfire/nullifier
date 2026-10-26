@@ -135,9 +135,9 @@ func TestServer_RealBallotProof(t *testing.T) {
 
 	ballot := buildClientBallot(t, prover, proposalID, publicKey, 0, 2)
 
-	voteBody := func(proposal string, cred credentialMaterial, b clientBallot) map[string]any {
+	// 提案 ID 只从路径来（请求体里没有它）—— 见 docs/api-contract-v1.md。
+	voteBody := func(cred credentialMaterial, b clientBallot) map[string]any {
 		return map[string]any{
-			"proposal_id":          proposal,
 			"encrypted_vote":       base64.StdEncoding.EncodeToString(b.ciphertext),
 			"proof":                base64.StdEncoding.EncodeToString(b.proof),
 			"nullifier":            b.nullifier,
@@ -148,13 +148,13 @@ func TestServer_RealBallotProof(t *testing.T) {
 	}
 
 	t.Run("真实证明被接受", func(t *testing.T) {
-		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(proposalID, credential, ballot))
+		resp := doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalID+"/votes", voteBody(credential, ballot))
 		defer func() { _ = resp.Body.Close() }()
 		require.Equal(t, http.StatusCreated, resp.StatusCode, readErrorBody(t, resp))
 	})
 
 	t.Run("跨提案复用证明返回 400", func(t *testing.T) {
-		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(otherProposalID, otherCredential, ballot))
+		resp := doPostJSON(t, ts.URL+"/api/v1/proposals/"+otherProposalID+"/votes", voteBody(otherCredential, ballot))
 		defer func() { _ = resp.Body.Close() }()
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
@@ -163,7 +163,7 @@ func TestServer_RealBallotProof(t *testing.T) {
 		tampered := ballot
 		tampered.nullifier = flipHexNibble(tampered.nullifier)
 
-		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(proposalID, credential, tampered))
+		resp := doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalID+"/votes", voteBody(credential, tampered))
 		defer func() { _ = resp.Body.Close() }()
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
@@ -173,7 +173,7 @@ func TestServer_RealBallotProof(t *testing.T) {
 		tampered.ciphertext = append([]byte(nil), ballot.ciphertext...)
 		tampered.ciphertext[len(tampered.ciphertext)-1] ^= 0xff
 
-		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(proposalID, credential, tampered))
+		resp := doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalID+"/votes", voteBody(credential, tampered))
 		defer func() { _ = resp.Body.Close() }()
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
@@ -182,7 +182,7 @@ func TestServer_RealBallotProof(t *testing.T) {
 		forged := credential
 		forged.Signature = base64.StdEncoding.EncodeToString([]byte("forged-signature"))
 
-		resp := doPostJSON(t, ts.URL+"/api/v1/votes", voteBody(proposalID, forged, ballot))
+		resp := doPostJSON(t, ts.URL+"/api/v1/proposals/"+proposalID+"/votes", voteBody(forged, ballot))
 		defer func() { _ = resp.Body.Close() }()
 		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	})
