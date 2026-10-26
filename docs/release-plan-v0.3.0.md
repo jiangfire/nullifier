@@ -65,12 +65,10 @@
 | 4 | 审计离线复算工具 `cmd/audit-recompute` | T24 |
 | 5 | 监控指标端点 `GET /metrics`（Prometheus） | T26 |
 | 6 | 公开端点限流（按 IP + 路由组，release 模式强制开启） | T25 |
+| 7 | 真正的压测容量规划（真 PostgreSQL + 真证明，产出容量报告与资源配置建议） | T27 |
 
 ### 不做（明确排除）
 
-- **真正的压测容量规划** —— 按路线图 §1.2 也属 v0.3.0，但阈值要按真实部署规模定，
-  **留到下一批**。⚠️ **限流已落地，但限流不等于容量结论**：额度是按「500 人 / 5 分钟 /
-  共用一个出口 IP」的假想场景推导的，不是实测结论（T27 就是干这个的）。
 - **Playwright 门户 UI 自动化** —— 路线图 §4.3 把它决到 v0.3.0，但它是**独立的一条**，
   排在核心之后；本版先做接口与审计闭环。
   （⚠️ 2026-10-25 实测：Playwright 的浏览器**能正常下载**（chromium 118.1 MiB），
@@ -184,7 +182,7 @@ v0.3.0 可以发版的条件 —— 逐条都要有证据：
 | T24 审计离线复算 | ✅ 已落地 | 提交 `d418b7e`；`cmd/audit-recompute` + 共用的 `internal/tally` / `internal/shares`；真密码学端到端用例 `cmd/audit-recompute/main_test.go` 覆盖五种情形（一致 / 篡改计票 / 篡改选票 / 外来份额 / 份额不足） |
 | T26 监控指标 | ✅ 已落地 | 提交 `11951a3`；`GET /metrics`（要 admin 令牌）+ `internal/infrastructure/metrics`；HTTP 级用例 `internal/infrastructure/http/metrics_endpoint_test.go`（401 / 200 / 计数 +1 / 不含选票内容）与 `internal/infrastructure/http/metrics_vote_accepted_test.go` |
 | T25 公开端点限流 | ✅ 已落地 | 提交 `c60068b`；`internal/infrastructure/ratelimit`（令牌桶 + 盐化键）+ `middleware/rate_limit.go`（429 / `Retry-After` / `RATE_LIMITED`）；HTTP 级用例 `internal/infrastructure/http/rate_limit_test.go`（伪造 `X-Forwarded-For` 不能绕过 / 可信代理生效 / 路由组额度独立）；跨语言错误码门禁 `tests/architecture/error_code_test.go` |
-| T27 容量规划 | ⬜ 未开始（下一批） | 路线图 §1.2 —— 限流额度是推导值，不是实测结论 |
+| T27 容量规划 | ✅ 已落地 | 压测工具支持真 prover 与资格领取（`cmd/loadtest`）；脚本 `scripts/capacity-run.sh`（真 PostgreSQL + release 模式）；报告 `docs/capacity-report-v0.3.0.md`（吞吐 / 延迟分位 / 错误率 / 资源配置建议） |
 | T28 Playwright 门户 UI 自动化 | ⬜ 未开始（核心之后） | 路线图 §4.3 |
 
 ---

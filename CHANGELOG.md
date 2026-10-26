@@ -35,8 +35,32 @@ v0.2.0 之后的变更。本版的主题是**「接口不再动」** —— 完�
 > （`tests/architecture/api_contract_test.go` 拿 Go 的 struct tag 与 TS 的 interface
 > 双向比对，改一边不改另一边 CI 就红）。
 
+- **盲签名阶段的「槽位被别人占用」从 400 `INVALID_REQUEST` 改为 409 `CREDENTIAL_EXISTS`。**
+  - 触发条件不变：客户端预留的槽位在盲签名时已经不在「可用」集合里了（被别人领走，
+    或预留过期后被别人重新预留）。
+  - **为什么改**：客户端的重试判据是「409 + `CREDENTIAL_EXISTS` 才重试」（门户 / CLI /
+    压测工具三处一致）。回 400 的意思是「请求不合法」，客户端**认不出**这个信号，
+    于是直接放弃 —— 并发领取的投票人会拿到一句看不懂的「请求不合法」，而不是
+    「换一个槽位再来」。
+  - 这与 attest 阶段的冲突是**同一个信号**，因此不改冻结契约、不新增错误码、
+    **前端不需要改**（`CREDENTIAL_EXISTS` 早就存在）。
+  - 自建客户端：如果你的客户端对 400 `INVALID_REQUEST` 有重试逻辑，注意区分 —— 现在
+    「槽位被占」会走 409。
+
 ### 新增
 
+- **容量报告与压测脚本（T27）** —— 「这台服务能扛多少票」第一次有了带数字的答案。
+  - 报告：[`docs/capacity-report-v0.3.0.md`](./docs/capacity-report-v0.3.0.md)
+    （吞吐 / 延迟分位 / 错误率 / 资源配置建议）；脚本：`scripts/capacity-run.sh`
+    （`setup` / `run` / `sweep` / `start` / `stop`，跑**真 PostgreSQL + release 模式**）。
+  - 压测工具 `cmd/loadtest` 现在支持**真 prover**（`-proving-key` 出真证明、服务端真验签）
+    与**资格证明领取**（`-eligibility-dir` / `-eligibility-proving-key`）——
+    此前它只能跑 debug 模式的占位证明，量到的不是真实投票路径。
+- **凭证槽位「预留即占位」**（`credential_claims.reserved_at`，TTL 10 分钟）——
+  匿名领取时服务端先把一个空闲槽位**占住**，并发领取的人各拿各的槽位。
+  - TTL 是必需的：只预留不完成领取的客户端（掉线、崩溃、恶意）不能永久占住池子。
+  - PostgreSQL 上用 `FOR UPDATE SKIP LOCKED` 一次完成「挑 + 占」；SQLite 走
+    「挑候选 + 条件更新 + 重试」。
 - **公开端点限流** —— 凭证领取、投票提交、只读端点按「来源 + 路由组」限流，
   超限返回 **429** + `Retry-After` + `{"error":…,"code":"RATE_LIMITED"}`。
   - **release 模式下强制开启**：`RATE_LIMIT_ENABLED=false` 会让服务**启动失败**
@@ -75,6 +99,9 @@ v0.2.0 之后的变更。本版的主题是**「接口不再动」** —— 完�
 
 ### 变更
 
+- ⚠️ **新增数据库列 `credential_claims.reserved_at`（槽位预留时间）** ——
+  **升级前必须先跑迁移**：`nullifier-server -migrate`（release 模式不在启动时改表）。
+  迁移清单见 [`docs/deployment-checklist.md`](./docs/deployment-checklist.md) §4。
 - **新增配置项**：`rate_limit.*`（额度）与 `server.trusted_proxies`（可信代理网段）。
   两者都有环境变量（`RATE_LIMIT_*` / `SERVER_TRUSTED_PROXIES`）。
   `server.trusted_proxies` **默认为空 = 不信任任何代理** —— 这会改变
@@ -89,6 +116,22 @@ v0.2.0 之后的变更。本版的主题是**「接口不再动」** —— 完�
 
 ### 修复
 
+- **数据库连接池的默认值形同虚设**（`db_env.go`）—— 默认值原先挂在「驱动是 postgres」
+  的分支里，而驱动可以被配置文件里的 `db.driver` 覆盖：那时池参数全是 0，
+  `database/sql` 于是**只保留 2 条空闲连接**，高并发下每个请求都要重开一条数据库连接。
+  默认值改成了与驱动无关地取（25 / 5 / 3600 秒），并建议线上显式配置
+  `db.max_open_conns` / `db.max_idle_conns`（见容量报告的配置建议）。
+- **并发领取凭证会误报「池空」** —— 预留槽位的实现原先是「挑候选 → 条件更新 → 失败重试」，
+  而备池的槽位是批量插入的（同一提案所有槽位 `created_at` 完全相同，排序落回随机的
+  UUID id）：所有并发领取者都盯上同一行，条件更新在行锁上排队失败后重试又挑回同一行，
+  重试次数一耗尽，**池里明明还有几十上百个空槽位却报「池空」**。
+  PostgreSQL 上改用 `FOR UPDATE SKIP LOCKED`（一个事务里一次完成「挑 + 占」），
+  SQLite 走「挑候选 + 条件更新 + 重试」（重试次数提高到 64）。
+  回归测试：`tests/integration/credential_claim_postgres_test.go`（含一条**确定性**用例：
+  锁住一个槽位，断言预留会跳过它而不是排队等锁）。
+- **压测工具的 HTTP 连接池没配** —— Go 默认 `MaxIdleConnsPerHost = 2`，高并发下每个
+  请求都新建 TCP 连接（Windows 上 TIME_WAIT 堆积到 390+）：量到的是客户端的连接 churn，
+  不是服务端的容量（实测单并发吞吐 141 → 257 req/s）。
 - **指标中间件的注册顺序是硬要求**（写在代码注释里）：必须排在错误处理器**之前** ——
   gin 的中间件先进后出，越早注册的回程越晚，这样才拿得到最终状态码；
   顺序反了指标里就会全是 200。

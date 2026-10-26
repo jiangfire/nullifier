@@ -168,8 +168,8 @@ merkle 根 → 锚点哈希」在 **`internal/tally`**（见 §1.11）。这么�
 | GET | `/api/v1/proposals/open` | 无 |
 | POST | `/api/v1/proposals/:id/vote-status` | 无（需凭证材料） |
 | POST | `/api/v1/proposals/:id/credentials/eligibility-challenge` | 无（领凭证前取一次挑战） |
-| POST | `/api/v1/proposals/:id/credentials/claim` | 无（匿名领取凭证，**只预留**；开启资格校验时带三件资格材料） |
-| POST | `/api/v1/proposals/:id/credentials/blind-sign` | 无（**只签池里还空着的槽位**） |
+| POST | `/api/v1/proposals/:id/credentials/claim` | 无（匿名领取凭证，**预留一个槽位**；开启资格校验时带三件资格材料） |
+| POST | `/api/v1/proposals/:id/credentials/blind-sign` | 无（**只签「正在预留中且未过期」的槽位**） |
 | POST | `/api/v1/proposals/:id/credentials/attest` | 无（先验签再落库） |
 | GET | `/api/v1/proposals/:id/results` | 无 |
 | GET | `/api/v1/proposals/:id/audit-anchors` | 无 |
@@ -208,8 +208,9 @@ merkle 根 → 锚点哈希」在 **`internal/tally`**（见 §1.11）。这么�
 
 **陷阱**：
 - `db.go` 的 `applyPoolConfig` —— PostgreSQL 的**连接池参数**由 `db.max_open_conns` / `db.max_idle_conns` / `db.conn_max_lifetime_seconds` 配置（默认 25 / 5 / 3600 秒），为 0 表示不改动 `database/sql` 默认值。
+- ⚠️ **连接池参数的默认值不能挂在「驱动是 postgres」那个分支里**：`db.driver` 可以被配置文件覆盖（`config.go` 用 viper 读 `db.driver` 覆盖 env 分支的结果），那时 env 分支拿到的还是默认的 sqlite，池参数就全成了 0 —— `applyPoolConfig` 一个都不设，`database/sql` 于是**只保留 2 条空闲连接**，高并发下每个请求都要重开一条数据库连接，量到的是连接开销而不是服务端能力（`db_env.go` 的默认值因此改成了与驱动无关地取）。**线上务必显式配 `db.max_open_conns` / `db.max_idle_conns`**（结论见 `docs/capacity-report-v0.3.0.md`）。
 - `db.go` 的 `newSQLiteDB` —— SQLite 文件库**没开 WAL**，也没设 busy timeout。
-- `migration.go` 的 `AutoMigrate` —— 每次迁移都会回填 `options_json`（`WHERE options_json IS NULL OR = ''` → `'[]'`）。**release 模式启动不再自动迁移**，改表要走独立的 `nullifier-server -migrate` 步骤（`config.AutoMigrate` / `di.Migrate`）。新表 `eligibility_uses`（`id` / `proposal_id` / `qualification_id` / `used_at`，唯一索引 `(proposal_id, qualification_id)`）也在迁移清单里，`SchemaReady` 会检查它。
+- `migration.go` 的 `AutoMigrate` —— 每次迁移都会回填 `options_json`（`WHERE options_json IS NULL OR = ''` → `'[]'`）。**release 模式启动不再自动迁移**，改表要走独立的 `nullifier-server -migrate` 步骤（`config.AutoMigrate` / `di.Migrate`）。新表 `eligibility_uses`（`id` / `proposal_id` / `qualification_id` / `used_at`，唯一索引 `(proposal_id, qualification_id)`）也在迁移清单里，`SchemaReady` 会检查它。**`credential_claims.reserved_at`（槽位预留时间）也是 v0.3.0 新增的列** —— 升级前必须先跑迁移。
 - `db_env.go` 的 `GetDBConfigFromEnv` —— `GO_ENV=test` 时 SQLite 强制切 `:memory:`。
 
 ### 1.6 密码学层 —— `internal/infrastructure/crypto/`
@@ -597,13 +598,15 @@ publish        → 提案必须已关闭（isProposalClosed）
 5. **密文格式 v2 → v3 与 v0.1.0 不兼容。** v3 是 BN254 twisted Edwards 上的指数 ElGamal（`0x03` + 两个压缩点 = 65 字节），v2 是 ed25519 上的 DH 混合封装（HKDF-SHA256 派生）。旧密文既解不开，也不该再用于真实投票。
 6. **加密的是选项下标，不是选项文本。** 下标是电路里可做范围检查的小整数（上限 `ballot.MaxOptions` = 256），选项文本可能很长且不唯一。解密方 `DecryptBallotOption` 拿 `numOptions` 在选项集合里逐个比对。
 7. **曲线点的子群检查不能省。** BN254 twisted Edwards 的余因子是 8，小阶点会让解密方泄漏私钥低位比特。`ballot/group.go` 的 `parsePoint` 对每个外部点都做 `isInSubGroup`（用子群阶乘点看是否回到单位元）。
-8. **`internal/di/wire_gen.go` 是手工同步的。** wire 生成器在本仓库离线不可用（`go.sum` 里 `github.com/google/subcommands` 只有 `/go.mod` 哈希，缺模块内容哈希）。改 `internal/di/wire.go` 必须手工同步 `wire_gen.go`。
+8. **`internal/di/wire_gen.go` 可以用生成器重新生成**：`go run github.com/google/wire/cmd/wire ./internal/di`。此前缺 `//go:build !wireinject` 约束，生成器跑不起来，装配代码一直靠手工同步 —— **改了 `wire.go` 就重新生成，别手工改**。
 9. **服务端曾经有一条「代用户选票」的妥协路径，现在没有了。** 它是 `ballot-draft`（服务端拿明文选项去加密）—— 已连同 `usecase/tally.go` 的 `EncryptVoteOption` / `PrepareBallotDraft` / `proposalOptionIndex` 一起删除。**没有例外、没有豁免机制**：`tests/architecture/` 盯着「请求体不得有明文选项字段」「usecase 不得有接受明文选项的入口」「这条链不许复活」「ballot-draft 端点不许复活」。真要恢复它，先想清楚是不是该改的是客户端。
 10. **只比对签名是不够的。** 拿一张合法凭证换个 `user_id` 重放，逐字节比对签名会通过。`usecase/voting.go` 因此在落库前调 `issuer.VerifyCredential`，失败 → 401。
 11. **两段式盲签名的服务端只做两件事。** `kryptology_credential_issuer.go` 没有 `Issue` 了：签发方只给公钥（`IssuerPublicKey`）与对**盲化消息**签名（`BlindSign`）。**服务端在 attest 之前绝不能拿到 `user_pub_key`** —— 它一旦知道公钥就能算出凭证消息原文，盲化当场失效（它手上有私钥，根本不需要解盲）。因此 `credentials/claim` 的请求体里**没有 `user_pub_key`**（旧版本收它的字段一律忽略），只有可选的三件资格材料（`eligibility_proof` / `qualification_id` / `challenge`，见陷阱 30）。
-12. **公开的盲签名端点必须绑定池槽位。** `credentials/blind-sign` 只为该提案里**还空着的** `user_id` 签名，否则签发方就是「任意消息」的签名预言机。管理端可以覆盖任意 `user_id`，走的是另一个路径 `/api/v1/credentials/blind-sign`（gin 的路由树不允许同一路径挂两套中间件）。
-13. **预留不占位 → 并发领取会抢同一个槽位。** 服务端取槽位时不改状态，所以两个客户端可能拿到同一个 `user_id`，后到 attest 的那个会撞 409 `CREDENTIAL_EXISTS`。**重试必须在客户端**（新协议下重试要重新盲化，服务端代劳不了）：换槽位重来，最多 5 次，只在 409 `CREDENTIAL_EXISTS` 时重试 —— 409 还有 `CREDENTIAL_POOL_EMPTY`（池领完了），那个不重试。
-    - 为什么不改成「预留即占位」：那会让「只预留不 attest」的客户端永久消耗池槽位，变成一个 DoS。
+12. **公开的盲签名端点必须绑定池槽位。** `credentials/blind-sign` 只为该提案里**正在预留中、且预留未过期**的 `user_id` 签名，否则签发方就是「任意消息」的签名预言机。管理端可以覆盖任意 `user_id`，走的是另一个路径 `/api/v1/credentials/blind-sign`（gin 的路由树不允许同一路径挂两套中间件）。
+13. **领取槽位必须「占位」，占位又要会过期。** 现在的做法：领取时服务端**预留**一个槽位（`credential_claims.reserved_at`，TTL 10 分钟）—— 并发领取各拿各的槽位，不再抢同一个。残余的撞车（预留过期、槽位被别人领走）由**客户端**换槽位重来：最多 5 次，只在 409 `CREDENTIAL_EXISTS` 时重试（409 还有 `CREDENTIAL_POOL_EMPTY`，那个不重试）。
+    - **TTL 是必需的**：只预留不 attest 的客户端（掉线、崩溃、恶意）不能永久占住池子 —— 那是一个 DoS。十分钟足够走完三步。
+    - **盲签名阶段的撞车也回 409 `CREDENTIAL_EXISTS`**（与 attest 阶段同一个信号）：早先这里回 400 `INVALID_REQUEST`，而客户端的判据是「409 + `CREDENTIAL_EXISTS` 才重试」—— 认不出 400 的投票人会直接放弃，拿到一句看不懂的「请求不合法」。
+    - **PostgreSQL 上必须用 `FOR UPDATE SKIP LOCKED`**（见 `credential_claim_repository.go` 的 `reserveWithSkipLocked`）：挑候选与占位放在同一个事务里，被别人锁住的行直接跳过。没有它，所有并发者会盯上同一行（批量插入的槽位 `created_at` 完全相同，排序落回随机的 UUID id），条件更新在行锁上排队失败后重试又挑回同一行 —— 重试次数耗尽，**池里明明还有几十上百个空槽位却报「池空」**。SQLite 没有行级锁，走 `reserveWithRetry` 的「挑候选 + 条件更新 + 重试」。
 14. **凭证改为匿名随机领取后，服务端单靠凭证无法强制一人一票** —— 每次领到的 `user_id` 都是新的随机假名，同一个人领两次会拿到两张凭证、可以投两票。**这一条已由 T22 的资格证明补回**（见 §2.4）：服务端对**去重键**去重，而不是对凭证去重；去重键由成员零知识地出示，服务端不知道它属于谁。
 15. **`configs/config.production.yaml` 不会被自动加载** —— viper 默认只找 `config.*`。**已给出一条明确路径**：`CONFIG_FILE=./configs/config.production.yaml` 启动即可（`internal/config/config.go` 的 `ConfigFileEnvVar`）。显式指定的文件不存在时**直接启动失败**，不会静默回退到开发配置。启动日志的 `config_file` 字段会打印实际加载的文件路径。
 16. **生产配置 `cors_allowed_origins: []`** → 门户跨域会被拒。这是部署项，不是代码项 —— release 模式下留空会打一条启动告警（同源部署留空是合法的，所以不阻止启动）。

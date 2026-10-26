@@ -88,9 +88,17 @@ db:
   user: "postgres"
   password: ""
   sslmode: "disable"
-  # 连接池。0 表示沿用默认值。
-  # 不限制连接数的话，并发一高就会打爆 PG 的 max_connections。
-  max_open_conns: 25
-  max_idle_conns: 5
+  # 连接池。0 表示沿用 database/sql 的默认值（**只保留 2 条空闲连接**）。
+  #
+  # ⚠️ **必须显式配**：不配的话高并发下每个请求都要重开一条数据库连接 ——
+  #    量到的是连接开销，不是服务端能力。
+  #
+  # ⚠️ **也别开太大**：实测把池从 16 开到 64，第一轮的吞吐从 2134/s 掉到 307/s
+  #    （64 条连接要现场建 64 个 PostgreSQL 后端进程，每个约 38 MB），
+  #    连跑几十轮后吞吐还会回落。投票写路径每请求只占连接约 0.5 ms，
+  #    16 条连接的理论上限已是 3 万+/s —— 远高于实测的 2200/s。
+  #    实测数据见 docs/capacity-report-v0.3.0.md。
+  max_open_conns: 16
+  max_idle_conns: 16
   # 连接最大存活时间（秒），用来定期回收长连接。
   conn_max_lifetime_seconds: 3600

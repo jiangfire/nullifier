@@ -14,6 +14,7 @@
 - `make eligibility-list` —— 构建**离线名单工具** `cmd/eligibility-list`（一人一票的资格名单生成器；离线跑，不联网、不连服务端）
 - `make audit-recompute ARGS="-proposal <提案ID> -shares-file <份额文件>"` —— 运行**审计离线复算工具** `cmd/audit-recompute`（只读票库，用计票份额重算计票与锚点，与库内已发布的结果逐字节比对；**退出码 0 一致 / 1 审计未通过 / 2 用法或运行错误**）
 - **浏览器验收**（`make browser-acceptance` 等价于 `bash ./scripts/browser-acceptance.sh setup`）—— 备好「真浏览器里点一遍」的验收环境：两套密钥、资格名单、提案、凭证池、门限解密、门户 dev server，并逐条打印人工步骤；点完跑 `verify` 核对服务端日志与计票，`stop` 收尾。**默认 SQLite；要验生产库形态就加 `DB_DRIVER=postgres`**（配套 `PG_HOST`/`PG_PORT`/`PG_USER`/`PG_PASSWORD`/`PG_DATABASE`，库要先存在）—— 生产用的就是 PostgreSQL，2026-10-25 已在真 PG 17.7 上跑通一遍
+- **容量压测**（`bash ./scripts/capacity-run.sh setup` → `sweep` → `stop`）—— 备好「真 PostgreSQL + release 模式 + 真证明」的压测环境，跑并发扫描（吞吐 / 延迟分位 / 错误率），产出 `.capacity/reports/report-c<并发度>.json`。**结论在 `docs/capacity-report-v0.3.0.md`**（单实例 2300 票/秒、服务端只吃 1 核、连接池别开大）。⚠️ **每轮至少 500 票、每轮之前先热身一轮** —— 否则量到的是预热而不是容量
 - **两套电路、两把密钥**：`go run ./cmd/keygen -dir keys` 出选票那把（`verifying.key` 给服务端 / `proving.key` 只给客户端），`go run ./cmd/keygen -circuit eligibility -dir keys` 出资格那把（`eligibility-verifying.key` 给服务端 / `eligibility-proving.key` 只给客户端）。Groth16 的 setup 是 per-circuit 的，**两把互不相通，不能互相替代**
 
 等价的原始命令：
@@ -46,8 +47,8 @@
 - `tests/` — `integration`（testcontainers + PG）、`e2e`、`architecture`（架构不变量守卫 + **冻结契约门禁** + **跨语言错误码门禁**）、`testutil`；**单元测试不在这里**，而是与实现同包的 `_test.go`（如 `internal/usecase/tally_test.go`）
 - `web/` — Vue 3 + TypeScript + Rsbuild 单页门户（`src/App.vue` 只做外壳与引导编排，页面拆在 `src/components/panels/`，设计令牌在 `src/styles/`，后端错误文案映射在 `src/lib/error-messages.ts`）；**浏览器端 prover** 在 `src/lib/wasm-prover.ts`（主线程编排）+ `src/workers/ballot-prover.worker.ts`（Worker 里加载 WASM），**资格 prover** 在 `src/lib/eligibility-prover.ts`（同一条 Worker 链路，密码学全在 WASM 里；门户「身份」面板负责「导入资格文件」），静态资源目录 `web/public/`（wasm、胶水、两把 proving key 都是构建产物，不入库）
 - `configs/` — `config.yaml`（开发）、`config.production.yaml`、`production.env.example`
-- `docs/` — `techspec.md`（当前实现口径，改接口/流程优先更新）、`project-map.md`（**分层项目地图 / 上下文索引**：子系统职责、关键文件、模式、陷阱、验证手册；改动前先读对应章节，不必通读全仓）、`deployment-checklist.md`（**生产部署清单**：上线前逐项核对配置、密钥、迁移、TLS、门户部署与投票运营流程）、`api-contract-v1.md`（**冻结的接口契约**：凭证领取四端点、投票提交、密文格式 v3 定版）、`release-plan-v0.3.0.md`（**v0.3.0 发版计划与落地状态**，当前发版）、`release-plan-v0.2.0.md`（v0.2.0 发版计划，上一版）、`release-plan-v0.1.0.md`（v0.1.0 发版计划，更早）、`roadmap.md`（**产品路线图**：能力清单、里程碑 M1–M4、决策门 G1–G9 与 V3-D1~D8、工程细项附录；T3–T12、T17、T22 与 T23/T24/T25/T26 已落地）、`release-review-2026-10-20.md`（发版前整体 review：6 个 CRITICAL + 29 个 REQUIRED + 20 个 NIT 的完整证据与修复顺序）、`t22-eligibility-design.md`（**T22 资格证明设计稿**：一人一票的方案对比、协议、电路与待拍板决策点；已落地）、`t25-ratelimit-design.md`（**T25 限流设计稿**：额度推导、键构成、不变量与落地核对；已落地）、`errata.md`（**勘误表**：已发布版本里的错误陈述；发现发布版本有问题时先查这里）
-- `scripts/` — 覆盖率门槛脚本；**浏览器验收脚本** `browser-acceptance.sh`（`setup` / `verify` / `stop`）；`.github/workflows/ci.yml` — CI 定义；`.github/workflows/release.yml` — tag 触发的发布流水线（原生构建 + 冒烟测试 + sha256 + **门户包带 prover** + GitHub Release）
+- `docs/` — `techspec.md`（当前实现口径，改接口/流程优先更新）、`project-map.md`（**分层项目地图 / 上下文索引**：子系统职责、关键文件、模式、陷阱、验证手册；改动前先读对应章节，不必通读全仓）、`deployment-checklist.md`（**生产部署清单**：上线前逐项核对配置、密钥、迁移、TLS、门户部署与投票运营流程）、`api-contract-v1.md`（**冻结的接口契约**：凭证领取四端点、投票提交、密文格式 v3 定版）、`capacity-report-v0.3.0.md`（**容量报告（T27）**：真 PostgreSQL 上的吞吐 / 延迟 / 错误率实测 + 按投票规模的资源配置建议）、`release-plan-v0.3.0.md`（**v0.3.0 发版计划与落地状态**，当前发版）、`release-plan-v0.2.0.md`（v0.2.0 发版计划，上一版）、`release-plan-v0.1.0.md`（v0.1.0 发版计划，更早）、`roadmap.md`（**产品路线图**：能力清单、里程碑 M1–M4、决策门 G1–G9 与 V3-D1~D8、工程细项附录；T3–T12、T17、T22 与 T23/T24/T25/T26/T27 已落地）、`release-review-2026-10-20.md`（发版前整体 review：6 个 CRITICAL + 29 个 REQUIRED + 20 个 NIT 的完整证据与修复顺序）、`t22-eligibility-design.md`（**T22 资格证明设计稿**：一人一票的方案对比、协议、电路与待拍板决策点；已落地）、`t25-ratelimit-design.md`（**T25 限流设计稿**：额度推导、键构成、不变量与落地核对；已落地）、`errata.md`（**勘误表**：已发布版本里的错误陈述；发现发布版本有问题时先查这里）
+- `scripts/` — 覆盖率门槛脚本；**浏览器验收脚本** `browser-acceptance.sh`（`setup` / `verify` / `stop`）；**容量压测脚本** `capacity-run.sh`（`setup` / `run` / `sweep` / `start` / `stop`）；`.github/workflows/ci.yml` — CI 定义；`.github/workflows/release.yml` — tag 触发的发布流水线（原生构建 + 冒烟测试 + sha256 + **门户包带 prover** + GitHub Release）
 
 ## Code style
 
@@ -75,7 +76,7 @@
 - **指标的暴露面有守卫**：`internal/infrastructure/metrics/metrics_test.go` 把允许出现的标签名**逐个钉死**（只有 `method` / `route` / `status` / `result` / `code`）—— 加一个可能带选票内容的标签会被这条测试挡住
 - **跨语言错误码集合有门禁**：`tests/architecture/error_code_test.go` 把 Go 的 `MapError` 码集合与 TS 的 `PortalErrorCode` 成员集合**双向比对**，并要求每个码都有中文文案（`web/src/lib/error-messages.ts`）。加错误码时**两边都要加**，否则门禁变红。（门禁有效性已实证：删掉 TS 侧 `RATE_LIMITED` → 立刻变红并指出差集）
 - **限流的行为有 HTTP 级断言**：`internal/infrastructure/http/rate_limit_test.go` 覆盖「伪造 `X-Forwarded-For` 不能绕过限流」「可信代理生效」「不同路由组额度独立」。改限流键、额度或可信代理逻辑后必须重跑
-- 覆盖率有两个口径，别混用：**门槛口径 81.44%**（`check-coverage.sh` 选中的 17 个包：usecase / config / di / tally / shares / http / http-middleware / crypto / crypto-ballot / metrics / persistence / ratelimit / cmd-cli / cmd-keygen / cmd-eligibility-list / cmd-audit-recompute / cmd-server），**全仓口径 82.5%**（2026-10-25 实测，**含跨包覆盖** —— 别的包的测试跑到这里的代码也算，所以高于门槛口径）。门槛是**逐包分档**的（门槛值见 `scripts/coverage-thresholds.txt`），单个包回退会直接让 CI 变红；`internal/infrastructure/persistence`（65.8%）是当前最低的一档，抬门槛时它会先卡住
+- 覆盖率有两个口径，别混用：**门槛口径 80.86%**（`check-coverage.sh` 选中的 17 个包：usecase / config / di / tally / shares / http / http-middleware / crypto / crypto-ballot / metrics / persistence / ratelimit / cmd-cli / cmd-keygen / cmd-eligibility-list / cmd-audit-recompute / cmd-server），**全仓口径 81.8%**（2026-10-26 实测，**含跨包覆盖** —— 别的包的测试跑到这里的代码也算，所以高于门槛口径）。门槛是**逐包分档**的（门槛值见 `scripts/coverage-thresholds.txt`），单个包回退会直接让 CI 变红；`internal/infrastructure/persistence`（62.1%）是当前最低的一档，抬门槛时它会先卡住 —— 其中 PostgreSQL 专属的 `FOR UPDATE SKIP LOCKED` 路径只有 `tests/integration/credential_claim_postgres_test.go` 覆盖（要 Docker 或外部 PG，没有 PG 时那段不计入）
   - ⚠️ **全仓口径的复现命令里 `-coverprofile=xxx.out` 必须加引号**（`go test "-coverprofile=whole.out" "-coverpkg=./..." ./...`）—— 否则参数被拆开，profile 写不出来（曾因此把全仓覆盖率误记成 75.5%）；手工聚合 profile 还要自己按块去重
 - CI 实际执行：`go test ./...` + `bash ./scripts/check-coverage.sh 80 coverage.ci.out`，**另加** gofmt 检查、前端 lint / tsc / vitest（`.github/workflows/ci.yml`）
 
@@ -90,6 +91,7 @@
 
 - 绝不提交真实密钥、令牌或生产数据库；`.env` 已在 `.gitignore`
 - 生产模式（`server.mode=release/prod/production`）必须显式设置 `crypto.vk_path`（或 `CRYPTO_VK_PATH`），否则服务启动失败
+- **升级必须先跑迁移**：release 模式**不在启动时改表**（`nullifier-server -migrate`）。v0.3.0 新增了 `credential_claims.reserved_at` 列（凭证槽位的预留时间，TTL 10 分钟）—— **从 v0.2.0 升级不迁移，槽位占位机制不工作**，并发领取会互相抢同一个槽位
 - **一人一票是 release 模式的硬要求**：`crypto.eligibility_root` 与 `crypto.eligibility_vk_path`（或 `CRYPTO_ELIGIBILITY_ROOT` / `CRYPTO_ELIGIBILITY_VK_PATH`）**必须成对出现**，只配一个或两个都不配，服务都**启动失败**。领域适配层（`internal/infrastructure/crypto/eligibility_service.go`）**没有**「跳过验签」的降级模式 —— 不要加
 - **服务端只见名单根，不见名单**：`crypto.eligibility_root` 是 64 位 hex 的域元素，服务端能验证「这个叶子在这棵树里」，**无法把叶子对应到任何成员**。`eligibility_uses` 只存去重键 `MiMC(叶子, 提案ID)`，不存叶子、不存成员 ID、不存资格秘密
 - **资格包是秘密材料**：`cmd/eligibility-list` 产出的 `eligibility-<成员>.json`（成员秘密 + 叶子 + Merkle 路径，0600）**谁拿到谁就能领这一票** —— 只能走安全渠道发给本人

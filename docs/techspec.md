@@ -248,7 +248,8 @@ web/                        # Vue 3 前端门户
   - `Vote`
   - `Proposal`
   - `Credential`
-  - `CredentialClaim`
+  - `CredentialClaim`（**含 v0.3.0 新增的 `reserved_at` 列** —— 凭证槽位的预留时间，
+    TTL 10 分钟；从 v0.2.0 升级**必须先跑迁移**）
   - `EligibilityUse`（资格使用记录 —— 「一人一票」的强制点，见 §3.5）
   - `VoteParticipation`
   - `DecryptionSession`
@@ -261,10 +262,17 @@ web/                        # Vue 3 前端门户
 ### 4.5 连接池
 
 - PostgreSQL 的连接池参数显式配置，不再依赖 `database/sql` 的默认值（不限制连接数）：
-  - `db.max_open_conns`（`DB_MAX_OPEN_CONNS`，默认 25）
-  - `db.max_idle_conns`（`DB_MAX_IDLE_CONNS`，默认 5）
+  - `db.max_open_conns`（`DB_MAX_OPEN_CONNS`，默认 16）
+  - `db.max_idle_conns`（`DB_MAX_IDLE_CONNS`，默认 16）
   - `db.conn_max_lifetime_seconds`（`DB_CONN_MAX_LIFETIME_SECONDS`，默认 3600）
-- 为 0 表示不改动 `database/sql` 的默认值。
+- 为 0 表示不改动 `database/sql` 的默认值 —— ⚠️ **那意味着只保留 2 条空闲连接**：
+  高并发下每个请求都要重开一条数据库连接，量到的是连接开销而不是服务端能力。
+  **默认值必须与驱动无关地取**（`db.driver` 可以被配置文件覆盖，只挂在「驱动是
+  postgres」的分支上的话，覆盖之后池参数会全变成 0）。
+- **不要把池开大**：实测把池从 16 开到 64，第一轮吞吐从 2134/s 掉到 **307/s**
+  （64 条连接要现场建 64 个 PostgreSQL 后端进程，每个约 38 MB），连跑几十轮后吞吐
+  还会回落。投票写路径每请求只占连接约 0.5 ms，16 条连接的理论上限已是 3 万+/s ——
+  远高于实测的 2200/s。实测数据见 [`docs/capacity-report-v0.3.0.md`](./capacity-report-v0.3.0.md)。
 - 优先级与其它 `db.*` 一致：环境变量高于配置文件。
 - 启动日志打印实际生效的连接池参数。
 
@@ -384,23 +392,29 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
     - 证明验不过（伪造、名单不对、提案不对、挑战不对）→ 403
       `INVALID_ELIGIBILITY_PROOF`。
     - 同一份资格第二次领 → 409 `ELIGIBILITY_ALREADY_USED`。
-  - **资格不过不消耗池槽位**：顺序是「验资格 → 取槽位（不占位）→ 记资格使用」。
-    唯一约束冲突时槽位还没被标记领取，不会被白白消耗。
+  - **资格不过不消耗池槽位**：顺序是「验资格 → 预留槽位 → 记资格使用」。
+    唯一约束冲突时把预留释放掉，槽位不会被白白消耗。
   - 请求体里**不许出现真人身份字段**（工号、姓名、证件号……）：资格材料里只有
     零知识证明与两个公开输入，服务端从头到尾不知道领票的是谁。
   - 响应：`proposal_id`、`user_id`（池槽位的假名）、`issuer_key_version`、`variant`、
     `modulus`（base64）、`exponent`。
-  - **预留不占位**：服务端取槽位时不改状态，所以并发领取会抢到同一个槽位。撞车的
-    那个由**客户端**换一个槽位重来（最多 5 次，只在 attest 返回 409
-    `CREDENTIAL_EXISTS` 时重试）—— 重试要重新盲化，服务端代劳不了。
-    「预留即占位」没有采用：那会让「只预留不 attest」的客户端永久消耗池槽位，
-    变成一个 DoS。
+  - **预留是占位，但会过期**（`credential_claims.reserved_at`，TTL 10 分钟）：
+    并发领取时各拿各的槽位 —— 不预留的话，所有人都会拿到「第一个空闲槽位」，
+    然后互相撞车（每一轮只有一个人能成，真实投票窗口里几百人同时领取就是灾难）。
+    过期是为了不让「只预留不 attest」的客户端永久占住池子。
+    撞车的残余情形（预留过期、槽位被别人领走）由**客户端**换一个槽位重来
+    （最多 5 次，只在 409 `CREDENTIAL_EXISTS` 时重试）—— 重试要重新盲化，
+    服务端代劳不了。
+  - ⚠️ **「预留即占位」为什么配了 TTL**：不配 TTL 的话，只预留不 attest 的客户端
+    会永久消耗池槽位，变成一个 DoS。TTL 把它限制在「最多占 10 分钟」。
 - `POST /api/v1/proposals/:proposal_id/credentials/blind-sign`（公开）
   - 请求体：`user_id`、`blinded_message`（base64）、`issuer_key_version`。
   - `issuer_key_version` 必填：服务端要用客户端盲化时那一版的私钥签，版本对不上
     解盲结果作废。用请求携带版本，避免改 schema。
-  - **只覆盖池里还空着的槽位**（`user_id` 必须在该提案的可用槽位里），否则签发方就
-    成了「任意消息」的签名预言机。
+  - **只覆盖「正在预留中、且预留未过期」的槽位**（`user_id` 必须命中该提案里一个
+    新鲜的预留），否则签发方就成了「任意消息」的签名预言机。
+    预留过期后槽位可能已被别人重新预留 —— 替它签名等于替别人签名，所以过期的
+    预留不再可签（客户端据此换一个槽位重来）。
   - 服务端在这一步只见盲化消息，见不到被签内容。
 - `POST /api/v1/proposals/:proposal_id/credentials/attest`（公开）
   - 请求体：`user_id`、`user_pub_key`（base64）、`signature`（base64）。
@@ -829,9 +843,16 @@ Retry-After: 3
   `user_id` → 管理端客户端本地盲化 → 管理端 blind-sign → attest。管理端 blind-sign
   走全局路径 `/api/v1/credentials/blind-sign`，因为 gin 的路由树不允许同一路径挂
   两套中间件。
-- **槽位竞争的解法在客户端**：预留不占位 → 并发领取会抢同一个槽位 → attest 返回
-  409 `CREDENTIAL_EXISTS` → 客户端换一个槽位重来（最多 5 次）。409 还有另一种语义
-  `CREDENTIAL_POOL_EMPTY`（池领完了），那个**不重试**。
+- **槽位竞争的解法是「服务端占位 + 客户端兜底」**：领取时服务端**预留**一个槽位
+  （`credential_claims.reserved_at`，TTL 10 分钟）—— 并发领取各拿各的槽位；
+  残余的撞车（预留过期、槽位被别人领走）由**客户端**换一个槽位重来（最多 5 次，
+  认 409 `CREDENTIAL_EXISTS`）。409 还有另一种语义 `CREDENTIAL_POOL_EMPTY`
+  （池领完了），那个**不重试**。
+  - ⚠️ **「盲签名阶段的撞车也回 409 `CREDENTIAL_EXISTS`**」：早先这里回的是
+    400 `INVALID_REQUEST`，而客户端的判据是「409 + `CREDENTIAL_EXISTS` 才重试」
+    —— 认不出 400 的投票人会直接放弃，拿到一句看不懂的「请求不合法」。
+    现在与 attest 阶段是**同一个信号**，三端（门户 / CLI / 压测工具）判据一致，
+    不改冻结契约。
 - **「一人一票」已落地**（见 §6.11）：资格证明把「服务端能去重」与「服务端不知道是谁」
   同时成立，门户与 CLI 两侧都能出资格证明。
 
