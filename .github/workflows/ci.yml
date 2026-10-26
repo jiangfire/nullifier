@@ -152,6 +152,8 @@ jobs:
       #    缓存键按 lockfile 的哈希：依赖变了浏览器版本才可能变，缓存自动失效。
       #    缓存没命中也只是重新下载，**不会让 job 失败**。
       #    ✅ 命中已实测（2026-10-26）：整轮 job 从约 16 分钟降到 **4 分 10 秒**。
+      #    ⚠️ **缓存按 ref 分域**：PR 分支与 main 各存各的，每个 ref 的第一次运行
+      #    都是冷下载（main 的第一次就跑了 17 分钟）。
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
