@@ -8,14 +8,15 @@
 
 ---
 
-## [未发布]
+## [0.3.0] — 2026-10-26
 
 v0.2.0 之后的变更。本版的主题是**「接口不再动」** —— 完成定义与验收证据见
 [`docs/release-plan-v0.3.0.md`](./docs/release-plan-v0.3.0.md)，路线图见
 [`docs/roadmap.md`](./docs/roadmap.md)（里程碑 M4）。
 
 > ⚠️ **升级前必读**：投票提交端点改了路径，旧的 `POST /api/v1/votes` 不再存在 ——
-> 详见下面的「破坏性变更」。
+> 详见下面的「破坏性变更」。此外**升级必须先跑迁移**（新增
+> `credential_claims.reserved_at` 列），不迁移的话凭证槽位的占位机制不工作。
 
 ### 破坏性变更
 
@@ -146,6 +147,38 @@ v0.2.0 之后的变更。本版的主题是**「接口不再动」** —— 完�
 - **指标中间件的注册顺序是硬要求**（写在代码注释里）：必须排在错误处理器**之前** ——
   gin 的中间件先进后出，越早注册的回程越晚，这样才拿得到最终状态码；
   顺序反了指标里就会全是 200。
+
+### 测试
+
+- **门户的浏览器端路径第一次有了自动化回归**（T28）—— `web/e2e/portal.spec.ts` 用
+  Playwright 在**真浏览器**里跑两条路径：领凭证 → 浏览器本地生成选票 → 提交 → 查询状态 →
+  **计票还原出所选的选项**；以及资格路径（导入资格文件 → 匿名领取 → **重复领取被拒**
+  「一人一票」）。
+  - 环境脚本 `scripts/web-e2e.sh`（`make web-e2e`）自己备好一切：两套密钥、资格名单、
+    **release 模式**服务端（真 verifying key + 强制一人一票）、凭证池、门限解密会话、
+    门户 dev server；跑完自动收尾。
+  - ⚠️ 闭合的是「接线没断」，**不是「部署形态验过了」** —— 真域名、反向代理仍要人工点
+    一遍（`scripts/browser-acceptance.sh`）。
+- **审计复算工具的测试是真密码学端到端**：`cmd/audit-recompute/main_test.go` 造真票库 +
+  真份额，覆盖五种情形（一致 / 篡改计票结果 / 篡改选票 / 外来份额 / 份额不足）。
+- **跨语言错误码集合有门禁**（`tests/architecture/error_code_test.go`）：Go 的 `MapError`
+  码集合与 TS 的 `PortalErrorCode` 成员集合**双向比对**，且每个码都要有中文文案。
+- **冻结契约有门禁**（`tests/architecture/api_contract_test.go`）：Go 的请求体 struct tag
+  与 TS 侧 `web/src/lib/api-contract.ts` 的 interface **逐字段双向比对**，
+  并断言密文格式 v3（`0x03` + 两个压缩点，65 字节）。
+- **限流的行为有 HTTP 级断言**（`internal/infrastructure/http/rate_limit_test.go`）：
+  「伪造 `X-Forwarded-For` 不能绕过」「可信代理生效」「不同路由组额度独立」。
+- **PostgreSQL 上的槽位预留有集成测试**（`tests/integration/credential_claim_postgres_test.go`）：
+  并发预留、过期回收、跳过被锁的槽位。
+- 覆盖率：门槛口径 **80.86%**（17 个受控包逐包分档，合计门槛 77），全仓口径 **81.8%**。
+
+### CI 与发布
+
+- **CI 新增 `web-e2e` job**（`pnpm exec playwright install --with-deps chromium` +
+  `bash ./scripts/web-e2e.sh run`）—— 门户的两条路径在 CI 里真浏览器实跑。
+- **发布流水线（`release.yml`）一行未改** —— v0.2.0 已在 CI 里真跑通过（8 个 job 全绿），
+  本版沿用同一套：5 个平台的二进制 + sha256 + 门户包（含 prover 资源）。
+- 门户包的 `web/package.json` 版本号由流水线按 `VERSION` 注入（单一真相源是 `VERSION`）。
 
 ---
 
@@ -699,7 +732,7 @@ v0.1.0 发布之后的变更。本版的完成定义与验收证据见
   `docs/roadmap.md`（产品路线图：v1.0.0 的能力清单、里程碑与决策门）。
 
 > 注：上面的「v1.0.0」是 v0.1.0 发布当时的路线图目标。该目标版本后来改名为
-> **v0.2.0**，见上方 `[未发布]` 段。
+> **v0.2.0**，见上方 `[0.2.0]` 段。
 
 ### 测试
 
