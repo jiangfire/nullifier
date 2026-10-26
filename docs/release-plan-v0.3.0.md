@@ -322,9 +322,11 @@ git push origin feat/v0.3.0-contract-and-audit v0.3.0
 `vote submitted`。
 ⚠️ **但这个 job 很慢**：浏览器下载（120 MiB）+ 系统依赖安装在 GitHub runner 上花了
 **12 分钟** —— 整轮 job 约 16 分钟。已给浏览器本体加缓存（`~/.cache/ms-playwright/`，
-key 按 lockfile 哈希），后续运行命中缓存就能省掉这段下载；⚠️ **命中与否尚未实测**
-（加缓存后的第一次运行必然是 cache miss，要等它把浏览器写进缓存，下一次才谈得上命中）。
-缓存没命中也只是重新下载，**不会让 job 失败**。
+key 按 lockfile 哈希）。
+✅ **缓存命中已实测**（2026-10-26，run `40326396748`）：日志里
+`Cache restored from key: Linux-playwright-…`（280 MB），整轮 job 从约 16 分钟降到
+**4 分 10 秒**（12:56:21 → 13:00:31 UTC，用例本身 2.2 分钟）—— 省下约 12 分钟。
+缓存没命中也只是重新下载，**不会让 job 失败**（第一次运行必然 miss，第二次才命中）。
 
 ---
 
