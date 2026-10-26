@@ -118,6 +118,22 @@ func setupPostgresDB(t *testing.T) (context.Context, *gorm.DB, func()) {
 		}
 	}
 
+	// ⚠️ **就绪判据必须是「数据库真的能连上」，不是「端口被发布」**。
+	//
+	// `wait.ForListeningPort` 只保证 docker-proxy 接住了宿主机端口；容器里的
+	// PostgreSQL 可能还在 initdb —— 官方入口脚本先起一个**只监听 unix socket**
+	// 的临时服务器做初始化，初始化完才换成对外接受连接的那一个。这期间连上去
+	// 拿到的就是 "connection reset by peer"。
+	//
+	// 2026-10-26 的 CI 上就是这么连挂的：main 与 PR #6 连续两次红，失败的都是
+	// 「端口已发布、数据库还没起来」（`failed to connect ... connection reset by
+	// peer`），而容器本身是正常启动的。
+	//
+	// 改用日志判据：PostgreSQL 启动会打两次 "database system is ready to accept
+	// connections" —— 第一次是 initdb 期间的临时服务器，第二次才是真正对外
+	// 接受连接的那一个（testcontainers 官方 postgres 模块用的也是这个判据）。
+	// 超时给 90 秒 —— 比本函数的 2 分钟 ctx 短，好让「起不来」报成等待策略的超时，
+	// 而不是一句没头没脑的 context deadline exceeded。
 	req := testcontainers.ContainerRequest{
 		Image:        "postgres:16-alpine",
 		ExposedPorts: []string{"5432/tcp"},
@@ -126,7 +142,9 @@ func setupPostgresDB(t *testing.T) (context.Context, *gorm.DB, func()) {
 			"POSTGRES_PASSWORD": "test",
 			"POSTGRES_DB":       "anonvote",
 		},
-		WaitingFor: wait.ForListeningPort("5432/tcp"),
+		WaitingFor: wait.ForLog("database system is ready to accept connections").
+			WithOccurrence(2).
+			WithStartupTimeout(90 * time.Second),
 	}
 
 	var (

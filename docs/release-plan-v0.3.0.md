@@ -8,9 +8,9 @@
 >
 > 分支：`feat/v0.3.0-contract-and-audit`（从 `main` 切出）
 > 制定日期：2026-10-25
-> 状态：**发版准备完成，待拍板发布**（2026-10-26）—— 六张任务卡全部落地，出口标准逐条勾上
-> 并附实测证据（§5）；发版说明正文与发版步骤见 §8。**推 tag 即发版**，故 §8.2 的第 6 步
-> 需人工确认。
+> 状态：**已发布**（2026-10-26）—— 六张任务卡全部落地，出口标准逐条勾上并附实测证据（§5）；
+> 发版说明正文与发版步骤见 §8，**发布结果见 §8.4**。发版点由 tag `v0.3.0` 独立保留；
+> 代码已合并回 `main` @ `4d3bac3`（merge commit），分支已删除。
 
 ---
 
@@ -293,6 +293,40 @@ git push origin feat/v0.3.0-contract-and-audit v0.3.0
 发布产物与 v0.2.0 同构：**5 个平台的 `nullifier-<os>-<arch>.zip` + 各自的 `.sha256`，
 外加 `nullifier-web-0.3.0.zip` + `.sha256`**（门户包里带 `ballot-prover.wasm` 与
 `wasm_exec.js`；两把 proving key 是秘密材料，默认不进包，部署方自备或用 secret 注入）。
+
+### 8.4 发布结果（2026-10-26）
+
+**v0.3.0 已公开发布**：[GitHub Release v0.3.0](https://github.com/jiangfire/nullifier/releases/tag/v0.3.0)
+
+| 项 | 值 |
+|---|---|
+| tag | `v0.3.0`（**注解 tag**）@ `6dd3ed4`（tag 对象）/ `47a3925`（指向的提交） |
+| 分支 | `feat/v0.3.0-contract-and-audit` → `origin`（发版时本地 HEAD = 远端 = tag 指向的提交，三者一致） |
+| 合并 | PR [#5](https://github.com/jiangfire/nullifier/pull/5) → `main` @ `4d3bac3`（**merge commit**，15 笔提交全部保留）；合并后分支已删除（本地与远端都删了） |
+| 流水线 | release run **40321361924**，**8 个 job 全绿**（`verify` / `build` ×5 平台 / `web` / `release`），12:17:11 → 12:21:24 UTC |
+| 产物 | **12 个**：5 个平台的 `nullifier-<os>-<arch>.zip` + 各自的 `.sha256`，外加 `nullifier-web-0.3.0.zip` + `.sha256` |
+
+**发布出去的产物已下载核验**（`gh release download`）：
+
+- `nullifier-web-0.3.0.zip` —— 2,762,232 字节，**sha256 与随附的 `.sha256` 逐字节一致**
+  （`184a72b0ca16ba311b6f708533b33a986615fa73b660efeedeccb1f05df2d07d`）
+- 包内含 `ballot-prover.wasm`（11,651,679 字节，magic `0061736d`，合法 WASM 模块）与
+  `wasm_exec.js`（16,992 字节）—— 门户**开箱能出证明**
+- ⚠️ **两把 proving key 不在包里**（秘密材料，流水线只发警告）—— 部署方必须自己补
+  （部署清单 §1/§6）
+- **发布页正文与 §8.1 逐字一致**（已下载比对）
+
+**`web-e2e` job 第一次在 CI 里真跑**（PR #5 的 run `40321461256`）：真浏览器里门户的
+两条路径全过 —— 领凭证 → 本地出票 → 提交 → 查状态 → **计票还原出所选的选项**，
+以及「同一份资格重复领取被拒」。用例本身 **2.2 分钟**通过，服务端日志里有
+`vote submitted`。
+⚠️ **但这个 job 很慢**：浏览器下载（120 MiB）+ 系统依赖安装在 GitHub runner 上花了
+**12 分钟** —— 整轮 job 约 16 分钟。已给浏览器本体加缓存（`~/.cache/ms-playwright/`，
+key 按 lockfile 哈希）。
+✅ **缓存命中已实测**（2026-10-26，run `40326396748`）：日志里
+`Cache restored from key: Linux-playwright-…`（280 MB），整轮 job 从约 16 分钟降到
+**4 分 10 秒**（12:56:21 → 13:00:31 UTC，用例本身 2.2 分钟）—— 省下约 12 分钟。
+缓存没命中也只是重新下载，**不会让 job 失败**（第一次运行必然 miss，第二次才命中）。
 
 ---
 

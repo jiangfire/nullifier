@@ -122,10 +122,17 @@ func TestBallotProve_LocalProof(t *testing.T) {
 	require.NoError(t, verifier.Verify(proof, inputs))
 
 	// 换一个 nullifier，公开输入就变了 —— 同一份证明必须验不过。
+	//
+	// ⚠️ **改的是最低字节，不是最高字节**：域元素的规范编码要求值 < r，而 BN254
+	// 的 r 顶字节是 0x30。nullifier 是 MiMC 的输出（均匀分布），顶字节恰好是
+	// 0x30 的概率约 1% —— 这时翻掉最高字节的最低位就越界了，isCanonicalScalar
+	// 会直接拒绝非规范编码，用例就会因为「篡改方式不合法」而红，而不是因为
+	// 「验签没过」（2026-10-26 的 CI 上就是这样偶发变红的）。
+	// 改最低字节则只差 ±1，不会越界。
 	tampered := proved
 	nullifierBytes, err := hex.DecodeString(proved.Nullifier)
 	require.NoError(t, err)
-	nullifierBytes[0] ^= 0x01
+	nullifierBytes[len(nullifierBytes)-1] ^= 0x01
 	tampered.Nullifier = hex.EncodeToString(nullifierBytes)
 	tamperedInputs := publicInputsOf(t, tampered)
 	require.Error(t, verifier.Verify(proof, tamperedInputs))

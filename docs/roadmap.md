@@ -399,8 +399,10 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
   （`web-e2e`）。**人工点一遍仍然值得做** —— 它验的是「部署形态」（真域名、
   反向代理、真实浏览器版本），自动化验的是「接线没断」。
 - **PG 集成测试本机无 Docker**（与 T22 无关，但整体验收仍缺）—— ✅ 2026-10-25 已用本机的
-  便携版 PostgreSQL 17.7 起临时集群实跑通过（外部库路径，见 §4.3 盲区 1）；**testcontainers
-  那条路径仍要 CI 实跑**。
+  便携版 PostgreSQL 17.7 起临时集群实跑通过（外部库路径，见 §4.3 盲区 1）；✅ **testcontainers
+  那条路径也已在 CI 实跑**（2026-10-26，run `40324941645`，`ok anonvote/tests/integration
+  24.725s`）—— 期间挖出并修掉了一个就绪竞态（`wait.ForListeningPort` 只等端口发布，
+  数据库还没起来，连上去会拿到 `connection reset by peer`）。
 - **`cmd/loadtest` 不支持资格证明**：它只在**未开启资格校验**的服务上可用。
 - **资格包丢失无法找回**（成员包是秘密材料，发放靠安全渠道）。
 - **真实名单的内容与成员标识形式仍需运营方提供**。
@@ -449,8 +451,13 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
      **全过** —— 含 `TestEligibilityUseRepository_Postgres`（复合唯一索引的行为证明）、
      `TestEligibilityUseRepository_Postgres_ConcurrentSameQualification`（并发记同一份资格
      恰好一个成功）、`TestVoteRepository_Postgres_ConcurrentSameUser`。
-     ⚠️ **Docker 仍然没有**，所以「testcontainers 路径」仍要 CI 实跑 —— 但两者是**同一份测试
-     代码**，断言一致（`setupPostgresDB` 按环境变量二选一）。
+     ✅ **testcontainers 路径也已在 CI 实跑**（2026-10-26，run `40324941645`：`ok
+     anonvote/tests/integration 24.725s`）—— 期间挖出一个就绪竞态：`wait.ForListeningPort`
+     只保证端口被发布，容器里的 PostgreSQL 还在 initdb 时连上去会拿到 `connection reset by
+     peer`（main 与 PR 连续两次红在同一个地方）。已改用日志就绪判据（`database system is
+     ready to accept connections` 出现两次 —— 第一次是 initdb 期间的临时服务器，第二次才是
+     真正对外接受连接的那一个），CI 复跑通过。⚠️ **本机 Docker 仍然没有**，但两条路径是
+     **同一份测试代码**，断言一致（`setupPostgresDB` 按环境变量二选一）。
    - ✅ **连整条浏览器验收都在 PG 上跑通了一遍**（2026-10-25）：`scripts/browser-acceptance.sh`
      新增 `DB_DRIVER=postgres` 后，服务端连的是**生产库形态**（PG + 真 verifying key +
      资格校验强制），真浏览器里导入资格文件 → 匿名领取（claim 201）→ 重复领取
