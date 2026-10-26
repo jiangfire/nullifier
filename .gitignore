@@ -36,5 +36,8 @@ web/.pnpm-store/
 # 浏览器验收脚本的本地工作目录（密钥、名单、数据库、日志）
 .acceptance/
 
+# 容量压测脚本的本地工作目录（密钥、名单、配置、日志、报告）
+.capacity*/
+
 # 打 tag 时的临时发版说明正文（内容见 docs/release-plan-v0.2.0.md §2.1）
 release-notes-*.txt

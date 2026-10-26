@@ -42,6 +42,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -161,6 +162,40 @@ func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
+// newHTTPClient 造一个压测专用的 HTTP 客户端。
+//
+// **必须显式配连接池**：Go 默认 Transport 的 MaxIdleConnsPerHost 只有 2，
+// 并发度一高，每个 worker 都要现开一条 TCP 连接（用完就关）。那量出来的是
+// **客户端的连接churn**，不是服务端的容量 —— 高并发下客户端自己成了瓶颈，
+// 数字会随并发度升高反而**变差**（吞吐降下来、延迟飙上去），看起来像服务端
+// 扛不住。真实部署里客户端在别的机器上，不存在这个瓶颈。
+//
+// 空闲连接数按并发度给（上限 256），并全部走 keep-alive。
+func newHTTPClient(concurrency int) *http.Client {
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	idle := concurrency
+	if idle > 256 {
+		idle = 256
+	}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          idle,
+		MaxIdleConnsPerHost:   idle,
+		MaxConnsPerHost:       0,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return &http.Client{Timeout: 30 * time.Second, Transport: transport}
+}
+
 func run(args []string) int {
 	// gnark 的默认 logger 往 **stdout** 写日志（编译电路、出证明的 INFO 行）。
 	// 那些日志混在报告前面，`-json` 的输出就不是合法 JSON 了 —— 报告要能被
@@ -193,6 +228,9 @@ func run(args []string) int {
 	fs.IntVar(&opts.proveWorkers, "prove-workers", 0, "并行出证明的 worker 数（默认 CPU 核数）")
 	fs.Uint64Var(&opts.optionIndex, "option", 0, "投票的选项下标（从 0 开始）")
 	if err := fs.Parse(args); err != nil {
+		// 参数错误要说清楚是**哪个**参数 —— 只打印用法的话，调用方只能自己
+		// 一个个试（`-open-delay 5` 与 `-open-delay 5s` 的差别就是这么来的）。
+		fmt.Fprintf(os.Stderr, "参数错误: %v\n", err)
 		usage()
 		return 2
 	}
@@ -219,7 +257,7 @@ func run(args []string) int {
 		opts.proveWorkers = runtime.NumCPU()
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := newHTTPClient(opts.concurrency)
 	proposalID, err := prepareProposal(client, &opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "准备提案失败: %v\n", err)
@@ -229,6 +267,14 @@ func run(args []string) int {
 	numOptions, err := fetchNumOptions(client, &opts, proposalID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "取提案选项数失败: %v\n", err)
+		return 1
+	}
+
+	// 门限解密会话与凭证池必须在投票窗口打开**之前**准备好（服务端的硬性约束）。
+	// 所以这两步排在出证明之前 —— 出证明很慢（真证明路径下每张票约 0.1 秒），
+	// 放在前面会把窗口拖过去，服务端直接拒绝初始化。
+	if err := setupDecryptionAndPool(client, &opts, proposalID); err != nil {
+		fmt.Fprintf(os.Stderr, "准备解密会话与凭证池失败: %v\n", err)
 		return 1
 	}
 
@@ -342,31 +388,37 @@ func prepareProposal(client *http.Client, opts *options) (string, error) {
 	return created.ID, nil
 }
 
-// prepareCredentials 初始化解密会话、往池里投槽位，然后匿名领取凭证。
+// setupDecryptionAndPool 初始化门限解密会话并往凭证池投槽位。
 //
-// 给了 `-eligibility-dir` 时走**资格证明**领取（一人一票路径）：每个成员包
-// 领一张 —— 这样才能在**开启资格校验**的服务上跑（release 模式必开）。
-// 没给时是纯匿名领取，只能跑未开启资格校验的服务。
-func prepareCredentials(client *http.Client, opts *options, proposalID string) ([]credential, error) {
-	// 初始化门限解密会话：必须在投票窗口打开之前。
+// 这两步**必须在投票窗口打开之前**做完：服务端拒绝给「投票开放中」的提案
+// 初始化解密会话（那时票已经投出去了，解不开）。所以它们排在出证明之前。
+func setupDecryptionAndPool(client *http.Client, opts *options, proposalID string) error {
 	if err := postJSON(
 		client, opts,
 		"/api/v1/proposals/"+url.PathEscape(proposalID)+"/decryption/setup",
 		map[string]any{"threshold": 2, "trustees": 3},
 		true, nil,
 	); err != nil {
-		return nil, fmt.Errorf("初始化解密会话: %w", err)
+		return fmt.Errorf("初始化解密会话: %w", err)
 	}
-
-	need := opts.voteCount + opts.duplicates
 	if err := postJSON(
 		client, opts,
 		"/api/v1/proposals/"+url.PathEscape(proposalID)+"/credentials/pool",
-		map[string]any{"count": need},
+		map[string]any{"count": opts.voteCount + opts.duplicates},
 		true, nil,
 	); err != nil {
-		return nil, fmt.Errorf("投凭证池: %w", err)
+		return fmt.Errorf("投凭证池: %w", err)
 	}
+	return nil
+}
+
+// prepareCredentials 匿名领取凭证（每个请求一张）。
+//
+// 给了 `-eligibility-dir` 时走**资格证明**领取（一人一票路径）：每个成员包
+// 领一张 —— 这样才能在**开启资格校验**的服务上跑（release 模式必开）。
+// 没给时是纯匿名领取，只能跑未开启资格校验的服务。
+func prepareCredentials(client *http.Client, opts *options, proposalID string) ([]credential, error) {
+	need := opts.voteCount + opts.duplicates
 
 	if strings.TrimSpace(opts.eligibilityDir) != "" {
 		members, err := loadMemberPackages(opts.eligibilityDir)
