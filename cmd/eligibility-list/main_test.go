@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -100,7 +101,7 @@ func TestGenerateListProducesUsableArtifacts(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &list))
 	require.Equal(t, 2, list.Count)
-	require.Equal(t, eligibility.TreeDepth, list.Depth)
+	require.Equal(t, eligibility.DefaultTreeDepth, list.Depth)
 	require.NotEmpty(t, list.Root)
 	// root 必须是合法的域元素十六进制 —— 服务端启动时会解析它，解析不过就起不来。
 	_, err = eligibility.DecodeField(list.Root)
@@ -116,8 +117,8 @@ func TestGenerateListProducesUsableArtifacts(t *testing.T) {
 		require.NoError(t, json.Unmarshal(raw, &pack))
 		require.Equal(t, memberID, pack.MemberID)
 		require.Equal(t, list.Root, pack.Root, "包里的 root 必须与服务端那一份一致")
-		require.Equal(t, eligibility.TreeDepth, pack.Depth)
-		require.Len(t, pack.Path, eligibility.TreeDepth, "路径长度必须等于树深")
+		require.Equal(t, eligibility.DefaultTreeDepth, pack.Depth)
+		require.Len(t, pack.Path, eligibility.DefaultTreeDepth, "路径长度必须等于树深")
 		require.NotEmpty(t, pack.Secret)
 		require.NotEmpty(t, pack.Leaf)
 	}
@@ -171,7 +172,7 @@ func TestGeneratedListVerifiesEndToEnd(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &pack))
 
 	// 资格电路的密钥：proving key 在客户端，verifying key 在服务端。
-	provingKey, verifyingKey, err := eligibility.GenerateKeys()
+	provingKey, verifyingKey, err := eligibility.GenerateKeys(eligibility.DefaultTreeDepth)
 	require.NoError(t, err)
 	keyDir := t.TempDir()
 	provingKeyPath := filepath.Join(keyDir, "eligibility-proving.key")
@@ -221,7 +222,7 @@ func TestGeneratedListIsRejectedByAnotherRoot(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &pack))
 
-	provingKey, verifyingKey, err := eligibility.GenerateKeys()
+	provingKey, verifyingKey, err := eligibility.GenerateKeys(eligibility.DefaultTreeDepth)
 	require.NoError(t, err)
 	keyDir := t.TempDir()
 	provingKeyPath := filepath.Join(keyDir, "eligibility-proving.key")
@@ -250,7 +251,7 @@ func TestGeneratedListIsRejectedByAnotherRoot(t *testing.T) {
 	leaf, err := eligibility.DeriveLeaf(canonical)
 	require.NoError(t, err)
 	rootElement, _, err := eligibility.BuildTree(
-		[]fr.Element{leaf}, eligibility.TreeDepth,
+		[]fr.Element{leaf}, eligibility.DefaultTreeDepth,
 	)
 	require.NoError(t, err)
 	other.Root = eligibility.EncodeField(rootElement)
@@ -316,4 +317,58 @@ func TestRunRejectsBadInput(t *testing.T) {
 		"空名单要报错")
 
 	require.Equal(t, 2, run([]string{"-unknown"}), "未知参数要报参数错")
+}
+
+// TestGenerateListAtCustomDepth 覆盖非默认树深：-depth 4 产出的 root.json 与
+// 成员包都带深度 4，路径长度等于树深（v0.4.0 起深度跟随部署，不再是常量）。
+func TestGenerateListAtCustomDepth(t *testing.T) {
+	dir := t.TempDir()
+	membersPath := filepath.Join(dir, "members.txt")
+	require.NoError(t, os.WriteFile(membersPath, []byte("A-1\nA-2\n"), 0o600))
+
+	outDir := filepath.Join(dir, "out")
+	require.Equal(t, 0, run([]string{"-members", membersPath, "-out", outDir, "-depth", "4"}))
+
+	var list eligibility.ListPackage
+	raw, err := os.ReadFile(filepath.Join(outDir, "root.json"))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &list))
+	require.Equal(t, 4, list.Depth)
+
+	var pack eligibility.MemberPackage
+	raw, err = os.ReadFile(filepath.Join(outDir, "eligibility-A-1.json"))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &pack))
+	require.Equal(t, 4, pack.Depth)
+	require.Len(t, pack.Path, 4)
+}
+
+// TestGenerateListRejectsOverflow 钉住超限行为：名单装不下时**拒绝生成**，
+// 且错误信息指向解决办法（换更深的树），不是底层树构建的报错。
+func TestGenerateListRejectsOverflow(t *testing.T) {
+	dir := t.TempDir()
+	membersPath := filepath.Join(dir, "members.txt")
+	members := make([]string, 0, 17)
+	for i := 0; i < 17; i++ {
+		members = append(members, fmt.Sprintf("M-%03d", i))
+	}
+	require.NoError(t, os.WriteFile(membersPath, []byte(strings.Join(members, "\n")), 0o600))
+
+	outDir := filepath.Join(dir, "out")
+	require.Equal(t, 1, run([]string{"-members", membersPath, "-out", outDir, "-depth", "4"}))
+
+	// 拒绝发生在写任何文件之前：目录里不该有 root.json。
+	_, err := os.Stat(filepath.Join(outDir, "root.json"))
+	require.True(t, os.IsNotExist(err), "超限时不能留下半份名单")
+
+	// 同一份名单在深度 5 下装得下（2^5 = 32）。
+	require.Equal(t, 0, run([]string{"-members", membersPath, "-out", outDir, "-depth", "5"}))
+}
+
+func TestRejectsDepthOutsideRange(t *testing.T) {
+	dir := t.TempDir()
+	membersPath := filepath.Join(dir, "members.txt")
+	require.NoError(t, os.WriteFile(membersPath, []byte("A-1\n"), 0o600))
+	require.Equal(t, 2, run([]string{"-members", membersPath, "-out", filepath.Join(dir, "o1"), "-depth", "3"}))
+	require.Equal(t, 2, run([]string{"-members", membersPath, "-out", filepath.Join(dir, "o2"), "-depth", "25"}))
 }

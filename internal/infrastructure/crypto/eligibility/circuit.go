@@ -27,12 +27,32 @@ import (
 	"github.com/consensys/gnark/std/hash/mimc"
 )
 
-// TreeDepth 是资格名单 Merkle 树的深度。
+// DefaultTreeDepth 是资格名单 Merkle 树的**默认**深度。
 //
-// 它是**编译期常量**：电路里要按它做 index 的位分解（ToBinary 的宽度必须是
-// 常量），因此电路、名单工具与客户端对它的认知必须一致。名单规模上限是
-// 2^TreeDepth 个成员；需要更大时改这个常量并重新生成密钥。
-const TreeDepth = 10
+// 历史口径：v0.2.0 起电路就按深度 10 编译，存量名单与密钥都是它 —— keygen、
+// 服务端与客户端在「没有指定深度」时一律取这个值。深度是**部署决策**
+// （v0.4.0 起）：换更深（或更浅）的名单要重新生成密钥与名单，并把 root /
+// verifying key / depth 三项成套配到服务端。
+const DefaultTreeDepth = 10
+
+// 树深允许的范围。
+//
+// 下限防呆：2^4 = 16 人以下就谈不上「名单」了。上限由电路规模自然兜底 ——
+// 约束数与 Merkle 上溯层数随深度线性增长，密钥生成随之变慢；2^24 ≈ 1678 万
+// 成员，远超任何单份名单的需要。
+const (
+	MinTreeDepth = 4
+	MaxTreeDepth = 24
+)
+
+// ValidateTreeDepth 检查名单树深是否在支持范围内。
+func ValidateTreeDepth(depth int) error {
+	if depth < MinTreeDepth || depth > MaxTreeDepth {
+		return fmt.Errorf("eligibility tree depth must be between %d and %d, got %d",
+			MinTreeDepth, MaxTreeDepth, depth)
+	}
+	return nil
+}
 
 // eligibilityCircuit 是资格证明的零知识电路。
 //
@@ -103,21 +123,23 @@ func (c *eligibilityCircuit) Define(api frontend.API) error {
 	bindingHash.Write(c.QualificationID, c.Challenge)
 	api.AssertIsEqual(bindingHash.Sum(), c.SessionBinding)
 
-	// 4) index 的位分解：必须是 TreeDepth 位，且能复原回 index 本身，
-	//    否则「选左还是选右」这一位就与位置脱钩了。
-	bits := api.ToBinary(c.Index, TreeDepth)
+	// 4) index 的位分解：宽度取 Path 的长度（即本实例编译时的树深），且能复原回
+	//    index 本身，否则「选左还是选右」这一位就与位置脱钩了。
+	//    深度由编译模板的 Path 切片长度决定（见 compileCircuit），不是编译期常量。
+	depth := len(c.Path)
+	if err := ValidateTreeDepth(depth); err != nil {
+		return fmt.Errorf("merkle path length out of range: %w", err)
+	}
+	bits := api.ToBinary(c.Index, depth)
 	var rebuilt frontend.Variable = frontend.Variable(0)
-	for i := TreeDepth - 1; i >= 0; i-- {
+	for i := depth - 1; i >= 0; i-- {
 		rebuilt = api.Add(api.Mul(rebuilt, 2), bits[i])
 	}
 	api.AssertIsEqual(rebuilt, c.Index)
 
 	// 5) Merkle 上溯：node = MiMC(left, right)，左右由 index 的第 i 位决定。
-	if len(c.Path) != TreeDepth {
-		return fmt.Errorf("merkle path must have %d elements, got %d", TreeDepth, len(c.Path))
-	}
 	node := leaf
-	for i := 0; i < TreeDepth; i++ {
+	for i := 0; i < depth; i++ {
 		sibling := c.Path[i]
 		// 位为 0 → 当前节点是左孩子；位为 1 → 当前节点是右孩子。
 		left := api.Select(bits[i], sibling, node)

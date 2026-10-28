@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"anonvote/internal/infrastructure/crypto/eligibility"
 	"anonvote/internal/infrastructure/persistence"
 
 	"github.com/spf13/viper"
@@ -43,6 +44,22 @@ type RateLimitConfig struct {
 	Votes RateLimitGroupConfig
 	// Read 覆盖只读端点。
 	Read RateLimitGroupConfig
+}
+
+// EligibilityRosterConfig 是一套资格名单的配置（crypto.eligibility_roots 列表的一项）。
+//
+// 一台服务端可以并存多套名单：每个名单一个名字，提案创建时绑定其中之一
+// （proposals.eligibility_scope）。名为 default 的一套同时充当未显式绑定
+// 名单的提案的默认名单。
+type EligibilityRosterConfig struct {
+	// Name 是名单域的名字，创建提案时引用它。
+	Name string `mapstructure:"name"`
+	// Root 是名单的 Merkle 树根（十六进制域元素）。
+	Root string `mapstructure:"root"`
+	// VerifyingKeyPath 是该名单对应深度电路的验证密钥路径。
+	VerifyingKeyPath string `mapstructure:"vk_path"`
+	// Depth 是名单树的深度（缺省取默认值 10）。
+	Depth int `mapstructure:"depth"`
 }
 
 // Config 持有服务的全部运行期配置。
@@ -80,7 +97,19 @@ type Config struct {
 	// 与 crypto.vk_path 一样，它只配了根不配密钥是不允许的 —— 那等于
 	// 「不校验」，而一人一票恰恰是靠这个校验兑现的。
 	EligibilityVerifyingKeyPath string
-	DB                          *persistence.DBConfig
+	// EligibilityDepth 是资格名单 Merkle 树的深度（v0.4.0 起可配，默认 10）。
+	//
+	// 名单规模上限是 2^depth 人。root / 验证密钥 / 深度是**一套**：
+	// 换名单规模要成套换（`keygen -depth N` 出新密钥、`eligibility-list
+	// -depth N` 重新生成名单），单项不匹配时资格证明必然验不过。
+	EligibilityDepth int
+	// EligibilityRosters 是多套资格名单（v0.4.0 起可选）。
+	//
+	// 配了它就**不能再**配旧的单值写法（crypto.eligibility_root / vk_path /
+	// depth 的显式值）—— 两种写法混在一起时「默认名单是哪套」会有歧义，
+	// 宁可启动失败。单值写法继续合法，等价于一套名为 default 的名单。
+	EligibilityRosters []EligibilityRosterConfig
+	DB                 *persistence.DBConfig
 	// AutoMigrate 决定启动时是否自动改表。
 	// release 模式默认关闭：多副本同时启动会争 DDL 锁，而且改表应该是
 	// 一个能单独执行、能单独回滚的步骤，而不是服务启动的副作用。
@@ -135,6 +164,7 @@ func load(forMigration bool) (*Config, error) {
 	v.SetDefault("crypto.issuer_rotate_days", 90)
 	v.SetDefault("crypto.eligibility_root", "")
 	v.SetDefault("crypto.eligibility_vk_path", "")
+	v.SetDefault("crypto.eligibility_depth", eligibility.DefaultTreeDepth)
 
 	// 限流额度。`rate_limit.enabled` **故意不设默认值** ——
 	// 它要能区分「没配」（按模式推导）与「显式配了 false」（release 下是错误）。
@@ -206,9 +236,26 @@ func load(forMigration bool) (*Config, error) {
 		CredentialIssuerRotateAfter: time.Duration(v.GetInt("crypto.issuer_rotate_days")) * 24 * time.Hour,
 		EligibilityRoot:             strings.TrimSpace(v.GetString("crypto.eligibility_root")),
 		EligibilityVerifyingKeyPath: strings.TrimSpace(v.GetString("crypto.eligibility_vk_path")),
+		EligibilityDepth:            v.GetInt("crypto.eligibility_depth"),
 		DB:                          dbCfg,
 		AutoMigrate:                 !IsReleaseMode(ginMode),
 		SourceFile:                  v.ConfigFileUsed(),
+	}
+
+	// 多套资格名单（可选）。列表里的每套都要名字 / 根 / 验证密钥齐全；
+	// 与旧的单值写法互斥 —— 混用「默认名单是哪套」就有歧义。
+	if err := v.UnmarshalKey("crypto.eligibility_roots", &cfg.EligibilityRosters); err != nil {
+		return nil, fmt.Errorf("parse crypto.eligibility_roots: %w", err)
+	}
+	if err := validateEligibilityRosters(cfg.EligibilityRosters); err != nil {
+		return nil, err
+	}
+	if len(cfg.EligibilityRosters) > 0 &&
+		(cfg.EligibilityRoot != "" || cfg.EligibilityVerifyingKeyPath != "") {
+		return nil, errors.New(
+			"crypto.eligibility_roots and crypto.eligibility_root/vk_path are mutually exclusive: " +
+				"configure either the roster list or the single legacy roster, not both",
+		)
 	}
 	// 显式配置优先于按模式推导的默认值；环境变量优先于配置文件。
 	if raw := strings.TrimSpace(v.GetString("server.auto_migrate")); raw != "" {
@@ -251,7 +298,9 @@ func load(forMigration bool) (*Config, error) {
 		}
 		// 一人一票是 release 模式的硬要求：没有名单根与资格验证密钥，服务端
 		// 就无法强制「同一个人只能领一张票」—— 那时它只是个能发凭证的服务器。
-		if cfg.EligibilityRoot == "" || cfg.EligibilityVerifyingKeyPath == "" {
+		// 单名单（旧写法）与多名单（列表写法）二选一，上面已保证互斥。
+		if len(cfg.EligibilityRosters) == 0 &&
+			(cfg.EligibilityRoot == "" || cfg.EligibilityVerifyingKeyPath == "") {
 			return nil, fmt.Errorf(
 				"crypto.eligibility_root and crypto.eligibility_vk_path are required when server.mode=%q",
 				cfg.GinMode,
@@ -284,6 +333,12 @@ func load(forMigration bool) (*Config, error) {
 		return nil, errors.New(
 			"crypto.eligibility_root and crypto.eligibility_vk_path must be configured together",
 		)
+	}
+
+	// 树深配错同样是启动失败：深度的合法范围由资格电路包定义（4–24），
+	// 配了范围外的值说明部署者对名单规模的认知与实现脱节了。
+	if err := eligibility.ValidateTreeDepth(cfg.EligibilityDepth); err != nil {
+		return nil, fmt.Errorf("crypto.eligibility_depth: %w", err)
 	}
 
 	return cfg, nil
@@ -350,6 +405,41 @@ func validateRateLimit(cfg RateLimitConfig) error {
 		if g.group.Burst <= 0 {
 			return fmt.Errorf("rate_limit.%s.burst must be positive, got %d", g.name, g.group.Burst)
 		}
+	}
+	return nil
+}
+
+// validateEligibilityRosters 校验名单列表。
+//
+// 每套名单要名字 / 根 / 验证密钥齐全、深度合法；名字不能重复 —— 重名时
+// 「提案绑定的是哪一套」无从回答，宁可启动失败。深度缺省取默认值
+// （2^10 = 1024 人的存量口径）。
+func validateEligibilityRosters(rosters []EligibilityRosterConfig) error {
+	seen := map[string]struct{}{}
+	for i := range rosters {
+		roster := &rosters[i]
+		roster.Name = strings.TrimSpace(roster.Name)
+		roster.Root = strings.TrimSpace(roster.Root)
+		roster.VerifyingKeyPath = strings.TrimSpace(roster.VerifyingKeyPath)
+		if roster.Name == "" {
+			return fmt.Errorf("crypto.eligibility_roots[%d]: name is required", i)
+		}
+		if roster.Root == "" {
+			return fmt.Errorf("crypto.eligibility_roots[%d] (%s): root is required", i, roster.Name)
+		}
+		if roster.VerifyingKeyPath == "" {
+			return fmt.Errorf("crypto.eligibility_roots[%d] (%s): vk_path is required", i, roster.Name)
+		}
+		if roster.Depth == 0 {
+			roster.Depth = eligibility.DefaultTreeDepth
+		}
+		if err := eligibility.ValidateTreeDepth(roster.Depth); err != nil {
+			return fmt.Errorf("crypto.eligibility_roots[%d] (%s): %w", i, roster.Name, err)
+		}
+		if _, duplicated := seen[roster.Name]; duplicated {
+			return fmt.Errorf("crypto.eligibility_roots: roster %q is configured more than once", roster.Name)
+		}
+		seen[roster.Name] = struct{}{}
 	}
 	return nil
 }

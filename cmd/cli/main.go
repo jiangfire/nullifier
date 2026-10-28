@@ -545,7 +545,9 @@ func (c *cli) buildEligibilityMaterial(
 		return nil, fmt.Errorf("读取资格包失败: %w", err)
 	}
 
-	prover, err := eligibility.NewProver(provingKeyPath)
+	// proving key 是按名单深度生成的：深度以**成员包**为准（它由名单工具
+	// 生成时写入），密钥与包不成套会在出证明这一步当场失败。
+	prover, err := eligibility.NewProverAtDepth(provingKeyPath, pack.Depth)
 	if err != nil {
 		return nil, fmt.Errorf("加载资格 proving key 失败: %w", err)
 	}

@@ -180,7 +180,7 @@ func (f *fakeAPI) issueEligibilityChallenge(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{
 		"proposal_id": f.proposalID,
 		"root":        f.eligibilityRoot,
-		"depth":       eligibility.TreeDepth,
+		"depth":       eligibility.DefaultTreeDepth,
 		"challenge":   challenge,
 	})
 }
@@ -651,7 +651,7 @@ func TestRun_RealProof_VerifiesAgainstServer(t *testing.T) {
 // 没有资格材料，领取直接被 ELIGIBILITY_REQUIRED 拒掉。
 func TestRun_EligibilityPath(t *testing.T) {
 	dir := t.TempDir()
-	eligProvingKey, eligVerifyingKey, err := eligibility.GenerateKeys()
+	eligProvingKey, eligVerifyingKey, err := eligibility.GenerateKeys(eligibility.DefaultTreeDepth)
 	require.NoError(t, err)
 	eligProvingKeyPath := filepath.Join(dir, "eligibility-proving.key")
 	require.NoError(t, os.WriteFile(eligProvingKeyPath, eligProvingKey, 0o600))
@@ -731,7 +731,7 @@ func writeEligibilityList(t *testing.T, dir string, members int) (string, string
 		require.NoError(t, err)
 		leaves[index] = leaf
 	}
-	root, paths, err := eligibility.BuildTree(leaves, eligibility.TreeDepth)
+	root, paths, err := eligibility.BuildTree(leaves, eligibility.DefaultTreeDepth)
 	require.NoError(t, err)
 	rootHex := eligibility.EncodeField(root)
 
@@ -747,7 +747,7 @@ func writeEligibilityList(t *testing.T, dir string, members int) (string, string
 			Index:    uint64(index),
 			Path:     path,
 			Root:     rootHex,
-			Depth:    eligibility.TreeDepth,
+			Depth:    eligibility.DefaultTreeDepth,
 		}
 		raw, err := json.Marshal(pack)
 		require.NoError(t, err)

@@ -56,12 +56,16 @@ func run(args []string) int {
 	dir := fs.String("dir", "./keys", "directory to write the keys into")
 	force := fs.Bool("force", false, "overwrite existing key files")
 	circuit := fs.String("circuit", string(circuitBallot), "circuit to generate keys for: ballot | eligibility")
+	// depth 只对资格电路有意义：选票电路没有名单树，深度是资格名单的
+	// Merkle 树深（默认 10 = 存量口径；每深度一套密钥，换深度 = 全套重出）。
+	depth := fs.Int("depth", eligibility.DefaultTreeDepth,
+		"eligibility list Merkle tree depth (eligibility circuit only)")
 	verifyingPath := fs.String("verifying-out", "", "path of the verifying key")
 	provingPath := fs.String("proving-out", "", "path of the proving key")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(os.Stdout, "用法: nullifier-keygen [-circuit ballot|eligibility] [-dir <目录>] [-force] [-verifying-out <路径>] [-proving-out <路径>]")
+			fmt.Fprintln(os.Stdout, "用法: nullifier-keygen [-circuit ballot|eligibility] [-depth <资格名单树深>] [-dir <目录>] [-force] [-verifying-out <路径>] [-proving-out <路径>]")
 			fs.SetOutput(os.Stdout)
 			fs.PrintDefaults()
 			return 0
@@ -71,6 +75,14 @@ func run(args []string) int {
 	}
 
 	kind := circuitKind(*circuit)
+	if kind != circuitEligibility && *depth != eligibility.DefaultTreeDepth {
+		fmt.Fprintf(os.Stderr, "参数错误: -depth 只对 -circuit eligibility 有意义\n")
+		return 2
+	}
+	if err := eligibility.ValidateTreeDepth(*depth); err != nil {
+		fmt.Fprintf(os.Stderr, "参数错误: %v\n", err)
+		return 2
+	}
 	defaultVerifying, defaultProving, err := defaultKeyNames(kind)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "参数错误: %v\n", err)
@@ -86,7 +98,7 @@ func run(args []string) int {
 		proving = filepath.Join(*dir, defaultProving)
 	}
 
-	if err := generateKeys(kind, verifying, proving, *force); err != nil {
+	if err := generateKeys(kind, *depth, verifying, proving, *force); err != nil {
 		fmt.Fprintf(os.Stderr, "生成密钥失败: %v\n", err)
 		return 1
 	}
@@ -98,6 +110,10 @@ func run(args []string) int {
 	}
 	digest := sha256.Sum256(summary)
 	fmt.Fprintf(os.Stdout, "circuit: %s\n", kind)
+	if kind == circuitEligibility {
+		fmt.Fprintf(os.Stdout, "tree depth: %d（名单规模上限 %d 人；root / verifying key / depth 要成套部署）\n",
+			*depth, 1<<uint(*depth))
+	}
 	fmt.Fprintf(os.Stdout, "verifying key: %s\n", verifying)
 	fmt.Fprintf(os.Stdout, "verifying key fingerprint (sha256): %s\n", hex.EncodeToString(digest[:]))
 	fmt.Fprintf(os.Stdout, "proving key: %s （仅客户端使用，不要提交到仓库）\n", proving)
@@ -116,8 +132,8 @@ func defaultKeyNames(kind circuitKind) (string, string, error) {
 	}
 }
 
-// generateKeys 生成密钥并落盘。
-func generateKeys(kind circuitKind, verifyingPath, provingPath string, force bool) error {
+// generateKeys 生成密钥并落盘。depth 只有资格电路使用。
+func generateKeys(kind circuitKind, depth int, verifyingPath, provingPath string, force bool) error {
 	if !force {
 		for _, path := range []string{verifyingPath, provingPath} {
 			if _, err := os.Stat(path); err == nil {
@@ -132,7 +148,7 @@ func generateKeys(kind circuitKind, verifyingPath, provingPath string, force boo
 	case circuitBallot:
 		provingKey, verifyingKey, err = ballot.GenerateKeys()
 	case circuitEligibility:
-		provingKey, verifyingKey, err = eligibility.GenerateKeys()
+		provingKey, verifyingKey, err = eligibility.GenerateKeys(depth)
 	default:
 		return fmt.Errorf("未知电路 %q（可选：ballot | eligibility）", kind)
 	}

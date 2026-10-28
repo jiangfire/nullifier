@@ -85,7 +85,7 @@ func TestProviders_WiringSmoke(t *testing.T) {
 		nil,
 		logger,
 	)
-	proposalUC := NewProposalUseCase(proposalRepo, logger)
+	proposalUC := NewProposalUseCase(proposalRepo, nil, logger)
 	participationUC := NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := NewTallyUseCase(voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo, thresholdCrypto, merkleBuilder, logger)
 	require.NotNil(t, votingUC)

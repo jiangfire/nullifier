@@ -41,7 +41,7 @@ func TestRun_CredentialClaim_WithEligibility(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"proposal_id": "p1",
 				"root":        root,
-				"depth":       eligibility.TreeDepth,
+				"depth":       eligibility.DefaultTreeDepth,
 				"challenge":   testChallengeHex,
 			})
 		case "/api/v1/proposals/p1/credentials/claim":
@@ -132,7 +132,7 @@ func buildTestMemberPackage(t *testing.T, count int) (string, eligibility.Member
 	leaf, err := eligibility.DeriveLeaf(secret)
 	require.NoError(t, err)
 	leaves := []fr.Element{leaf}
-	rootElement, paths, err := eligibility.BuildTree(leaves, eligibility.TreeDepth)
+	rootElement, paths, err := eligibility.BuildTree(leaves, eligibility.DefaultTreeDepth)
 	require.NoError(t, err)
 	root := eligibility.EncodeField(rootElement)
 
@@ -148,7 +148,7 @@ func buildTestMemberPackage(t *testing.T, count int) (string, eligibility.Member
 		Index:    0,
 		Path:     path,
 		Root:     root,
-		Depth:    eligibility.TreeDepth,
+		Depth:    eligibility.DefaultTreeDepth,
 	}
 }
 
@@ -158,7 +158,7 @@ func buildTestMemberPackage(t *testing.T, count int) (string, eligibility.Member
 // 必须是**同一对** —— 两套 setup 出来的密钥互不相认。
 func testEligibilityKeys(t *testing.T) (string, *eligibility.Verifier) {
 	t.Helper()
-	provingKey, verifyingKey, err := eligibility.GenerateKeys()
+	provingKey, verifyingKey, err := eligibility.GenerateKeys(eligibility.DefaultTreeDepth)
 	require.NoError(t, err)
 	provingKeyPath := filepath.Join(t.TempDir(), "eligibility-proving.key")
 	require.NoError(t, os.WriteFile(provingKeyPath, provingKey, 0o600))

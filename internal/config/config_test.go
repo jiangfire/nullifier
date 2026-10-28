@@ -6,11 +6,16 @@ import (
 	"testing"
 	"time"
 
+	"anonvote/internal/infrastructure/crypto/eligibility"
+
 	"github.com/stretchr/testify/require"
 )
 
 // testEligibilityRoot 是一枚合法的资格名单根（十六进制的域元素）。
 const testEligibilityRoot = "2113d5db4b0f0a0f0f9d2c1c1e3b5a7d9c0e1f2a3b4c5d6e7f8091a2b3c4d5e6"
+
+// testEligibilityRoot2 是第二枚合法的名单根（与第一枚不同）。
+const testEligibilityRoot2 = "1123d5db4b0f0a0f0f9d2c1c1e3b5a7d9c0e1f2a3b4c5d6e7f8091a2b3c4d5e7"
 
 // setReleaseEligibilityEnv 补齐 release 模式要求的资格校验配置。
 //
@@ -620,4 +625,158 @@ func TestIsReleaseMode(t *testing.T) {
 	require.True(t, IsReleaseMode("production"))
 	require.False(t, IsReleaseMode("debug"))
 	require.False(t, IsReleaseMode(""))
+}
+
+// TestLoad_EligibilityDepthDefaultsToLegacyShape 钉住默认树深：不配置时取 10
+// —— v0.2.0 存量名单与密钥的口径，升级零动作。
+func TestLoad_EligibilityDepthDefaultsToLegacyShape(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(t.TempDir()))
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	t.Setenv("SERVER_MODE", "debug")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 10, cfg.EligibilityDepth)
+}
+
+// TestLoad_RejectsDepthOutsideRange 钉住深度校验：范围外的树深一律启动失败
+// —— 深度的合法范围由资格电路定义，配错说明部署认知与实现脱节了。
+func TestLoad_RejectsDepthOutsideRange(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(t.TempDir()))
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	t.Setenv("SERVER_MODE", "debug")
+	t.Setenv("CRYPTO_ELIGIBILITY_DEPTH", "3")
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "crypto.eligibility_depth")
+
+	t.Setenv("CRYPTO_ELIGIBILITY_DEPTH", "25")
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "crypto.eligibility_depth")
+
+	// 合法值放行（显式配置优先于默认值）。
+	t.Setenv("CRYPTO_ELIGIBILITY_DEPTH", "16")
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 16, cfg.EligibilityDepth)
+}
+
+// writeRosterConfigFile 写一份带名单列表的配置文件，返回路径。
+func writeRosterConfigFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	return path
+}
+
+// TestLoad_EligibilityRosters 覆盖多名单配置：列表解析、深度缺省、
+// release 模式只靠列表即满足硬要求。
+func TestLoad_EligibilityRosters(t *testing.T) {
+	configFile := writeRosterConfigFile(t, `
+server:
+  mode: release
+  admin_bearer_token: secret
+crypto:
+  vk_path: vk.bin
+  eligibility_roots:
+    - name: acme-2026
+      root: `+testEligibilityRoot+`
+      vk_path: keys/acme.key
+      depth: 10
+    - name: default
+      root: `+testEligibilityRoot2+`
+      vk_path: keys/default.key
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Len(t, cfg.EligibilityRosters, 2)
+	require.Equal(t, "acme-2026", cfg.EligibilityRosters[0].Name)
+	require.Equal(t, 10, cfg.EligibilityRosters[0].Depth)
+	require.Equal(t, "default", cfg.EligibilityRosters[1].Name)
+	require.Equal(t, eligibility.DefaultTreeDepth, cfg.EligibilityRosters[1].Depth,
+		"缺省深度取默认值（存量口径）")
+	// 旧单值字段保持为空：列表写法与单值写法互斥。
+	require.Empty(t, cfg.EligibilityRoot)
+}
+
+// TestLoad_EligibilityRostersConflictsWithLegacy 列表与旧单值混配 → 启动失败：
+// 「默认名单是哪套」会有歧义。
+func TestLoad_EligibilityRostersConflictsWithLegacy(t *testing.T) {
+	configFile := writeRosterConfigFile(t, `
+server:
+  mode: debug
+crypto:
+  eligibility_root: `+testEligibilityRoot+`
+  eligibility_vk_path: keys/legacy.key
+  eligibility_roots:
+    - name: acme-2026
+      root: `+testEligibilityRoot+`
+      vk_path: keys/acme.key
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+
+	_, err := Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "mutually exclusive")
+}
+
+// TestLoad_EligibilityRostersRejectsDuplicates 重名的名单 → 启动失败：
+// 「提案绑定的是哪一套」无从回答。
+func TestLoad_EligibilityRostersRejectsDuplicates(t *testing.T) {
+	configFile := writeRosterConfigFile(t, `
+server:
+  mode: debug
+crypto:
+  eligibility_roots:
+    - name: acme-2026
+      root: `+testEligibilityRoot+`
+      vk_path: keys/a.key
+    - name: acme-2026
+      root: `+testEligibilityRoot2+`
+      vk_path: keys/b.key
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+
+	_, err := Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "more than once")
+}
+
+// TestLoad_EligibilityRostersRejectsIncomplete 缺名字或缺密钥的名单 → 启动失败。
+func TestLoad_EligibilityRostersRejectsIncomplete(t *testing.T) {
+	configFile := writeRosterConfigFile(t, `
+server:
+  mode: debug
+crypto:
+  eligibility_roots:
+    - root: `+testEligibilityRoot+`
+      vk_path: keys/a.key
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+
+	_, err := Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "name is required")
+
+	configFile = writeRosterConfigFile(t, `
+server:
+  mode: debug
+crypto:
+  eligibility_roots:
+    - name: acme-2026
+      root: `+testEligibilityRoot+`
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "vk_path is required")
 }

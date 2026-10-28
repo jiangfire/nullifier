@@ -44,11 +44,15 @@ func run(args []string) int {
 	fs.SetOutput(io.Discard)
 	membersPath := fs.String("members", "", "file with one member id per line")
 	outDir := fs.String("out", "./eligibility-out", "directory to write the list root and member packages into")
+	// 名单树的深度。它决定名单规模上限（2^depth 人），且 root / 验证密钥 /
+	// 深度必须与 seed 端成套 —— 换深度等于换名单换密钥。
+	depth := fs.Int("depth", eligibility.DefaultTreeDepth,
+		"Merkle tree depth; the list can hold at most 2^depth members")
 	force := fs.Bool("force", false, "overwrite existing files")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(os.Stdout, "用法: nullifier-eligibility-list -members <名单文件> [-out <目录>] [-force]")
+			fmt.Fprintln(os.Stdout, "用法: nullifier-eligibility-list -members <名单文件> [-depth <树深>] [-out <目录>] [-force]")
 			fs.SetOutput(os.Stdout)
 			fs.PrintDefaults()
 			return 0
@@ -58,6 +62,10 @@ func run(args []string) int {
 	}
 	if strings.TrimSpace(*membersPath) == "" {
 		fmt.Fprintln(os.Stderr, "必须提供 -members")
+		return 2
+	}
+	if err := eligibility.ValidateTreeDepth(*depth); err != nil {
+		fmt.Fprintf(os.Stderr, "参数错误: %v\n", err)
 		return 2
 	}
 
@@ -71,11 +79,12 @@ func run(args []string) int {
 		return 1
 	}
 
-	if err := generateList(memberIDs, *outDir, *force); err != nil {
+	if err := generateList(memberIDs, *outDir, *depth, *force); err != nil {
 		fmt.Fprintf(os.Stderr, "生成名单失败: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stdout, "资格名单已生成: %d 名成员, 树深 %d\n", len(memberIDs), eligibility.TreeDepth)
+	fmt.Fprintf(os.Stdout, "资格名单已生成: %d 名成员, 树深 %d（规模上限 %d 人）\n",
+		len(memberIDs), *depth, 1<<uint(*depth))
 	fmt.Fprintf(os.Stdout, "名单树根（部署到服务端 crypto.eligibility_root）: %s\n",
 		filepath.Join(*outDir, "root.json"))
 	fmt.Fprintf(os.Stdout, "成员资格包: %s/eligibility-<member_id>.json —— 逐个走安全渠道发给本人\n", *outDir)
@@ -115,7 +124,17 @@ func readMembers(path string) ([]string, error) {
 }
 
 // generateList 生成树根与成员包并落盘。
-func generateList(memberIDs []string, outDir string, force bool) error {
+func generateList(memberIDs []string, outDir string, depth int, force bool) error {
+	// 名单装不下要在**写任何文件之前**说清楚，并且告诉运营方出路 ——
+	// 深度决定规模上限（2^depth），装不下就换更深的树重新生成
+	// （密钥也要跟着换：每深度一套密钥）。
+	if capacity := 1 << uint(depth); len(memberIDs) > capacity {
+		return fmt.Errorf(
+			"名单有 %d 名成员，超过树深 %d 的容量上限 %d 人；用 -depth 换更深的树（并重新生成配套密钥）",
+			len(memberIDs), depth, capacity,
+		)
+	}
+
 	// 撞名预检必须在**写任何文件之前**做完。
 	//
 	// 成员包的文件名由成员标识归一化而来（sanitizeFileName），而归一化会把
@@ -151,7 +170,7 @@ func generateList(memberIDs []string, outDir string, force bool) error {
 		leaves[i] = leaf
 	}
 
-	root, paths, err := eligibility.BuildTree(leaves, eligibility.TreeDepth)
+	root, paths, err := eligibility.BuildTree(leaves, depth)
 	if err != nil {
 		return fmt.Errorf("build tree: %w", err)
 	}
@@ -163,7 +182,7 @@ func generateList(memberIDs []string, outDir string, force bool) error {
 
 	list := eligibility.ListPackage{
 		Root:  rootHex,
-		Depth: eligibility.TreeDepth,
+		Depth: depth,
 		Count: len(memberIDs),
 	}
 
@@ -186,7 +205,7 @@ func generateList(memberIDs []string, outDir string, force bool) error {
 			Index:    uint64(i),
 			Path:     path,
 			Root:     rootHex,
-			Depth:    eligibility.TreeDepth,
+			Depth:    depth,
 		}
 		name := memberFileName(memberID)
 		if err := writeJSON(filepath.Join(outDir, name), pack, 0o600, force); err != nil {
