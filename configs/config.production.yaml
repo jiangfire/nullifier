@@ -17,8 +17,18 @@
 server:
   address: ":8080"
   mode: "release"
-  # 必须显式设置。留空在 release 模式下会导致服务启动失败。
+  # 必须显式设置（旧的单值写法，等价于 admin 档分级令牌）。
+  # 留空在 release 模式下会导致服务启动失败 —— 除非用下面的 admin_tokens。
   admin_bearer_token: ""
+  # 管理面分级令牌（v0.4.0 起，可选）。要分权时才需要动：
+  #   auditor 给第三方审计（只读：凭证状态 + /metrics）；
+  #   operator 给选举工作人员（运营全量：提案 / 池 / 解密 / 发布）；
+  #   admin 是管理员（全部）—— 上一级能做下一级的一切。
+  # 权限不足与令牌错误同形地返回 401。
+  # admin_tokens:
+  #   admin: ""
+  #   operator: ""
+  #   auditor: ""
   # 填门户的真实来源。多个用空格分隔，不要用逗号。
   # 留空的话，门户与后端不同源时浏览器会拦掉所有请求
   # （同源部署留空是合法的；release 模式下留空会有一条启动告警）。
@@ -46,7 +56,8 @@ crypto:
   # 缺一个服务就起不来 —— 没有它们，服务端无法强制「一人一票」。
   #
   # root 来自离线名单工具的 root.json；verifying key 来自
-  # `nullifier-keygen -circuit eligibility`。两者必须成对出现。
+  # `nullifier-keygen -circuit eligibility`。**root / 验证密钥 / 树深是
+  # 一套**（树深默认 10，名单规模上限 2^10 = 1024 人；换深度要成套重出）。
   #
   # 服务端只要 root：它能验证「这个人的资格在名单里」，却无法把资格对应到
   # 任何成员 —— 成员包绝不能进服务端。
@@ -56,6 +67,21 @@ crypto:
   #   eligibility_vk_path: "./keys/eligibility-verifying.key"
   eligibility_root: ""
   eligibility_vk_path: ""
+  # 名单树深（可选，默认 10；范围 4–24）。单值写法的一套名单用它。
+  eligibility_depth: 10
+  # 多套名单并存（可选）。配了它就不能再配上面的单值写法。
+  # 一台服务端可以同时办多场投票（各用各的名单），提案创建时用
+  # eligibility_scope 绑定其中一套；名为 default 的一套同时充当
+  # 未显式绑定提案的默认名单。
+  # eligibility_roots:
+  #   - name: default
+  #     root: "16e575fde58737063900c70ffbe3480860ca3e0c73641281cdc5c7ab79ecafd0"
+  #     vk_path: "./keys/eligibility-verifying.key"
+  #     depth: 10
+  #   - name: other-org-2026
+  #     root: "..."
+  #     vk_path: "./keys/eligibility-verifying-other.key"
+  #     depth: 16
 
 # 限流。
 #

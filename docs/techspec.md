@@ -154,6 +154,15 @@ web/                        # Vue 3 前端门户
   - 唯一索引 `(proposal_id, qualification_id)` —— **这就是「一人一票」的强制点**
 - **不存**叶子、资格秘密、成员 ID；也**不与凭证、票据关联** —— 一旦能把资格连到
   票，「分发不泄露身份」这条底线就破了。
+- **多套名单并存（v0.4.0）**：一台服务端可以配多套命名名单
+  （`crypto.eligibility_roots` 列表；旧的单值写法等价于一套名为 `default` 的名单）。
+  提案通过 `proposals.eligibility_scope` 绑定其中一套；挑战签发与证明校验都按提案
+  绑定的名单解析（未绑定取 `default`，只配了一套时取它，多套且无 `default` 时
+  fail-closed 报错）。绑定了不存在的名单域在**创建提案时**就被拒（400）。
+  多名单不改变「服务端只见根」的底线 —— 每套名单仍然只有 root + 验证密钥 + 树深。
+- **树深可配（v0.4.0）**：名单树深从编译期常量变为部署参数（范围 4–24，默认 10）。
+  每深度一套密钥：root / 验证密钥 / 深度必须成套，换深度要重新
+  `nullifier-keygen -circuit eligibility -depth N` 与 `nullifier-eligibility-list -depth N`。
 
 ## 4. 数据库与迁移
 
@@ -323,24 +332,36 @@ SQLite 只在开发/单机形态使用，但它的两个限制会**直接打穿�
 
 ### 5.2 管理接口
 
-以下接口统一走 Bearer Token 鉴权中间件：
+管理接口走 Bearer Token 鉴权中间件，并按**角色分级**（v0.4.0 起；包含关系
+admin ⊃ operator ⊃ auditor，上一级令牌能做下一级的一切；旧的单值令牌等价于
+admin 档；权限不足与令牌错误**同形地返回 401** —— 403 会向持低级令牌的人泄露
+「这个路由存在且需要更高权限」）：
+
+**运营面（operator 及以上）**
 
 - `POST /api/v1/credentials`
 - `POST /api/v1/credentials/blind-sign`
 - `POST /api/v1/proposals`
-- `GET /api/v1/proposals/:proposal_id/credentials`
+  - 请求体可选 `eligibility_scope`（v0.4.0 起）：绑定资格名单域；绑定了不存在的
+    名单域 → 400。响应带 `eligibility_scope`（绑定了才有）。
 - `POST /api/v1/proposals/:proposal_id/credentials/pool`
   - `count` 上限 **10000**（`usecase.maxCredentialPoolSize`）；服务端一次性把
     `count` 个槽位写进池子（SQLite 下分批写，见 §4.6）。
   - 池子只增不减：重复调用是**继续往池里加**槽位，不是补齐到 `count`。
 - `POST /api/v1/proposals/:proposal_id/decryption/setup`
 - `POST /api/v1/proposals/:proposal_id/results/publish`
+
+**观察面（auditor 及以上）**
+
+- `GET /api/v1/proposals/:proposal_id/credentials`
 - `GET /metrics`（Prometheus 指标，见 §5.4）
 
 ### 5.3 关键约束
 
 - `GET /healthz`
-  - 响应体是 `{"status":"ok","debug":<bool>,"eligibility":<bool>}`。
+  - 响应体是 `{"status":"ok","debug":<bool>,"eligibility":<bool>,"eligibility_rosters":<int>}`。
+  - `eligibility_rosters`（v0.4.0 起）是并存名单的套数（单名单部署是 1，未开资格
+    校验是 0）—— 运维据此确认多名单配置真的被加载了。
   - `debug` 由 `server.mode` 推导（`debug` / `dev` / `development` 为 true）。
     门户据此决定要不要显示开发联调入口；该字段不是敏感信息，服务端是否处于
     调试模式本来就是公开事实。
@@ -870,10 +891,10 @@ Retry-After: 3
 
   | 文件 | 内容 |
   |---|---|
-  | `merkle.go` | 名单树与两种产物：`MemberPackage`（成员本人保管的秘密材料）与 `ListPackage`（给服务端的根）；`BuildTree` / `DeriveLeaf` / `DeriveQualificationID` / `DecodeField`（拒绝非规范编码） |
-  | `circuit.go` | 资格电路 `eligibilityCircuit` 与 `TreeDepth` |
+  | `merkle.go` | 名单树与两种产物：`MemberPackage`（成员本人保管的秘密材料）与 `ListPackage`（给服务端的根，可选 `label` / `generated_at` 标注）；`BuildTree` / `WalkPath`（离线校验用：沿路径上溯到根，与电路走法一致）/ `DeriveLeaf` / `DeriveQualificationID` / `DecodeField`（拒绝非规范编码） |
+  | `circuit.go` | 资格电路 `eligibilityCircuit` 与深度常量（`DefaultTreeDepth` / `MinTreeDepth` / `MaxTreeDepth` / `ValidateTreeDepth`） |
   | `statement.go` | 公开输入 `Statement`（**定长 5 个**）与 `BuildStatement` |
-  | `prover.go` | Groth16 的 `Prover` / `Verifier` / `GenerateKeys` / `Constraints` |
+  | `prover.go` | Groth16 的 `Prover` / `Verifier` / `GenerateKeys(depth)` / `Constraints(depth)`；prover 实例携带自己编译电路时的深度（`NewProverAtDepth` / `NewProverFromBytesAtDepth`，缺省取默认深度） |
   | `client.go` | 客户端一站式出证明：`Prover.ProveEligibility`（重算叶子并与包比对、由叶子推出去重键、用**服务端的** root 出证明） |
 
 - **电路形状**：Groth16 / BN254，哈希用 MiMC。**实测 6860 条约束**
@@ -888,24 +909,33 @@ Retry-After: 3
   | `QualificationID` | 去重键 |
   | `SessionBinding` | `MiMC(QualificationID, Challenge)`，把挑战钉在这份证明上 |
 
-- **私有见证**：`Secret`（资格秘密）、`Index`（叶子位置）、`Path`（10 个兄弟节点）。
+- **私有见证**：`Secret`（资格秘密）、`Index`（叶子位置）、`Path`（depth 个兄弟节点）。
   **叶子、路径、位置全是私有的** —— 服务端因此不需要知道树的结构，公开输入的
   个数也不随树深变化。
 - **电路断言四件事**：
   1. `Leaf = MiMC(Secret)` —— 叶子由秘密单向决定；
   2. `QualificationID = MiMC(Leaf, ProposalID)` —— 去重键绑定本提案；
   3. `SessionBinding = MiMC(QualificationID, Challenge)` —— 截获的证明挪不到别的挑战上用；
-  4. `Index` 按 `TreeDepth` 位分解并能复原，沿 `Path` 上溯得到 `Root`。
+  4. `Index` 按树深位分解并能复原，沿 `Path` 上溯得到 `Root`。
 - **去重键**：`QualificationID = MiMC(Leaf, ProposalID)` —— 同一成员同一提案稳定
   （第二次领取撞唯一索引），跨提案不同（跨提案不可关联）。
-- **`TreeDepth = 10` 是编译期常量**（电路里 `ToBinary` 的宽度必须是常量）：
-  名单上限 **1024 人**；要更大得改常量、重编电路与 WASM、重生成密钥。
-- **名单工具**：`cmd/eligibility-list -members <名单文件> -out <目录>` —— 离线运行，
-  不联网、不连服务端。输入每行一个成员 ID（空行与 `#` 开头行忽略，重复行去重，
-  成员按 ID 排序后建树，因此同一份名单的**成员位置**是确定的；但每次运行都会
-  重新随机生成资格秘密，所以**两次运行的树根不一样**）。输出：
-  - `root.json` —— 名单根（`root` / `depth` / `count`），给服务端配置
-    `crypto.eligibility_root`；
+- **树深是部署参数（v0.4.0 起，范围 4–24，默认 10）**：电路形状由编译模板的
+  `Path` 切片长度决定（`Define` 里 `ToBinary` 的宽度取 `len(c.Path)`），不再是
+  编译期常量。**每深度一套密钥**：`cmd/keygen -circuit eligibility -depth N`；
+  名单规模上限 2^depth 人（默认 1024，depth 16 = 6.5 万，depth 20 = 105 万）。
+  换深度 = 成套重出：新密钥 → 新名单 → 服务端 root / vk / depth 三项一起换 →
+  门户静态目录换对应的 eligibility proving key。**跨语言锁**：默认深度 10 由
+  Go 侧 `TestDefaultTreeDepthIsTheLegacyShape` 与 TS 侧资格 prover 测试各钉一条。
+- **名单工具**：`cmd/eligibility-list -members <名单文件> -out <目录> [-depth N]
+  [-label <标注>] [-id-column <CSV 列名>]` —— 离线运行，不联网、不连服务端。
+  输入支持两种格式（v0.4.0 起）：`.txt` 每行一个成员 ID（空行与 `#` 开头行忽略）；
+  `.csv` 走表头解析（成员 ID 默认取第一列，`-id-column` 指定列名；UTF-8 BOM 容错
+  —— Excel 导出常态）。**重复成员是错误**（列出全部重复项、拒绝生成）——
+  静默去重会让一个成员悄悄失去资格且无人知道。成员按 ID 排序后建树，因此同一份
+  名单的**成员位置**是确定的；但每次运行都会重新随机生成资格秘密，所以**两次运行
+  的树根不一样**。人数超过 2^depth 时明确报错并提示换 `-depth`。输出：
+  - `root.json` —— 名单根（`root` / `depth` / `count`，外加可选的 `label` 与
+    `generated_at` 标注），给服务端配置 `crypto.eligibility_root`；
   - `eligibility-<member_id>.json` —— 每成员一份资格包（`member_id` / `secret` /
     `leaf` / `index` / `path` / `root` / `depth`），权限 **0600**，走安全渠道发给本人。
   - **两份产物必须分开保管**：服务端只该拿到 root。
@@ -918,17 +948,24 @@ Retry-After: 3
   - **落盘顺序**：成员包先写、`root.json` **最后**写 —— root 是要配到服务端的，
     落盘就意味着「这份名单可以上线」；写包中途失败时目录里没有 root，
     不会留下一份「声称 N 人、实际 N-1 个包」的名单被误上线。
-- **两套密钥，互不相通**：`cmd/keygen -circuit ballot|eligibility`
+  - **离线校验（v0.4.0）**：`cmd/eligibility-list -verify <产出目录>` —— 逐个成员包
+    从秘密重导叶子（包没被改过）、沿路径上溯到根（`eligibility.WalkPath`，走法与
+    电路一致；路径没有被换过）、包数与 root.json 的 `count` 一致（没丢包）。
+    退出码 0 / 1 / 2，可当门禁用。
+- **两套密钥，互不相通**：`cmd/keygen -circuit ballot|eligibility [-depth N]`
   - 选票：`verifying.key`（服务端，`crypto.vk_path`）/ `proving.key`（客户端）
   - 资格：`eligibility-verifying.key`（服务端，`crypto.eligibility_vk_path`）/
-    `eligibility-proving.key`（客户端）
-  - Groth16 的 setup 是 **per-circuit** 的，两套密钥不能互换。
+    `eligibility-proving.key`（客户端）；`-depth` 出指定深度的密钥（默认 10）
+  - Groth16 的 setup 是 **per-circuit** 的，两套密钥不能互换；资格密钥还是
+    **per-depth** 的（深度不同电路就不同）。
 - **共享 MiMC**：`internal/infrastructure/crypto/mimc` —— 选票电路的 nullifier 约束
   与资格电路的 Merkle 承诺**共用同一份** MiMC 实现（`mimc.Hash`），并另导出
   `mimc.Constants()` 供跨语言 KAT 钉住轮常量。两处必须同一份：差一位，客户端就
   出不了证明（而且不会报错，只是验签失败）。
 - **领域适配层**：`internal/infrastructure/crypto/eligibility_service.go` ——
-  `Enabled` / `Root` / `NewChallenge` / `Verify`。
+  `Enabled` / `RosterFor(scope)` / `ScopeKnown(scope)` / `NewChallenge` /
+  `VerifyFor(scope, ...)`（v0.4.0 起按名单域解析；单名单旧入口
+  `NewEligibilityService(root, vk, depth)` 等价于一套名为 `default` 的名单）。
   **没有「跳过验签」的降级模式**：选票证明有（`vk_path` 为空时只查 proof 非空），
   资格证明没有 —— 验签密钥缺失等于服务端无法履行一人一票的承诺，那要在启动时
   失败，而不是悄悄放行。

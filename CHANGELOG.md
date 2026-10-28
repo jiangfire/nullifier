@@ -8,6 +8,67 @@
 
 ---
 
+## [0.4.0] — 2026-10-28
+
+v0.3.0 之后的变更。本版的主题是**「能用于有规模的真实投票」** —— 完成定义与验收
+证据见 [`docs/release-plan-v0.4.0.md`](./docs/release-plan-v0.4.0.md)，路线图见
+[`docs/roadmap.md`](./docs/roadmap.md)（里程碑 M5）。
+
+> **冻结契约零变更**：字段名、端点路径与密文格式 v3 一概不动（这是密文格式定版后
+> 连续第二个 minor 未变）。**升级必须先跑迁移**（新增 `proposals.eligibility_scope`
+> 列），否则 release 模式起不来（`no such column`）。
+
+### 新增
+
+- **资格名单规模化（T29）** —— 名单树深从编译期常量（10，上限 1024 人）变成
+  **部署参数**（范围 4–24，默认 10 不变）。
+  - `nullifier-keygen -circuit eligibility -depth N` 出指定深度的密钥；
+    `nullifier-eligibility-list -depth N` 出指定深度的名单（人数超限时报错并提示换深度）。
+  - 服务端配置 `crypto.eligibility_depth`（默认 10）；**root / 验证密钥 / 树深是
+    一套**，换深度要成套换，门户静态目录也要换对应深度的 eligibility proving key。
+  - 客户端以**成员包里的 `depth`** 为准（CLI 与浏览器 WASM 都按它初始化 prover）；
+    深度不匹配在出证明这一步当场失败。
+  - 存量名单与密钥（深度 10）**零动作升级**；非默认深度有 node 驱动的 WASM 端到端
+    证据，默认深度由两侧的跨语言锁钉住。
+- **多套资格名单并存（T30，多租户）** —— 一台服务端可以同时办多场投票。
+  - 配置：`crypto.eligibility_roots` 命名列表（`name` / `root` / `vk_path` / `depth`）；
+    旧的单值写法等价于一套名为 `default` 的名单；两种写法混配**启动失败**。
+  - 提案绑定名单域：创建提案（管理端）可带 `eligibility_scope`；绑定了不存在的
+    名单域 → **400**（创建时就拦住）。未绑定走 `default`（只配了一套时取它）。
+  - `eligibility-challenge` 与 claim 校验都按提案绑定的名单解析（响应字段名不变，
+    `root` / `depth` 的值随名单走）；跨名单的成员包证明必败（403
+    `INVALID_ELIGIBILITY_PROOF`）。
+  - **服务端仍然只见各名单的根**：多名单不改变「无法把资格对应到任何成员」。
+  - `/healthz` 新增 `eligibility_rosters`（并存名单套数）。
+- **管理面权限分级（T31）** —— 三级令牌：**admin**（全部）⊃ **operator**（运营：
+  提案 / 池 / 解密 setup / 发布）⊃ **auditor**（只读：凭证状态 + `/metrics`）。
+  - 配置：`server.admin_tokens: {admin, operator, auditor}`（或环境变量
+    `SERVER_ADMIN_TOKENS_*`）；旧的单值 `admin_bearer_token` 等价于 admin 档 ——
+    **存量部署零改动升级**（两处 admin 档配了不同的值会启动失败）。
+  - **权限不足与令牌错误同形地返回 401** —— 403 会向持低级令牌的人泄露「这个路由
+    存在且需要更高权限」。
+- **名单的安全摄入（T32，真实身份源对接）** —— `nullifier-eligibility-list` 面向
+  HR / 选区系统导出的名单。
+  - 支持 **CSV**（`.csv` 扩展名自动识别：表头 + `-id-column` 选列，默认第一列；
+    UTF-8 BOM 容错 —— Excel 导出常态）。
+  - **重复成员从「静默丢弃」改为「拒绝生成」**：名单里混入重复行时列出全部重复项
+    并退出非 0 —— 静默去重会让一个成员悄悄失去资格且无人知道。
+  - 新增 `-verify <产出目录>`：离线校验产出（逐个成员包重导叶子、沿路径上溯到根、
+    包数与 `count` 一致），退出码 0 / 1 / 2 可当门禁用。
+  - `root.json` 新增可选 `label`（`-label`）与 `generated_at`（只读 `root` /
+    `depth` / `count` 的消费方不受影响）。
+
+### 部署动作（非破坏性，但要做）
+
+1. **先跑迁移再起服务**：`nullifier-server -migrate`（新增
+   `proposals.eligibility_scope` 列）。
+2. 要分权才需要动配置：`server.admin_tokens`（什么都不配 = 旧单令牌照常当 admin）。
+3. 换更大名单时三件成套：`keygen -depth N` → `eligibility-list -depth N` →
+   服务端 root / vk / depth 一起换 → 门户换对应深度的 eligibility proving key。
+4. 名单源有重复行时 v0.4.0 的名单工具会**拒绝生成**，先清洗名单。
+
+---
+
 ## [0.3.0] — 2026-10-26
 
 v0.2.0 之后的变更。本版的主题是**「接口不再动」** —— 完成定义与验收证据见

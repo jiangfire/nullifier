@@ -8,7 +8,8 @@
 >
 > 分支：`feat/v0.4.0-scale-and-tenancy`（从 `main` 切出）
 > 制定日期：2026-10-28
-> 状态：**进行中**（2026-10-28 升格为里程碑 M5 —— 由路线图 §1.2 的推演转为正式排期）
+> 状态：**已实现，待发版**（2026-10-28 升格为里程碑 M5 并当轮落地 —— 四张任务卡
+> T29 / T30 / T31 / T32 全部完成，出口标准 §5 逐条有证据，落地记录见 §8）
 
 ---
 
@@ -114,7 +115,7 @@
 | 问题 | 管理面是**一把钥匙**：`server.admin_bearer_token` 一枚令牌通吃「创建提案、灌凭证池、解密 setup、发布结果、看凭证状态、读 /metrics」。把只读观察权交给第三方审计、或把日常运营权交给选举工作人员时，只能交出全部权限。 |
 | 证据 | `internal/config/config.go:66`（单一 `AdminBearerToken`）、`internal/infrastructure/http/server.go:60-90`（所有管理路由挂同一个 `RequireAdminBearerToken`）、`internal/infrastructure/http/middleware/`（鉴权中间件只有「是否 admin」一档） |
 | 改法 | ① 三级角色：**admin**（全部）⊃ **operator**（运营：创建提案、灌池、解密 setup、发布结果、管理端凭证签发）⊃ **auditor**（只读：凭证状态查询、`/metrics`）；包含关系是刻意的 —— 上一级令牌能做下一级的一切；② 配置：`server.admin_tokens: {admin, operator, auditor}` 三个可选条目；旧的单值 `admin_bearer_token` 继续合法且等价于 admin（存量部署零改动升级）；release 模式要求**至少一枚**令牌；③ 中间件按角色放行：令牌对候选集做常数时间比较（沿用 T3 的摘要比较法）；④ 路由映射落到 `server.go` 的各条管理路由上（`/healthz` 与公开端点不受影响）；⑤ 部署清单写明「哪枚令牌发给谁」。 |
-| 验收 | ① auditor 令牌能读 `/metrics` 与凭证状态，**不能**灌池 / 创建提案（403）；② operator 能做全部运营操作，auditor 面可达；③ admin 令牌全通；④ 旧配置（单令牌）行为与 v0.3.0 完全一致（回归：既有 admin 用例原样通过）；⑤ 畸形 / 空白 / 带 CR-LF 的 Authorization 头在三个角色上一律拒绝；⑥ `go test ./...` 全绿 |
+| 验收 | ① auditor 令牌能读 `/metrics` 与凭证状态，**不能**灌池 / 创建提案；② operator 能做全部运营操作，auditor 面可达；③ admin 令牌全通；④ 旧配置（单令牌）行为与 v0.3.0 完全一致（回归：既有 admin 用例原样通过）；⑤ 畸形 / 空白 / 带 CR-LF 的 Authorization 头在三个角色上一律拒绝；⑥ `go test ./...` 全绿。⚠️ **落地偏离**：权限不足**与令牌错误同形地返回 401**，不是 403 —— 回 403 会告诉持低级令牌的人「这个路由存在且需要更高权限」；401 什么都不泄露，且不用为它新增一个要进跨语言错误码门禁的错误码 |
 | 预估 | 1–2 天 |
 | 依赖 | 无（与 T29 / T30 无耦合，排在其后只为减少 server.go 的合并冲突） |
 
@@ -159,15 +160,15 @@ v0.3.0、v0.4.0）。
 
 | # | 检查项 | 状态 |
 |---|---|---|
-| 1 | 冻结契约零变更（`tests/architecture/api_contract_test.go` 原样通过） | ⬜ |
-| 2 | T29：深度 4 / 深度 10 双深度的证明往返 + WASM 非默认深度链路 + 默认兼容回归 | ⬜ |
-| 3 | T30：双名单双提案 e2e、跨名单失败、旧配置回归、迁移可用 | ⬜ |
-| 4 | T31：三级令牌的放行 / 拒绝矩阵 + 旧单令牌回归 + 恶意头拒绝 | ⬜ |
-| 5 | T32：CSV / BOM / 重复 / 溢出 / `-verify` 五情形各有测试 | ⬜ |
-| 6 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 全绿；覆盖率门槛退出码 0 | ⬜ |
-| 7 | 前端 lint / tsc / vitest 全绿；`make web-e2e`（真浏览器两条路径）通过 | ⬜ |
-| 8 | 文档闭合：techspec / deployment-checklist / project-map / roadmap / CHANGELOG 全部更新 | ⬜ |
-| 9 | `VERSION` = `0.4.0`，tag `v0.4.0` 已推，release 流水线全绿，产物已核验 | ⬜ |
+| 1 | 冻结契约零变更（`tests/architecture/api_contract_test.go` 原样通过） | ✅ **已过**（2026-10-28：架构门禁全绿；§4 的加法记录已写进契约文档） |
+| 2 | T29：深度 4 / 深度 10 双深度的证明往返 + WASM 非默认深度链路 + 默认兼容回归 | ✅ **已过**（`internal/infrastructure/crypto/eligibility/depth_test.go` 六条；`tests/e2e/wasm_eligibility_test.go` 新增深度 4 的 node 驱动链路，实测 init 2649ms / prove 998ms，服务端真实验签通过；深度 10 既有用例原样通过） |
+| 3 | T30：双名单双提案 e2e、跨名单失败、旧配置回归、迁移可用 | ✅ **已过**（`tests/e2e/multi_roster_eligibility_test.go`：acme 成员在自己提案 201 / 跨名单 403 / default 兜底 201 / 未知名单 400；旧单值配置的既有资格 e2e 原样通过；`proposals.eligibility_scope` 落库回读有持久化测试） |
+| 4 | T31：三级令牌的放行 / 拒绝矩阵 + 旧单令牌回归 + 恶意头拒绝 | ✅ **已过**（中间件 9 格包含矩阵 + 恶意头 + 无候选令牌；HTTP 级真实服务端矩阵 `admin_roles_test.go`；旧单令牌回归 `TestServer_AdminRoles_LegacyTokenIsAdmin`） |
+| 5 | T32：CSV / BOM / 重复 / 溢出 / `-verify` 五情形各有测试 | ✅ **已过**（BOM / `-id-column` / 缺列 / 重复拒绝（txt 与 csv）/ 超限且不留半份名单 / `-verify` 的通过与「改包 / 丢包 / 无 root」三种失败） |
+| 6 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 全绿；覆盖率门槛退出码 0 | ✅ **已过**（2026-10-28：24 个包全绿；覆盖率门槛 **81.42%** 达标，`internal/di` 因新增装配分支补了 provider 测试后回绿） |
+| 7 | 前端 lint / tsc / vitest 全绿；`make web-e2e`（真浏览器两条路径）通过 | ✅ **已过**（eslint / tsc 零输出；vitest 19 文件 160 用例全过；`web-e2e` 真浏览器 1 passed（2.2m），release 模式服务端 + 计票还原 + 一人一票拒绝，healthz 已报 `eligibility_rosters`） |
+| 8 | 文档闭合：techspec / deployment-checklist / project-map / roadmap / CHANGELOG 全部更新 | ✅ **已过**（techspec §3.5 / §5.2 / §5.3 / §6.11；部署清单 §2 / §2.1 / §2.2 / §3；project-map 陷阱 46–48；契约文档 §4 加法记录；配置模板与 env 样例；CHANGELOG 0.4.0 段） |
+| 9 | `VERSION` = `0.4.0`，tag `v0.4.0` 已推，release 流水线全绿，产物已核验 | ⬜ 发布步骤见 §7 |
 
 ---
 
@@ -186,10 +187,36 @@ v0.3.0、v0.4.0）。
 
 ## 7. 发布步骤
 
-1. `VERSION` → `0.4.0`；`CHANGELOG.md` 写 0.4.0 条目（含部署动作清单）。
+1. `VERSION` → `0.4.0`；`CHANGELOG.md` 写 0.4.0 条目（含部署动作清单）。✅
 2. 分支 `feat/v0.4.0-scale-and-tenancy` 推送 → PR → 合并回 `main`。
 3. 打**注解 tag** `v0.4.0`（release workflow 用 tag 说明当 release 正文）并推送。
 4. 监控 release 流水线（verify / build×5 平台 / web / release 八个 job）全绿。
 5. `gh release view v0.4.0` 核验 12 个产物（5 平台二进制 + 门户包，各带 sha256），
    门户包含 `ballot-prover.wasm` 与 `wasm_exec.js`（两把 proving key 按设计不在包里）。
 6. 回填本文件 §8 落地记录与路线图 M5 进展表。
+
+---
+
+## 8. 落地记录（2026-10-28）
+
+四张任务卡当轮落地，按依赖序 T29 → T30 → T31 → T32，每张一个提交：
+
+| 卡 | 提交 | 实测要点 |
+|---|---|---|
+| T29 树深可配 | `feat(crypto): make the eligibility tree depth a deployment parameter` | 深度 4 = 3566 条约束（每层约 549 条，与深度 10 的 6860 吻合）；WASM 深度 4 链路 init 2649ms / prove 998ms；跨语言锁两侧各一条 |
+| T30 多名单并存 | `feat(api): let multiple eligibility rosters coexist on one server` | 双名单双提案 e2e 四场景全过；wire 生成器重跑（`NewProposalUseCase` 注入资格服务做创建时校验）；`/healthz` 带 `eligibility_rosters` |
+| T31 权限分级 | `feat(http): split admin bearer auth into admin/operator/auditor roles` | 9 格包含矩阵 + HTTP 级真实服务端矩阵；401 同形决策见任务卡的偏离注 |
+| T32 身份源摄入 | `feat(offline): ingest real identity sources safely in the eligibility list tool` | BOM CSV / 重复拒绝 / 超限拒绝且不留半份名单 / `-verify` 四情形；`eligibility.WalkPath` 与建树一致性有单测 |
+
+**验证汇总（2026-10-28）**：`go test ./...` 24 个包全绿；覆盖率门槛 81.42% 达标；
+`go vet` / `gofmt -l` 干净；前端 eslint / tsc 零输出、vitest 160 用例全过；
+`scripts/web-e2e.sh run` 真浏览器两条路径通过（release 模式 + 真 proving key +
+强资格校验，计票还原出所选选项）。
+
+**过程中的两个发现**：
+
+- `BuildTree` 原来自带一个 `depth > 20` 的上限，与新支持范围（4–24）不一致 ——
+  已改为走 `ValidateTreeDepth`，消灭了「深度 21–24 能过配置校验、建树必失败」的暗坑。
+- 电路的深度参数化**不需要**给电路结构体加额外字段：`Define` 里的位分解宽度与
+  上溯层数直接取 `len(c.Path)`，深度由编译模板的切片长度决定 —— 比给结构体加
+  `gnark:"-"` 字段的方案少一个反射面。
