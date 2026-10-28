@@ -54,12 +54,13 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 
 	// Prometheus 指标端点。
 	//
-	// 它要管理员令牌：指标里虽然只有计数与耗时（没有任何选票内容或身份），
-	// 但「多少人投了票」「多少次资格证明没验过」本身就是运营状态 ——
-	// 按仓库的一贯口径，管理面接口一律要 Bearer 令牌。
+	// 它要管理员令牌（auditor 及以上）：指标里虽然只有计数与耗时（没有任何
+	// 选票内容或身份），但「多少人投了票」「多少次资格证明没验过」本身就是
+	// 运营状态 —— 按仓库的一贯口径，管理面接口一律要 Bearer 令牌。
+	// auditor 这一档就是为它准备的：第三方审计能看指标，碰不了运营操作。
 	engine.GET(
 		middleware.MetricsEndpointPath,
-		middleware.RequireAdminBearerToken(cfg.AdminBearerToken),
+		middleware.RequireAdminRole(adminTokens(cfg), middleware.RoleAuditor),
 		gin.WrapH(handler.Metrics().Handler()),
 	)
 
@@ -85,15 +86,27 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 	v1 := engine.Group("/api/v1")
 	handler.RegisterRoutes(v1)
 
-	admin := v1.Group("/")
-	admin.Use(middleware.RequireAdminBearerToken(cfg.AdminBearerToken))
-	admin.POST("/credentials", handler.ReserveCredentialForUser)
-	admin.POST("/credentials/blind-sign", handler.AdminBlindSignCredential)
-	admin.POST("/proposals", handler.CreateProposal)
-	admin.GET("/proposals/:proposal_id/credentials", handler.ListProposalCredentialStatuses)
-	admin.POST("/proposals/:proposal_id/credentials/pool", handler.FillCredentialPool)
-	admin.POST("/proposals/:proposal_id/decryption/setup", handler.SetupDecryptionSession)
-	admin.POST("/proposals/:proposal_id/results/publish", handler.PublishResult)
+	// 管理面按角色分级（v0.4.0 起）：旧的单值令牌等价于 admin 档，覆盖全部
+	// 路由 —— 存量部署零改动。分权时：operator 给选举工作人员（运营全量），
+	// auditor 给第三方审计（只读 + 指标）。
+	//
+	// 权限不足与令牌错误同形地返回 401：403 会告诉持低级令牌的人「这个路由
+	// 存在且需要更高权限」。
+
+	// 运营面（operator 及以上）：提案生命周期、凭证池、解密 setup、发布结果。
+	operator := v1.Group("/")
+	operator.Use(middleware.RequireAdminRole(adminTokens(cfg), middleware.RoleOperator))
+	operator.POST("/credentials", handler.ReserveCredentialForUser)
+	operator.POST("/credentials/blind-sign", handler.AdminBlindSignCredential)
+	operator.POST("/proposals", handler.CreateProposal)
+	operator.POST("/proposals/:proposal_id/credentials/pool", handler.FillCredentialPool)
+	operator.POST("/proposals/:proposal_id/decryption/setup", handler.SetupDecryptionSession)
+	operator.POST("/proposals/:proposal_id/results/publish", handler.PublishResult)
+
+	// 观察面（auditor 及以上）：只读端点。
+	auditor := v1.Group("/")
+	auditor.Use(middleware.RequireAdminRole(adminTokens(cfg), middleware.RoleAuditor))
+	auditor.GET("/proposals/:proposal_id/credentials", handler.ListProposalCredentialStatuses)
 
 	return &Server{
 		engine:  engine,
@@ -101,6 +114,20 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 		handler: handler,
 		logger:  logger,
 	}
+}
+
+// adminTokens 汇总分级令牌：旧单值等价于 admin 档（配置层保证两者不会以
+// 不同的值同时出现）。
+func adminTokens(cfg *config.Config) middleware.AdminTokens {
+	tokens := middleware.AdminTokens{
+		Admin:    cfg.AdminTokens.Admin,
+		Operator: cfg.AdminTokens.Operator,
+		Auditor:  cfg.AdminTokens.Auditor,
+	}
+	if cfg.AdminBearerToken != "" {
+		tokens.Admin = cfg.AdminBearerToken
+	}
+	return tokens
 }
 
 func (s *Server) Run() error {

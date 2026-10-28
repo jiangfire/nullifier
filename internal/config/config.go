@@ -62,6 +62,20 @@ type EligibilityRosterConfig struct {
 	Depth int `mapstructure:"depth"`
 }
 
+// AdminTokensConfig 是管理面的分级令牌（全部可选）。
+//
+// 旧的单值 admin_bearer_token 等价于 admin 档 —— 存量部署什么都不用改。
+// 要分权时才需要动配置：auditor 给第三方审计（只读 + 指标），
+// operator 给选举工作人员（运营全量），admin 留给部署者自己。
+type AdminTokensConfig struct {
+	// Admin 是管理员令牌：管理面全部端点。
+	Admin string
+	// Operator 是运营令牌：提案生命周期、凭证池、解密 setup、发布结果。
+	Operator string
+	// Auditor 是审计令牌：只读端点（凭证状态、/metrics）。
+	Auditor string
+}
+
 // Config 持有服务的全部运行期配置。
 type Config struct {
 	ServerAddress string
@@ -81,8 +95,13 @@ type Config struct {
 	// `c.ClientIP()` 完全可伪造 —— 限流与日志里的来源地址都会失真。
 	TrustedProxies          []string
 	AdminBearerToken        string
-	VerifyingKeyPath        string
-	CredentialIssuerKeyPath string
+	// AdminTokens 是管理面的分级令牌（v0.4.0 起可选）。
+	//
+	// 与旧单值并存：单值 = admin 档。两者都配置了 admin 档且**值不同**时
+	// 启动失败 —— 「哪枚是管理员令牌」不该有两份答案。
+	AdminTokens              AdminTokensConfig
+	VerifyingKeyPath         string
+	CredentialIssuerKeyPath  string
 	// CredentialIssuerRotateAfter 是签发方密钥的轮换周期。
 	CredentialIssuerRotateAfter time.Duration
 	// RateLimit 是限流配置。
@@ -231,6 +250,11 @@ func load(forMigration bool) (*Config, error) {
 		DebugMode:                   isDebugMode(ginMode),
 		CORSAllowedOrigins:          v.GetStringSlice("server.cors_allowed_origins"),
 		AdminBearerToken:            strings.TrimSpace(v.GetString("server.admin_bearer_token")),
+		AdminTokens: AdminTokensConfig{
+			Admin:    strings.TrimSpace(v.GetString("server.admin_tokens.admin")),
+			Operator: strings.TrimSpace(v.GetString("server.admin_tokens.operator")),
+			Auditor:  strings.TrimSpace(v.GetString("server.admin_tokens.auditor")),
+		},
 		VerifyingKeyPath:            v.GetString("crypto.vk_path"),
 		CredentialIssuerKeyPath:     v.GetString("crypto.issuer_key_path"),
 		CredentialIssuerRotateAfter: time.Duration(v.GetInt("crypto.issuer_rotate_days")) * 24 * time.Hour,
@@ -308,10 +332,19 @@ func load(forMigration bool) (*Config, error) {
 		}
 		// 生产模式下临时 token 每次重启都会变，多副本之间还不一样，
 		// 会让运营门户与 CLI 随机失联 —— 必须显式配置。
-		if strings.TrimSpace(cfg.AdminBearerToken) == "" {
+		// 旧单值与分级令牌（admin / operator / auditor 任一）都算「显式配置」。
+		if cfg.AdminBearerToken == "" && cfg.AdminTokens == (AdminTokensConfig{}) {
 			return nil, fmt.Errorf(
 				"server.admin_bearer_token is required when server.mode=%q (set SERVER_ADMIN_BEARER_TOKEN)",
 				cfg.GinMode,
+			)
+		}
+		// 两处都配了 admin 档且值不同 → 启动失败：哪枚是管理员令牌不该有
+		// 两份答案（同值则等价于配了一处，放行）。
+		if cfg.AdminTokens.Admin != "" && cfg.AdminBearerToken != "" &&
+			cfg.AdminTokens.Admin != cfg.AdminBearerToken {
+			return nil, errors.New(
+				"server.admin_tokens.admin and server.admin_bearer_token are both configured with different values; keep one of them",
 			)
 		}
 		// 限流是 release 模式的硬要求：公开端点上最贵的操作是投票

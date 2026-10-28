@@ -122,3 +122,93 @@ func TestRequireAdminBearerToken_AllowsPaddingAfterScheme(t *testing.T) {
 	engine.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNoContent, rec.Code)
 }
+
+// TestRequireAdminRole_Containment 钉住角色包含关系：
+// admin ⊃ operator ⊃ auditor —— 上一级令牌能过下一级的门，反之不行。
+func TestRequireAdminRole_Containment(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tokens := AdminTokens{Admin: "t-admin", Operator: "t-operator", Auditor: "t-auditor"}
+
+	cases := []struct {
+		required string
+		token    string
+		allowed  bool
+	}{
+		{RoleAuditor, "t-auditor", true},
+		{RoleAuditor, "t-operator", true},
+		{RoleAuditor, "t-admin", true},
+		{RoleOperator, "t-auditor", false},
+		{RoleOperator, "t-operator", true},
+		{RoleOperator, "t-admin", true},
+		{RoleAdmin, "t-auditor", false},
+		{RoleAdmin, "t-operator", false},
+		{RoleAdmin, "t-admin", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.required+"/"+tc.token, func(t *testing.T) {
+			engine := gin.New()
+			engine.Use(ErrorHandler(nil))
+			engine.Use(RequireAdminRole(tokens, tc.required))
+			engine.GET("/x", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/x", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			engine.ServeHTTP(rec, req)
+
+			if tc.allowed {
+				require.Equal(t, http.StatusNoContent, rec.Code)
+			} else {
+				require.Equal(t, http.StatusUnauthorized, rec.Code,
+					"权限不足与令牌错误同形地返回 401（403 会泄露路由的权限档位）")
+			}
+		})
+	}
+}
+
+func TestRequireAdminRole_RejectsBadHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tokens := AdminTokens{Admin: "t-admin", Operator: "t-operator", Auditor: "t-auditor"}
+	engine := gin.New()
+	engine.Use(ErrorHandler(nil))
+	engine.Use(RequireAdminRole(tokens, RoleAuditor))
+	engine.GET("/x", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	// 与单一令牌时代同一套恶意头：三个角色上一律拒绝。
+	for _, header := range []string{
+		"Bearer t-auditor\r\n",
+		"Bearer t-auditor\x00",
+		"Bearer ",
+		"Basic dG9rZW4=",
+		"",
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		engine.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusUnauthorized, rec.Code, "header %q 应当被拒", header)
+	}
+}
+
+// TestRequireAdminRole_NoCandidateConfigured 一个候选令牌都没有 → 一律拒绝
+// （中间件自己就是最后一道闸，不依赖配置层校验）。
+func TestRequireAdminRole_NoCandidateConfigured(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	engine := gin.New()
+	engine.Use(ErrorHandler(nil))
+	engine.Use(RequireAdminRole(AdminTokens{Auditor: "t-auditor"}, RoleOperator))
+	engine.GET("/x", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	for _, token := range []string{"t-auditor", "anything"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/x", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		engine.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusUnauthorized, rec.Code)
+	}
+}

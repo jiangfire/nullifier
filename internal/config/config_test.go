@@ -780,3 +780,56 @@ crypto:
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "vk_path is required")
 }
+
+// TestLoad_AdminTokens 覆盖分级令牌：三档解析、release 模式「任一档即满足」、
+// admin 档两处配置不同值时启动失败。
+func TestLoad_AdminTokens(t *testing.T) {
+	// release 模式只配 auditor 档也满足「至少一枚令牌」。
+	configFile := writeRosterConfigFile(t, `
+server:
+  mode: release
+  admin_tokens:
+    auditor: tok-audit
+crypto:
+  vk_path: vk.bin
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+	setReleaseEligibilityEnv(t)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, "tok-audit", cfg.AdminTokens.Auditor)
+	require.Empty(t, cfg.AdminTokens.Admin)
+	require.Empty(t, cfg.AdminBearerToken)
+
+	// admin 档两处配置不同值 → 启动失败。
+	configFile = writeRosterConfigFile(t, `
+server:
+  mode: release
+  admin_bearer_token: legacy
+  admin_tokens:
+    admin: different
+crypto:
+  vk_path: vk.bin
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "keep one of them")
+
+	// 同值 = 等价于配了一处，放行。
+	configFile = writeRosterConfigFile(t, `
+server:
+  mode: release
+  admin_bearer_token: same
+  admin_tokens:
+    admin: same
+    operator: tok-op
+crypto:
+  vk_path: vk.bin
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+	cfg, err = Load()
+	require.NoError(t, err)
+	require.Equal(t, "tok-op", cfg.AdminTokens.Operator)
+}
