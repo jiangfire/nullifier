@@ -107,7 +107,7 @@ func TestHandler_InvalidPayload(t *testing.T) {
 	handler := NewHandlerWithTally(
 		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
-		usecase.NewProposalUseCase(nil, zap.NewNop()),
+		usecase.NewProposalUseCase(nil, nil, zap.NewNop()),
 		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
 		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		zap.NewNop(),
@@ -224,7 +224,7 @@ func TestHandler_FailureBranches_AdditionalCoverage(t *testing.T) {
 	handler := NewHandlerWithTally(
 		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
-		usecase.NewProposalUseCase(nil, zap.NewNop()),
+		usecase.NewProposalUseCase(nil, nil, zap.NewNop()),
 		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
 		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		zap.NewNop(),
@@ -649,7 +649,7 @@ func buildFullStackEngineWithVerifier(
 		credentialClaimRepo,
 		logger,
 	)
-	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
+	proposalUC := usecase.NewProposalUseCase(proposalRepo, nil, logger)
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(
 		voteRepo,

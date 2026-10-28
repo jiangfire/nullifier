@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"os"
+
 	"anonvote/internal/config"
 	"anonvote/internal/domain/entity"
+	"anonvote/internal/infrastructure/crypto/eligibility"
 	"anonvote/internal/infrastructure/persistence"
 
 	"github.com/gin-gonic/gin"
@@ -85,7 +88,7 @@ func TestProviders_WiringSmoke(t *testing.T) {
 		nil,
 		logger,
 	)
-	proposalUC := NewProposalUseCase(proposalRepo, logger)
+	proposalUC := NewProposalUseCase(proposalRepo, nil, logger)
 	participationUC := NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := NewTallyUseCase(voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo, thresholdCrypto, merkleBuilder, logger)
 	require.NotNil(t, votingUC)
@@ -206,4 +209,40 @@ func TestInitializeServer(t *testing.T) {
 		CreatedAt:  time.Now().UTC(),
 	}).Error
 	require.NoError(t, err)
+}
+
+// TestNewEligibilityService_FromRosterList 覆盖多名单配置的装配分支：
+// 配了 crypto.eligibility_roots 就按列表装配，解析按名字走。
+func TestNewEligibilityService_FromRosterList(t *testing.T) {
+	// provider 要读真的验证密钥文件（NewVerifier 会解析它），先真实生成一对。
+	_, verifyingKey, err := eligibility.GenerateKeys(eligibility.DefaultTreeDepth)
+	require.NoError(t, err)
+	vk := filepath.Join(t.TempDir(), "eligibility-vk.bin")
+	require.NoError(t, os.WriteFile(vk, verifyingKey, 0o600))
+
+	cfg := &config.Config{
+		EligibilityRosters: []config.EligibilityRosterConfig{
+			{
+				Name:             "acme-2026",
+				Root:             "2113d5db4b0f0a0f0f9d2c1c1e3b5a7d9c0e1f2a3b4c5d6e7f8091a2b3c4d5e6",
+				VerifyingKeyPath: vk,
+				Depth:            10,
+			},
+		},
+	}
+
+	service, err := NewEligibilityService(cfg)
+	require.NoError(t, err)
+	require.True(t, service.Enabled())
+
+	root, depth, err := service.RosterFor("acme-2026")
+	require.NoError(t, err)
+	require.NotEmpty(t, root)
+	require.Equal(t, 10, depth)
+
+	// 没配列表时走旧的单值入口（等价于 default 名单）。
+	legacy := &config.Config{}
+	disabled, err := NewEligibilityService(legacy)
+	require.NoError(t, err)
+	require.False(t, disabled.Enabled())
 }

@@ -46,6 +46,8 @@ type eligibilityFixture struct {
 	Members []eligibility.MemberPackage
 	// Prover 是客户端侧的证明器（持有 proving key）。
 	Prover *eligibility.Prover
+	// Depth 是这份名单的树深（0 取默认值）。
+	Depth int
 }
 
 // newEligibilityServer 起一个开启了资格校验的真实服务端。
@@ -56,7 +58,7 @@ func newEligibilityServer(t *testing.T, adminToken string, memberCount int) *eli
 
 	// 资格电路的密钥。proving key 只在客户端侧（这里是测试进程），服务端
 	// 只拿验证密钥。
-	provingKey, verifyingKey, err := eligibility.GenerateKeys()
+	provingKey, verifyingKey, err := eligibility.GenerateKeys(eligibility.DefaultTreeDepth)
 	require.NoError(t, err)
 	keyDir := t.TempDir()
 	verifyingKeyPath := filepath.Join(keyDir, "eligibility-vk.bin")
@@ -92,7 +94,7 @@ func newEligibilityServer(t *testing.T, adminToken string, memberCount int) *eli
 	merkleBuilder := crypto.NewGnarkMerkleRootBuilder()
 	logger := zap.NewNop()
 
-	eligibilityService, err := crypto.NewEligibilityService(root, verifyingKeyPath)
+	eligibilityService, err := crypto.NewEligibilityService(root, verifyingKeyPath, eligibility.DefaultTreeDepth)
 	require.NoError(t, err)
 	require.True(t, eligibilityService.Enabled())
 
@@ -104,7 +106,7 @@ func newEligibilityServer(t *testing.T, adminToken string, memberCount int) *eli
 		credentialRepo, proposalRepo, issuer, claimRepo, eligibilityUseRepo,
 		eligibilityService, logger,
 	)
-	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
+	proposalUC := usecase.NewProposalUseCase(proposalRepo, nil, logger)
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(
 		voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo,
@@ -173,7 +175,7 @@ func buildMemberPackages(t *testing.T, count int) (string, []eligibility.MemberP
 		leaves[i] = leaf
 	}
 
-	rootElement, paths, err := eligibility.BuildTree(leaves, eligibility.TreeDepth)
+	rootElement, paths, err := eligibility.BuildTree(leaves, eligibility.DefaultTreeDepth)
 	require.NoError(t, err)
 	root := eligibility.EncodeField(rootElement)
 
@@ -190,7 +192,7 @@ func buildMemberPackages(t *testing.T, count int) (string, []eligibility.MemberP
 			Index:    uint64(i),
 			Path:     path,
 			Root:     root,
-			Depth:    eligibility.TreeDepth,
+			Depth:    eligibility.DefaultTreeDepth,
 		})
 	}
 	return root, members
@@ -210,7 +212,11 @@ func eligibilityChallenge(t *testing.T, fixture *eligibilityFixture, proposalID 
 	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
 	require.Equal(t, fixture.Root, payload.Root, "服务端只认自己配置的那个根")
-	require.Equal(t, eligibility.TreeDepth, payload.Depth)
+	expectedDepth := fixture.Depth
+	if expectedDepth == 0 {
+		expectedDepth = eligibility.DefaultTreeDepth
+	}
+	require.Equal(t, expectedDepth, payload.Depth)
 	require.NotEmpty(t, payload.Challenge)
 	return payload.Challenge
 }

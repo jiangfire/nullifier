@@ -229,7 +229,7 @@ func testEngine(t *testing.T) *gin.Engine {
 	handler := httpapi.NewHandlerWithTally(
 		usecase.NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		usecase.NewRegisterUseCase(nil, nil, nil, zap.NewNop()),
-		usecase.NewProposalUseCase(nil, zap.NewNop()),
+		usecase.NewProposalUseCase(nil, nil, zap.NewNop()),
 		usecase.NewParticipationUseCase(nil, nil, zap.NewNop()),
 		usecase.NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, zap.NewNop()),
 		zap.NewNop(),

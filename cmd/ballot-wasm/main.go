@@ -60,6 +60,9 @@ type proveRequest struct {
 type eligibilityInitRequest struct {
 	// ProvingKey 是资格电路 proving key 的 base64 编码。
 	ProvingKey string `json:"proving_key"`
+	// Depth 是名单树深（可选）：proving key 是按深度生成的，成员包与
+	// 密钥必须是同一深度。缺省（0）取默认深度 10 —— 存量密钥都是它。
+	Depth int `json:"depth"`
 }
 
 // eligibilityProveRequest 是 proveEligibility 的入参。
@@ -221,7 +224,12 @@ func handleInitEligibility(this js.Value, args []js.Value) (result any) {
 		response["error"] = fmt.Sprintf("proving key 不是合法的 base64: %v", err)
 		return response
 	}
-	loaded, err := eligibility.NewProverFromBytes(raw)
+	// 深度缺省取默认值：存量 proving key 都是按默认深度生成的。
+	depth := request.Depth
+	if depth == 0 {
+		depth = eligibility.DefaultTreeDepth
+	}
+	loaded, err := eligibility.NewProverFromBytesAtDepth(raw, depth)
 	if err != nil {
 		response["error"] = fmt.Sprintf("加载资格 proving key 失败: %v", err)
 		return response

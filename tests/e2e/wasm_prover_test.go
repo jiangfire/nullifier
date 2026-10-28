@@ -160,7 +160,7 @@ func TestAPI_WASMProver_E2E(t *testing.T) {
 		proofVerifier, encrypter, issuer, logger,
 	)
 	registerUC := usecase.NewRegisterUseCase(credentialRepo, proposalRepo, issuer, logger)
-	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
+	proposalUC := usecase.NewProposalUseCase(proposalRepo, nil, logger)
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(
 		voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo,

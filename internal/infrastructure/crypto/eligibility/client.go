@@ -41,13 +41,13 @@ type ClientEligibilityResult struct {
 // 注定验不过的证明）。
 func (p *Prover) ProveEligibility(request ClientEligibilityRequest) (*ClientEligibilityResult, error) {
 	pack := request.MemberPackage
-	if pack.Depth != TreeDepth {
+	if pack.Depth != p.depth {
 		return nil, fmt.Errorf("%w: member package depth %d does not match circuit depth %d",
-			ErrInvalidProof, pack.Depth, TreeDepth)
+			ErrInvalidProof, pack.Depth, p.depth)
 	}
-	if len(pack.Path) != TreeDepth {
+	if len(pack.Path) != p.depth {
 		return nil, fmt.Errorf("%w: member package path must have %d elements, got %d",
-			ErrInvalidProof, TreeDepth, len(pack.Path))
+			ErrInvalidProof, p.depth, len(pack.Path))
 	}
 	if request.Root == "" {
 		return nil, fmt.Errorf("%w: root is required", ErrInvalidProof)
@@ -81,7 +81,7 @@ func (p *Prover) ProveEligibility(request ClientEligibilityRequest) (*ClientElig
 			ErrInvalidProof)
 	}
 
-	path := make([]fr.Element, TreeDepth)
+	path := make([]fr.Element, p.depth)
 	for i, raw := range pack.Path {
 		element, err := DecodeField(raw)
 		if err != nil {

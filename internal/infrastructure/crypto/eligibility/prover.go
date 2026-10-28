@@ -20,25 +20,44 @@ var ErrInvalidProof = errors.New("invalid eligibility proof")
 // Prover 用 proving key 生成资格证明。
 //
 // proving key 只在客户端侧使用（浏览器 WASM 或 CLI），不进服务端。
+// depth 是本实例编译电路时的树深 —— proving key 是 per-depth 的，
+// 深度不匹配的成员包在这里就会被拒。
 type Prover struct {
 	compiled frontend.CompiledConstraintSystem
 	key      groth16.ProvingKey
+	depth    int
 }
 
-// NewProver 从 proving key 文件加载证明器。
+// NewProver 从 proving key 文件加载证明器（默认树深）。
 func NewProver(provingKeyPath string) (*Prover, error) {
+	return NewProverAtDepth(provingKeyPath, DefaultTreeDepth)
+}
+
+// NewProverAtDepth 从 proving key 文件加载证明器，按给定树深编译电路。
+//
+// proving key 是按深度生成的：密钥与深度的配对错了，出证明这一步就会失败 ——
+// 宁可在这里失败，也不要出一份注定验不过的证明。
+func NewProverAtDepth(provingKeyPath string, depth int) (*Prover, error) {
 	raw, err := os.ReadFile(provingKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("read proving key: %w", err)
 	}
-	return NewProverFromBytes(raw)
+	return NewProverFromBytesAtDepth(raw, depth)
 }
 
-// NewProverFromBytes 从 proving key 字节流加载证明器。
+// NewProverFromBytes 从 proving key 字节流加载证明器（默认树深）。
 //
 // 浏览器端没有文件路径：proving key 由门户下载后直接交给 WASM 模块，
 // 走的就是这个入口。
 func NewProverFromBytes(raw []byte) (*Prover, error) {
+	return NewProverFromBytesAtDepth(raw, DefaultTreeDepth)
+}
+
+// NewProverFromBytesAtDepth 从 proving key 字节流加载证明器，按给定树深编译电路。
+func NewProverFromBytesAtDepth(raw []byte, depth int) (*Prover, error) {
+	if err := ValidateTreeDepth(depth); err != nil {
+		return nil, err
+	}
 	if len(raw) == 0 {
 		return nil, fmt.Errorf("decode proving key: empty proving key")
 	}
@@ -46,11 +65,16 @@ func NewProverFromBytes(raw []byte) (*Prover, error) {
 	if _, err := key.ReadFrom(bytes.NewReader(raw)); err != nil {
 		return nil, fmt.Errorf("decode proving key: %w", err)
 	}
-	compiled, err := compileCircuit()
+	compiled, err := compileCircuit(depth)
 	if err != nil {
 		return nil, err
 	}
-	return &Prover{compiled: compiled, key: key}, nil
+	return &Prover{compiled: compiled, key: key, depth: depth}, nil
+}
+
+// Depth 返回本证明器编译电路时的树深。
+func (p *Prover) Depth() int {
+	return p.depth
 }
 
 // Prove 生成资格证明。
@@ -62,9 +86,9 @@ func (p *Prover) Prove(
 	index uint64,
 	path []fr.Element,
 ) ([]byte, error) {
-	if len(path) != TreeDepth {
+	if len(path) != p.depth {
 		return nil, fmt.Errorf("%w: merkle path must have %d elements, got %d",
-			ErrInvalidProof, TreeDepth, len(path))
+			ErrInvalidProof, p.depth, len(path))
 	}
 	pathVars := make([]frontend.Variable, len(path))
 	for i := range path {
@@ -148,11 +172,12 @@ func (v *Verifier) Verify(proofBytes []byte, statement Statement) error {
 	return nil
 }
 
-// GenerateKeys 生成资格电路的 proving key 与 verifying key。
+// GenerateKeys 生成资格电路的 proving key 与 verifying key（按给定树深）。
 //
 // verifying key 部署到服务端；proving key 只在客户端侧使用，不能入库。
-func GenerateKeys() (provingKey []byte, verifyingKey []byte, err error) {
-	compiled, err := compileCircuit()
+// **每深度一套密钥**：换深度 = 重新生成密钥 = 重新生成名单，三项必须成套。
+func GenerateKeys(depth int) (provingKey []byte, verifyingKey []byte, err error) {
+	compiled, err := compileCircuit(depth)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -170,19 +195,25 @@ func GenerateKeys() (provingKey []byte, verifyingKey []byte, err error) {
 	return pkBuf.Bytes(), vkBuf.Bytes(), nil
 }
 
-// Constraints 返回电路的约束条数（供文档与测试引用）。
-func Constraints() (int, error) {
-	compiled, err := compileCircuit()
+// Constraints 返回电路在给定树深下的约束条数（供文档与测试引用）。
+func Constraints(depth int) (int, error) {
+	compiled, err := compileCircuit(depth)
 	if err != nil {
 		return 0, err
 	}
 	return compiled.GetNbConstraints(), nil
 }
 
-// compileCircuit 编译资格电路。
-func compileCircuit() (frontend.CompiledConstraintSystem, error) {
+// compileCircuit 按给定树深编译资格电路。
+//
+// 电路形状由模板实例的 Path 切片长度决定 —— 深度因此是运行期参数，
+// 而不是编译期常量。宽度（位分解、上溯层数）在 Define 里取 len(c.Path)。
+func compileCircuit(depth int) (frontend.CompiledConstraintSystem, error) {
+	if err := ValidateTreeDepth(depth); err != nil {
+		return nil, err
+	}
 	compiled, err := frontend.Compile(ecc.BN254, r1cs.NewBuilder, &eligibilityCircuit{
-		Path: make([]frontend.Variable, TreeDepth),
+		Path: make([]frontend.Variable, depth),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compile eligibility circuit: %w", err)

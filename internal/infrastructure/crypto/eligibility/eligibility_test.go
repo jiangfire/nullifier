@@ -31,7 +31,7 @@ func buildTestList(t *testing.T, memberIDs []string) (root string, packages []Me
 		leaves[i] = leaf
 	}
 
-	rootElement, paths, err := BuildTree(leaves, TreeDepth)
+	rootElement, paths, err := BuildTree(leaves, DefaultTreeDepth)
 	require.NoError(t, err)
 	root = EncodeField(rootElement)
 
@@ -48,7 +48,7 @@ func buildTestList(t *testing.T, memberIDs []string) (root string, packages []Me
 			Index:    uint64(i),
 			Path:     path,
 			Root:     root,
-			Depth:    TreeDepth,
+			Depth:    DefaultTreeDepth,
 		}
 	}
 	return root, packages
@@ -64,9 +64,9 @@ func hexString(raw []byte) string {
 }
 
 func TestConstraintsAreReasonable(t *testing.T) {
-	count, err := Constraints()
+	count, err := Constraints(DefaultTreeDepth)
 	require.NoError(t, err)
-	// Merkle 上溯 TreeDepth 次 + 两次哈希，每个 MiMC 约 550 条约束。
+	// Merkle 上溯 DefaultTreeDepth 次 + 两次哈希，每个 MiMC 约 550 条约束。
 	// 这个上限是「电路没有意外膨胀」的护栏，不是性能承诺。
 	require.Less(t, count, 12000, "资格电路的约束数超出预期")
 	require.Greater(t, count, 1000)
@@ -76,7 +76,7 @@ func TestConstraintsAreReasonable(t *testing.T) {
 func TestProverVerifierRoundTrip(t *testing.T) {
 	root, packages := buildTestList(t, []string{"member-1", "member-2", "member-3"})
 
-	provingKey, verifyingKey, err := GenerateKeys()
+	provingKey, verifyingKey, err := GenerateKeys(DefaultTreeDepth)
 	require.NoError(t, err)
 	prover, err := NewProverFromBytes(provingKey)
 	require.NoError(t, err)
@@ -102,7 +102,7 @@ func TestProverVerifierRoundTrip(t *testing.T) {
 func TestQualificationIDIsStablePerMemberAndProposal(t *testing.T) {
 	root, packages := buildTestList(t, []string{"member-1", "member-2"})
 
-	provingKey, _, err := GenerateKeys()
+	provingKey, _, err := GenerateKeys(DefaultTreeDepth)
 	require.NoError(t, err)
 	prover, err := NewProverFromBytes(provingKey)
 	require.NoError(t, err)
@@ -149,7 +149,7 @@ func TestQualificationIDIsStablePerMemberAndProposal(t *testing.T) {
 func TestTamperedProofIsRejected(t *testing.T) {
 	root, packages := buildTestList(t, []string{"member-1", "member-2"})
 
-	provingKey, verifyingKey, err := GenerateKeys()
+	provingKey, verifyingKey, err := GenerateKeys(DefaultTreeDepth)
 	require.NoError(t, err)
 	prover, err := NewProverFromBytes(provingKey)
 	require.NoError(t, err)
@@ -198,7 +198,7 @@ func TestTamperedProofIsRejected(t *testing.T) {
 func TestMemberPackageTamperingIsRejected(t *testing.T) {
 	root, packages := buildTestList(t, []string{"member-1", "member-2"})
 
-	provingKey, _, err := GenerateKeys()
+	provingKey, _, err := GenerateKeys(DefaultTreeDepth)
 	require.NoError(t, err)
 	prover, err := NewProverFromBytes(provingKey)
 	require.NoError(t, err)

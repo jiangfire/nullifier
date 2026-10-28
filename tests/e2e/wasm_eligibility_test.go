@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 
 	"anonvote/internal/infrastructure/crypto/ballot"
@@ -49,16 +50,18 @@ async function waitForApi() {
 }
 
 (async () => {
-  const [wasmPath, provingKeyPath, requestPath, outputPath] = process.argv.slice(2);
+  const [wasmPath, provingKeyPath, requestPath, outputPath, depthArg] = process.argv.slice(2);
   const go = new Go();
   const bytes = fs.readFileSync(wasmPath);
   const { instance } = await WebAssembly.instantiate(bytes, go.importObject);
   go.run(instance);
   const api = await waitForApi();
 
-  const initResult = api.initEligibility(
-    JSON.stringify({ proving_key: fs.readFileSync(provingKeyPath).toString('base64') }),
-  );
+  const initPayload = { proving_key: fs.readFileSync(provingKeyPath).toString('base64') };
+  if (depthArg) {
+    initPayload.depth = parseInt(depthArg, 10);
+  }
+  const initResult = api.initEligibility(JSON.stringify(initPayload));
   if (!initResult.ok) {
     throw new Error('initEligibility failed: ' + initResult.error);
   }
@@ -106,7 +109,7 @@ func TestAPI_WASMEligibilityProver_E2E(t *testing.T) {
 	}
 
 	// 资格电路的密钥：proving key 在客户端侧（WASM 模块），验证密钥在服务端。
-	provingKey, verifyingKey, err := eligibility.GenerateKeys()
+	provingKey, verifyingKey, err := eligibility.GenerateKeys(eligibility.DefaultTreeDepth)
 	require.NoError(t, err)
 	keyDir := t.TempDir()
 	provingKeyPath := filepath.Join(keyDir, "eligibility-proving.key")
@@ -171,7 +174,7 @@ func buildWASMMemberPackage(t *testing.T) (string, eligibility.MemberPackage) {
 	leaf, err := eligibility.DeriveLeaf(secret)
 	require.NoError(t, err)
 	rootElement, paths, err := eligibility.BuildTree(
-		[]fr.Element{leaf}, eligibility.TreeDepth,
+		[]fr.Element{leaf}, eligibility.DefaultTreeDepth,
 	)
 	require.NoError(t, err)
 	root := eligibility.EncodeField(rootElement)
@@ -188,11 +191,12 @@ func buildWASMMemberPackage(t *testing.T) (string, eligibility.MemberPackage) {
 		Index:    0,
 		Path:     path,
 		Root:     root,
-		Depth:    eligibility.TreeDepth,
+		Depth:    eligibility.DefaultTreeDepth,
 	}
 }
 
 // runWASMEligibilityProver 用 node 驱动 WASM 模块的资格证明 API。
+// depthArg 非空时作为 initEligibility 的 depth 传入（非默认深度用）。
 func runWASMEligibilityProver(
 	t *testing.T,
 	node string,
@@ -200,6 +204,7 @@ func runWASMEligibilityProver(
 	wasmPath string,
 	provingKeyPath string,
 	request map[string]any,
+	depthArg ...string,
 ) wasmEligibilityOutput {
 	t.Helper()
 	dir := t.TempDir()
@@ -211,7 +216,9 @@ func runWASMEligibilityProver(
 	require.NoError(t, os.WriteFile(requestPath, requestBytes, 0o600))
 	outputPath := filepath.Join(dir, "output.json")
 
-	cmd := exec.Command(node, driverPath, wasmPath, provingKeyPath, requestPath, outputPath)
+	args := []string{driverPath, wasmPath, provingKeyPath, requestPath, outputPath}
+	args = append(args, depthArg...)
+	cmd := exec.Command(node, args...)
 	cmd.Env = append(os.Environ(), "GOROOT="+runtime.GOROOT())
 	combined, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(combined))
@@ -221,4 +228,91 @@ func runWASMEligibilityProver(
 	var output wasmEligibilityOutput
 	require.NoError(t, json.Unmarshal(raw, &output))
 	return output
+}
+
+// TestAPI_WASMEligibilityProverNonDefaultDepth_E2E 是「深度是运行期参数」的
+// 浏览器链路证据：深度 4 的密钥与名单，WASM 以 depth=4 初始化并出证明，
+// 服务端用同一深度的验证密钥验过。缺 node 或胶水时跳过。
+func TestAPI_WASMEligibilityProverNonDefaultDepth_E2E(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node 不在 PATH 上，跳过 WASM 资格 prover 验收")
+	}
+	glue := filepath.Join(runtime.GOROOT(), "lib", "wasm", "wasm_exec.js")
+	if _, err := os.Stat(glue); err != nil {
+		t.Skip("找不到 Go 官方 wasm_exec.js 胶水，跳过 WASM 资格 prover 验收")
+	}
+
+	// 深度 4 的密钥与名单：keygen -depth 4 / eligibility-list -depth 4 的产物形态。
+	provingKey, verifyingKey, err := eligibility.GenerateKeys(eligibility.MinTreeDepth)
+	require.NoError(t, err)
+	keyDir := t.TempDir()
+	provingKeyPath := filepath.Join(keyDir, "eligibility-proving-depth4.key")
+	require.NoError(t, os.WriteFile(provingKeyPath, provingKey, 0o600))
+
+	root, pack := buildWASMMemberPackageAtDepth(t, eligibility.MinTreeDepth)
+
+	wasmPath := buildWASMProver(t)
+	const proposalID = "proposal-wasm-eligibility-depth4"
+	const challenge = "00aabbccddeeff00112233445566778899aabbccddeeff001122334455667788"
+	request := map[string]any{
+		"proposal_id":    proposalID,
+		"challenge":      challenge,
+		"root":           root,
+		"member_package": pack,
+	}
+	output := runWASMEligibilityProver(
+		t, node, glue, wasmPath, provingKeyPath, request,
+		strconv.Itoa(eligibility.MinTreeDepth),
+	)
+
+	require.True(t, output.Init.OK, output.Init.Error)
+	require.True(t, output.Prove.OK, output.Prove.Error)
+	require.NotEmpty(t, output.Prove.Proof)
+	t.Logf(
+		"WASM 资格 prover（深度 %d）: init %dms, prove %dms",
+		eligibility.MinTreeDepth, output.Init.InitMS, output.Prove.ProveMS,
+	)
+
+	verifier, err := eligibility.NewVerifierFromBytes(verifyingKey)
+	require.NoError(t, err)
+	proof, err := base64.StdEncoding.DecodeString(output.Prove.Proof)
+	require.NoError(t, err)
+	statement, err := eligibility.BuildStatement(
+		root, proposalID, challenge, output.Prove.QualificationID,
+	)
+	require.NoError(t, err)
+	require.NoError(t, verifier.Verify(proof, statement))
+}
+
+// buildWASMMemberPackageAtDepth 是 buildWASMMemberPackage 的深度参数版。
+func buildWASMMemberPackageAtDepth(t *testing.T, depth int) (string, eligibility.MemberPackage) {
+	t.Helper()
+
+	raw := make([]byte, eligibility.FieldSize)
+	_, err := rand.Read(raw)
+	require.NoError(t, err)
+	secret, err := eligibility.CanonicalSecret(raw)
+	require.NoError(t, err)
+
+	leaf, err := eligibility.DeriveLeaf(secret)
+	require.NoError(t, err)
+	rootElement, paths, err := eligibility.BuildTree([]fr.Element{leaf}, depth)
+	require.NoError(t, err)
+	root := eligibility.EncodeField(rootElement)
+
+	path := make([]string, len(paths[0]))
+	for i, element := range paths[0] {
+		path[i] = eligibility.EncodeField(element)
+	}
+
+	return root, eligibility.MemberPackage{
+		MemberID: "member-wasm",
+		Secret:   hex.EncodeToString(secret),
+		Leaf:     eligibility.EncodeField(leaf),
+		Index:    0,
+		Path:     path,
+		Root:     root,
+		Depth:    depth,
+	}
 }

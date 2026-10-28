@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"testing"
 
+	"anonvote/internal/infrastructure/crypto/eligibility"
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -91,4 +93,38 @@ func TestDefaultKeyNames(t *testing.T) {
 
 	_, _, err = defaultKeyNames("nope")
 	require.Error(t, err)
+}
+
+// TestRunGeneratesEligibilityKeysAtCustomDepth 覆盖非默认树深：depth 4 的
+// 密钥对能按该深度加载使用（v0.4.0 起深度是部署决策，每深度一套密钥）。
+func TestRunGeneratesEligibilityKeysAtCustomDepth(t *testing.T) {
+	dir := t.TempDir()
+
+	require.Equal(t, 0, run([]string{
+		"-circuit", "eligibility", "-depth", "4", "-dir", dir,
+	}))
+
+	provingKey, err := os.ReadFile(filepath.Join(dir, eligibilityProvingKeyFileName))
+	require.NoError(t, err)
+	prover, err := eligibility.NewProverFromBytesAtDepth(provingKey, 4)
+	require.NoError(t, err)
+	require.Equal(t, 4, prover.Depth())
+
+	// 同一密钥按默认深度（10）加载也要能构造（ReadFrom 不看深度），
+	// 但电路形状对不上 —— 这由 ProveEligibility 的包深度校验兜住（见
+	// eligibility 包的 TestProverRejectsDepthMismatch），这里只锁「加载入口
+	// 必须显式带深度」这件事：0 会被拒绝，防止调用方忘了传。
+	_, err = eligibility.NewProverFromBytesAtDepth(provingKey, 0)
+	require.Error(t, err)
+}
+
+func TestRunRejectsDepthOutsideRange(t *testing.T) {
+	require.Equal(t, 2, run([]string{"-circuit", "eligibility", "-depth", "3", "-dir", t.TempDir()}))
+	require.Equal(t, 2, run([]string{"-circuit", "eligibility", "-depth", "25", "-dir", t.TempDir()}))
+}
+
+// TestRunRejectsDepthForBallotCircuit 钉住「深度只属于资格电路」：
+// 选票电路没有名单树，带上 -depth 是调用方搞错了对象。
+func TestRunRejectsDepthForBallotCircuit(t *testing.T) {
+	require.Equal(t, 2, run([]string{"-circuit", "ballot", "-depth", "4", "-dir", t.TempDir()}))
 }

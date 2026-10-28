@@ -11,14 +11,26 @@
 // 对应到任何成员**（它没有成员包，也没有名单）。这是能力 G（分发不泄露身份）
 // 与「一人一票」能同时成立的关键。
 //
+// 名单来源（v0.4.0 起）：`.txt` 每行一个成员标识；`.csv` 走表头解析
+// （默认取第一列，`-id-column` 指定列名；UTF-8 BOM 容错 —— Excel 导出常态）。
+// **重复成员默认拒绝**：真实名单里混入重复行时，静默去重会让一个成员悄悄
+// 失去资格且无人知道 —— 宁可拒绝生成，让人先清洗名单。
+//
+// 生成之后用 `-verify <目录>` 离线校验产出：逐个成员包从秘密重导叶子、沿路径
+// 上溯到根，与 root.json 比对 —— 退出码 0 / 1 / 2 可当门禁用。
+//
 // 用法：
 //
 //	go run ./cmd/eligibility-list -members members.txt -out ./eligibility-out
+//	go run ./cmd/eligibility-list -members roster.csv -id-column 工号 -out ./out -label "2026 年度大会"
+//	go run ./cmd/eligibility-list -verify ./eligibility-out
 package main
 
 import (
 	"bufio"
 	"crypto/rand"
+	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -28,6 +40,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"anonvote/internal/infrastructure/crypto/eligibility"
 
@@ -38,17 +51,25 @@ func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
-// run 解析参数并生成名单，返回进程退出码。
+// run 解析参数并执行，返回进程退出码。
 func run(args []string) int {
 	fs := flag.NewFlagSet("nullifier-eligibility-list", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	membersPath := fs.String("members", "", "file with one member id per line")
+	membersPath := fs.String("members", "", "member list file (.txt: one id per line; .csv: header row + -id-column)")
 	outDir := fs.String("out", "./eligibility-out", "directory to write the list root and member packages into")
+	// 名单树的深度。它决定名单规模上限（2^depth 人），且 root / 验证密钥 /
+	// 深度必须与服务端成套 —— 换深度等于换名单换密钥。
+	depth := fs.Int("depth", eligibility.DefaultTreeDepth,
+		"Merkle tree depth; the list can hold at most 2^depth members")
 	force := fs.Bool("force", false, "overwrite existing files")
+	label := fs.String("label", "", "free-form roster label recorded in root.json (roster source, election name, ...)")
+	idColumn := fs.String("id-column", "", "CSV column holding the member id (default: the first column)")
+	verifyDir := fs.String("verify", "", "verify an existing output directory instead of generating a list")
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			fmt.Fprintln(os.Stdout, "用法: nullifier-eligibility-list -members <名单文件> [-out <目录>] [-force]")
+			fmt.Fprintln(os.Stdout, "用法: nullifier-eligibility-list -members <名单文件> [-depth <树深>] [-out <目录>] [-force] [-label <标注>] [-id-column <CSV 列名>]")
+			fmt.Fprintln(os.Stdout, "      nullifier-eligibility-list -verify <产出目录>")
 			fs.SetOutput(os.Stdout)
 			fs.PrintDefaults()
 			return 0
@@ -56,12 +77,27 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "参数错误: %v\n", err)
 		return 2
 	}
+
+	// 校验模式：不生成，只核对一份已有的产出。
+	if strings.TrimSpace(*verifyDir) != "" {
+		if err := verifyList(*verifyDir); err != nil {
+			fmt.Fprintf(os.Stderr, "校验未通过: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stdout, "校验通过: %s\n", *verifyDir)
+		return 0
+	}
+
 	if strings.TrimSpace(*membersPath) == "" {
-		fmt.Fprintln(os.Stderr, "必须提供 -members")
+		fmt.Fprintln(os.Stderr, "必须提供 -members（或用 -verify 校验已有产出）")
+		return 2
+	}
+	if err := eligibility.ValidateTreeDepth(*depth); err != nil {
+		fmt.Fprintf(os.Stderr, "参数错误: %v\n", err)
 		return 2
 	}
 
-	memberIDs, err := readMembers(*membersPath)
+	memberIDs, err := readMembers(*membersPath, *idColumn)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "读取名单失败: %v\n", err)
 		return 1
@@ -71,42 +107,107 @@ func run(args []string) int {
 		return 1
 	}
 
-	if err := generateList(memberIDs, *outDir, *force); err != nil {
+	if err := generateList(memberIDs, *outDir, *depth, *label, *force); err != nil {
 		fmt.Fprintf(os.Stderr, "生成名单失败: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(os.Stdout, "资格名单已生成: %d 名成员, 树深 %d\n", len(memberIDs), eligibility.TreeDepth)
+	fmt.Fprintf(os.Stdout, "资格名单已生成: %d 名成员, 树深 %d（规模上限 %d 人）\n",
+		len(memberIDs), *depth, 1<<uint(*depth))
 	fmt.Fprintf(os.Stdout, "名单树根（部署到服务端 crypto.eligibility_root）: %s\n",
 		filepath.Join(*outDir, "root.json"))
 	fmt.Fprintf(os.Stdout, "成员资格包: %s/eligibility-<member_id>.json —— 逐个走安全渠道发给本人\n", *outDir)
+	fmt.Fprintf(os.Stdout, "发完之后用 -verify %s 核对产出成套\n", *outDir)
 	return 0
 }
 
-// readMembers 读名单文件：每行一个成员标识，空行与 # 开头的行忽略。
-func readMembers(path string) ([]string, error) {
+// readMembers 读名单文件，返回排序去重后的成员标识。
+//
+// `.csv` 走表头解析：首行是表头，成员 ID 列由 -id-column 指定（缺省第一列）；
+// 其余按纯文本处理（每行一个标识，空行与 # 开头的行忽略）。UTF-8 BOM 容错。
+//
+// **重复成员是错误**，不是可容忍的输入：静默去重会让一个成员悄悄失去资格
+// 且无人知道 —— 名单少一个人比生成失败严重得多。报错列出全部重复项，
+// 让运营方先清洗名单。
+func readMembers(path string, idColumn string) ([]string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open members file: %w", err)
 	}
 	defer func() { _ = file.Close() }()
 
-	seen := map[string]struct{}{}
-	members := make([]string, 0, 64)
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+	var (
+		seen    = map[string]int{}
+		members = make([]string, 0, 64)
+	)
+
+	if strings.EqualFold(filepath.Ext(path), ".csv") {
+		reader := csv.NewReader(bufio.NewReader(file))
+		// Excel 导出常见 BOM；csv 不认它，会把第一列的列名读成 "\ufeffid"。
+		reader.FieldsPerRecord = -1 // 列数按行容错，缺列在下面显式检查。
+		records, err := reader.ReadAll()
+		if err != nil {
+			return nil, fmt.Errorf("read csv: %w", err)
 		}
-		if _, duplicated := seen[line]; duplicated {
-			continue
+		if len(records) == 0 {
+			return nil, errors.New("csv file is empty")
 		}
-		seen[line] = struct{}{}
-		members = append(members, line)
+		header := records[0]
+		for i := range header {
+			// Excel 导出常在文件头放 UTF-8 BOM，会粘在第一个列表名上。
+			header[i] = strings.TrimPrefix(strings.TrimSpace(header[i]), "\ufeff")
+		}
+		column := 0
+		if strings.TrimSpace(idColumn) != "" {
+			column = -1
+			for i, name := range header {
+				if name == strings.TrimSpace(idColumn) {
+					column = i
+					break
+				}
+			}
+			if column < 0 {
+				return nil, fmt.Errorf("column %q not found in csv header (%s)",
+					idColumn, strings.Join(header, ", "))
+			}
+		} else if len(header) == 0 {
+			return nil, errors.New("csv header is empty")
+		}
+		for _, record := range records[1:] {
+			if column >= len(record) {
+				return nil, fmt.Errorf("csv row %s is missing the id column", strings.Join(record, ","))
+			}
+			id := strings.TrimSpace(record[column])
+			if id == "" {
+				continue
+			}
+			members = append(members, id)
+		}
+	} else {
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			members = append(members, line)
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("read members file: %w", err)
+		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read members file: %w", err)
+
+	// 重复检查放在格式解析之后、写盘之前：报错要列出全部重复项。
+	for _, id := range members {
+		if first, duplicated := seen[id]; duplicated {
+			return nil, fmt.Errorf(
+				"名单里有重复成员 %q（第 %d 行与第 %d 行）；请先清洗名单 —— "+
+					"静默去重会让一个成员悄悄失去资格",
+				id, first+1, len(members),
+			)
+		}
+		seen[id] = len(members)
 	}
+
 	// 排序让成员的位置是**确定的**：同一份名单每次生成时成员的叶子位置一致。
 	// 但资格秘密每次运行都会重新随机生成，所以**两次运行的树根不一样** ——
 	// 名单与成员包必须成套保存，不能只留 root。
@@ -115,7 +216,17 @@ func readMembers(path string) ([]string, error) {
 }
 
 // generateList 生成树根与成员包并落盘。
-func generateList(memberIDs []string, outDir string, force bool) error {
+func generateList(memberIDs []string, outDir string, depth int, label string, force bool) error {
+	// 名单装不下要在**写任何文件之前**说清楚，并且告诉运营方出路 ——
+	// 深度决定规模上限（2^depth），装不下就换更深的树重新生成
+	// （密钥也要跟着换：每深度一套密钥）。
+	if capacity := 1 << uint(depth); len(memberIDs) > capacity {
+		return fmt.Errorf(
+			"名单有 %d 名成员，超过树深 %d 的容量上限 %d 人；用 -depth 换更深的树（并重新生成配套密钥）",
+			len(memberIDs), depth, capacity,
+		)
+	}
+
 	// 撞名预检必须在**写任何文件之前**做完。
 	//
 	// 成员包的文件名由成员标识归一化而来（sanitizeFileName），而归一化会把
@@ -151,7 +262,7 @@ func generateList(memberIDs []string, outDir string, force bool) error {
 		leaves[i] = leaf
 	}
 
-	root, paths, err := eligibility.BuildTree(leaves, eligibility.TreeDepth)
+	root, paths, err := eligibility.BuildTree(leaves, depth)
 	if err != nil {
 		return fmt.Errorf("build tree: %w", err)
 	}
@@ -162,9 +273,11 @@ func generateList(memberIDs []string, outDir string, force bool) error {
 	}
 
 	list := eligibility.ListPackage{
-		Root:  rootHex,
-		Depth: eligibility.TreeDepth,
-		Count: len(memberIDs),
+		Root:        rootHex,
+		Depth:       depth,
+		Count:       len(memberIDs),
+		Label:       strings.TrimSpace(label),
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
 	// 成员包先写，root.json **最后**写。
@@ -186,7 +299,7 @@ func generateList(memberIDs []string, outDir string, force bool) error {
 			Index:    uint64(i),
 			Path:     path,
 			Root:     rootHex,
-			Depth:    eligibility.TreeDepth,
+			Depth:    depth,
 		}
 		name := memberFileName(memberID)
 		if err := writeJSON(filepath.Join(outDir, name), pack, 0o600, force); err != nil {
@@ -196,6 +309,111 @@ func generateList(memberIDs []string, outDir string, force bool) error {
 
 	if err := writeJSON(filepath.Join(outDir, "root.json"), list, 0o644, force); err != nil {
 		return err
+	}
+	return nil
+}
+
+// verifyList 离线校验一份产出目录。
+//
+// 核对四件事：① root.json 可解析且深度合法；② 每个成员包的叶子由它自己的
+// 秘密推出（包没被改过）；③ 每条路径沿包里记的位置上溯，真的通到 root.json
+// 的根（路径没有被换过）；④ 包数与 root.json 声称的成员数一致（没丢包）。
+// 任何一条不满足都返回错误 —— 退出码非 0，可当门禁用。
+func verifyList(dir string) error {
+	raw, err := os.ReadFile(filepath.Join(dir, "root.json"))
+	if err != nil {
+		return fmt.Errorf("read root.json: %w", err)
+	}
+	var list eligibility.ListPackage
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return fmt.Errorf("parse root.json: %w", err)
+	}
+	if err := eligibility.ValidateTreeDepth(list.Depth); err != nil {
+		return fmt.Errorf("root.json: %w", err)
+	}
+	expectedRoot, err := eligibility.DecodeField(list.Root)
+	if err != nil {
+		return fmt.Errorf("root.json: invalid root: %w", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read directory: %w", err)
+	}
+	verified := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, "eligibility-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return fmt.Errorf("read %s: %w", name, err)
+		}
+		var pack eligibility.MemberPackage
+		if err := json.Unmarshal(raw, &pack); err != nil {
+			return fmt.Errorf("parse %s: %w", name, err)
+		}
+		if err := verifyMemberPackage(&pack, &list, expectedRoot); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		verified++
+	}
+
+	if verified != list.Count {
+		return fmt.Errorf(
+			"目录里有 %d 份成员包，root.json 声称 %d 名成员 —— 有包丢了或没发完，这份名单不能上线",
+			verified, list.Count,
+		)
+	}
+	if verified == 0 {
+		return errors.New("目录里没有任何成员包")
+	}
+	return nil
+}
+
+// verifyMemberPackage 校验单个成员包的自洽性。
+func verifyMemberPackage(pack *eligibility.MemberPackage, list *eligibility.ListPackage, expectedRoot fr.Element) error {
+	if pack.Depth != list.Depth {
+		return fmt.Errorf("package depth %d does not match list depth %d", pack.Depth, list.Depth)
+	}
+	if len(pack.Path) != pack.Depth {
+		return fmt.Errorf("package path has %d elements, expected %d", len(pack.Path), pack.Depth)
+	}
+	if pack.Root != list.Root {
+		return errors.New("package was issued for a different list root")
+	}
+
+	secret, err := decodeHex(pack.Secret)
+	if err != nil {
+		return fmt.Errorf("decode secret: %w", err)
+	}
+	leaf, err := eligibility.DeriveLeaf(secret)
+	if err != nil {
+		return fmt.Errorf("derive leaf: %w", err)
+	}
+	packLeaf, err := eligibility.DecodeField(pack.Leaf)
+	if err != nil {
+		return fmt.Errorf("decode leaf: %w", err)
+	}
+	if !leaf.Equal(&packLeaf) {
+		return errors.New("leaf does not match the secret (package was modified)")
+	}
+
+	path := make([]fr.Element, len(pack.Path))
+	for i, raw := range pack.Path {
+		element, err := eligibility.DecodeField(raw)
+		if err != nil {
+			return fmt.Errorf("decode path element %d: %w", i, err)
+		}
+		path[i] = element
+	}
+	walked, err := eligibility.WalkPath(leaf, pack.Index, path)
+	if err != nil {
+		return fmt.Errorf("walk path: %w", err)
+	}
+	if !walked.Equal(&expectedRoot) {
+		return errors.New("path does not lead to the list root")
 	}
 	return nil
 }
@@ -280,4 +498,13 @@ func hexString(raw []byte) string {
 		out = append(out, digits[b>>4], digits[b&0x0f])
 	}
 	return string(out)
+}
+
+// decodeHex 解析十六进制字节串（verify 用）。
+func decodeHex(value string) ([]byte, error) {
+	raw, err := hex.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("decode hex: %w", err)
+	}
+	return raw, nil
 }

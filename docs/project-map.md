@@ -661,6 +661,12 @@ publish        → 提案必须已关闭（isProposalClosed）
    - **守法**：往限流器里加字段时别把明文来源塞进 `digest` 的输入之外的地方（比如别拿它做日志或指标标签）。
 44. **限流是进程内的，多副本下额度按副本数放大。** 没有 Redis 等外部状态：一个副本一份计数，实际额度 = 配额的**副本数倍**。别把「多副本」当成「额度是全局的」。
 45. **压测会被限流挡住。** `cmd/loadtest` 的所有请求来自同一台机器，共享同一个来源额度 —— 测服务端容量时**先调高额度或关掉限流**，否则测出来的是限流阈值而不是服务端容量（关限流只允许在 debug 模式）。这条与陷阱 38 是一对：压测工具是「服务端扛不扛得住」的唯一证据来源，它被限流挡住，容量结论同样失真。
+46. **资格名单的「树深」是部署参数，每深度一套密钥（v0.4.0）。** 电路形状由编译模板的 `Path` 切片长度决定（不再有编译期 `TreeDepth` 常量），`DefaultTreeDepth = 10` 只是缺省值。深度进了**五处**：keygen（`-depth`）、服务端配置（`crypto.eligibility_depth` / 每条 roster 的 `depth`）、成员包（`Depth` 字段，客户端 prover 以它为准）、WASM `initEligibility`（`depth` 参数，门户从成员包传入）、名单工具（`-depth`）。**root / 验证密钥 / 深度必须成套** —— 三项不成套的失败形态是「证明必败」（包深度校验先拦，电路形状对不上再拦）。默认深度 10 有跨语言锁（Go `TestDefaultTreeDepthIsTheLegacyShape` + TS 资格 prover 测试），单边改动必红。
+   - **守法**：改深度相关任何一处时，五处一起看；改默认值先想存量名单与密钥（它们全是深度 10）。
+47. **多名单并存时，空 `eligibility_scope` 的解析是 fail-closed 的。** 解析规则：提案绑定了名字 → 精确匹配；未绑定（空）→ 名为 `default` 的名单，只配了一套时取它；多套且无 `default` → **报错**（不猜）。提案创建时绑定不存在的名单域 → 400（`ScopeKnown` 前置校验），但**空 scope 不做创建时校验** —— 它是否可解析取决于届时服务器的名单配置，领取链路上由 `RosterFor` 兜底（解析失败 → 该提案的资格校验报错，不给槽位）。
+   - **守法**：改解析规则时先想「多套且无 default」与「单套」两个场景；`tests/e2e/multi_roster_eligibility_test.go` 把四个场景都钉了。
+48. **权限不足与令牌错误同形地返回 401，不要改回 403。** 管理面三级令牌（admin ⊃ operator ⊃ auditor）的中间件对所有失败（缺头、畸形头、令牌不对、角色不够）都返回 401 —— 回 403 会告诉持低级令牌的人「这个路由存在，且需要更高权限」。新增管理端路由时把它挂到对应角色组（`operator` / `auditor`，`server.go`），别用 `RequireAdminBearerToken`（那是旧入口，等价于单令牌 admin 档）。
+   - **守法**：动鉴权先跑 `internal/infrastructure/http/middleware/admin_auth_test.go` 的角色包含矩阵与 `internal/infrastructure/http/admin_roles_test.go` 的 HTTP 级矩阵。
 
 ---
 

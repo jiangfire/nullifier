@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	domaincrypto "anonvote/internal/domain/crypto"
 	"anonvote/internal/domain/entity"
 	"anonvote/internal/domain/repository"
 
@@ -20,6 +21,12 @@ type CreateProposalRequest struct {
 	Options     []string
 	StartsAt    time.Time
 	EndsAt      time.Time
+	// EligibilityScope 是要绑定的资格名单域（可选）。
+	//
+	// 绑定不存在的名单域在**创建时**就被拒绝（400）—— 不留到第一个投票人来
+	// 领取时才失败。服务端没开启资格校验时禁止绑定：一个永远解析不出名单的
+	// 绑定只会把人引进死胡同。
+	EligibilityScope string
 }
 
 func (r *CreateProposalRequest) Validate() error {
@@ -56,17 +63,23 @@ func (r *CreateProposalRequest) Validate() error {
 }
 
 type ProposalUseCase struct {
-	repo   repository.ProposalRepository
-	logger *zap.Logger
+	repo        repository.ProposalRepository
+	eligibility domaincrypto.EligibilityService
+	logger      *zap.Logger
 }
 
-func NewProposalUseCase(repo repository.ProposalRepository, logger *zap.Logger) *ProposalUseCase {
+func NewProposalUseCase(
+	repo repository.ProposalRepository,
+	eligibility domaincrypto.EligibilityService,
+	logger *zap.Logger,
+) *ProposalUseCase {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	return &ProposalUseCase{
-		repo:   repo,
-		logger: logger,
+		repo:        repo,
+		eligibility: eligibility,
+		logger:      logger,
 	}
 }
 
@@ -83,16 +96,31 @@ func (uc *ProposalUseCase) Create(ctx context.Context, req *CreateProposalReques
 		return nil, fmt.Errorf("marshal proposal options: %w", err)
 	}
 
+	// 名单域绑定：存在性在创建时就核过，领取链路（挑战 / 证明校验）据此解析。
+	scope := strings.TrimSpace(req.EligibilityScope)
+	if scope != "" {
+		if uc.eligibility == nil || !uc.eligibility.Enabled() {
+			return nil, fmt.Errorf(
+				"%w: the server does not verify eligibility proofs; eligibility_scope cannot be set",
+				ErrInvalidRequest,
+			)
+		}
+		if !uc.eligibility.ScopeKnown(scope) {
+			return nil, fmt.Errorf("%w: unknown eligibility scope %q", ErrInvalidRequest, scope)
+		}
+	}
+
 	proposal := &entity.Proposal{
-		ID:          uuid.NewString(),
-		Title:       req.Title,
-		Description: req.Description,
-		OptionsJSON: string(optionsJSON),
-		Options:     options,
-		Status:      "open",
-		StartsAt:    req.StartsAt.UTC(),
-		EndsAt:      req.EndsAt.UTC(),
-		CreatedAt:   time.Now().UTC(),
+		ID:               uuid.NewString(),
+		Title:            req.Title,
+		Description:      req.Description,
+		OptionsJSON:      string(optionsJSON),
+		Options:          options,
+		Status:           "open",
+		StartsAt:         req.StartsAt.UTC(),
+		EndsAt:           req.EndsAt.UTC(),
+		CreatedAt:        time.Now().UTC(),
+		EligibilityScope: scope,
 	}
 	if err := uc.repo.Save(ctx, proposal); err != nil {
 		return nil, fmt.Errorf("save proposal: %w", err)

@@ -25,11 +25,16 @@ func (m *eligibilityServiceMock) Enabled() bool {
 	return args.Bool(0)
 }
 
-func (m *eligibilityServiceMock) Root() (string, int, error) {
-	args := m.Called()
+func (m *eligibilityServiceMock) RosterFor(scope string) (string, int, error) {
+	args := m.Called(scope)
 	root, _ := args.Get(0).(string)
 	depth, _ := args.Get(1).(int)
 	return root, depth, args.Error(2)
+}
+
+func (m *eligibilityServiceMock) ScopeKnown(scope string) bool {
+	args := m.Called(scope)
+	return args.Bool(0)
 }
 
 func (m *eligibilityServiceMock) NewChallenge() (string, error) {
@@ -38,11 +43,12 @@ func (m *eligibilityServiceMock) NewChallenge() (string, error) {
 	return challenge, args.Error(1)
 }
 
-func (m *eligibilityServiceMock) Verify(
+func (m *eligibilityServiceMock) VerifyFor(
+	scope string,
 	proof []byte,
 	statement domaincrypto.EligibilityStatement,
 ) error {
-	args := m.Called(proof, statement)
+	args := m.Called(scope, proof, statement)
 	return args.Error(0)
 }
 
@@ -89,7 +95,7 @@ func TestRegisterUseCase_IssueEligibilityChallenge(t *testing.T) {
 
 	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
 	eligibility.On("Enabled").Return(true).Once()
-	eligibility.On("Root").Return(testEligibilityRoot, 10, nil).Once()
+	eligibility.On("RosterFor", mock.Anything).Return(testEligibilityRoot, 10, nil).Once()
 	eligibility.On("NewChallenge").Return(testEligibilityChallenge, nil).Once()
 
 	challenge, err := uc.IssueEligibilityChallenge(context.Background(), "p-1")
@@ -161,8 +167,8 @@ func TestRegisterUseCase_ReserveCredential_InvalidEligibilityProof(t *testing.T)
 	}
 	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
 	eligibility.On("Enabled").Return(true).Once()
-	eligibility.On("Root").Return(testEligibilityRoot, 10, nil).Once()
-	eligibility.On("Verify", []byte("proof"), domaincrypto.EligibilityStatement{
+	eligibility.On("RosterFor", mock.Anything).Return(testEligibilityRoot, 10, nil).Once()
+	eligibility.On("VerifyFor", mock.Anything, []byte("proof"), domaincrypto.EligibilityStatement{
 		Root:            testEligibilityRoot,
 		ProposalID:      "p-1",
 		Challenge:       testEligibilityChallenge,
@@ -196,8 +202,8 @@ func TestRegisterUseCase_ReserveCredential_RecordsEligibilityUse(t *testing.T) {
 	}
 	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
 	eligibility.On("Enabled").Return(true).Once()
-	eligibility.On("Root").Return(testEligibilityRoot, 10, nil).Once()
-	eligibility.On("Verify", mock.Anything, mock.Anything).Return(nil).Once()
+	eligibility.On("RosterFor", mock.Anything).Return(testEligibilityRoot, 10, nil).Once()
+	eligibility.On("VerifyFor", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
 	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
 		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
 		Once()
@@ -234,8 +240,8 @@ func TestRegisterUseCase_ReserveCredential_EligibilityAlreadyUsed(t *testing.T) 
 	}
 	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
 	eligibility.On("Enabled").Return(true).Once()
-	eligibility.On("Root").Return(testEligibilityRoot, 10, nil).Once()
-	eligibility.On("Verify", mock.Anything, mock.Anything).Return(nil).Once()
+	eligibility.On("RosterFor", mock.Anything).Return(testEligibilityRoot, 10, nil).Once()
+	eligibility.On("VerifyFor", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
 	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
 		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
 		Once()
@@ -297,8 +303,8 @@ func TestRegisterUseCase_ReserveCredential_RequiresUseRepository(t *testing.T) {
 	}
 	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
 	eligibility.On("Enabled").Return(true).Once()
-	eligibility.On("Root").Return(testEligibilityRoot, 10, nil).Once()
-	eligibility.On("Verify", mock.Anything, mock.Anything).Return(nil).Once()
+	eligibility.On("RosterFor", mock.Anything).Return(testEligibilityRoot, 10, nil).Once()
+	eligibility.On("VerifyFor", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
 	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
 		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
 		Once()
@@ -307,4 +313,86 @@ func TestRegisterUseCase_ReserveCredential_RequiresUseRepository(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "eligibility use repository")
 	assert.Nil(t, reservation)
+}
+
+// TestRegisterUseCase_EligibilityResolvesProposalScope 验证名单域按**提案绑定**
+// 解析：提案绑定了哪套名单，挑战与证明校验就用哪套的根与验证密钥。
+func TestRegisterUseCase_EligibilityResolvesProposalScope(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	eligibilityRepo := new(eligibilityUseRepositoryMock)
+	eligibility := new(eligibilityServiceMock)
+
+	uc := NewRegisterUseCaseWithEligibility(
+		repo, proposalRepo, issuer, claimRepo, eligibilityRepo, eligibility, zap.NewNop(),
+	)
+
+	scoped := &entity.Proposal{ID: "p-1", EligibilityScope: "acme-2026"}
+
+	// 挑战：把提案绑定的名单域传给 RosterFor。
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(scoped, nil).Once()
+	eligibility.On("Enabled").Return(true).Once()
+	eligibility.On("RosterFor", "acme-2026").Return(testEligibilityRoot, 4, nil).Once()
+	eligibility.On("NewChallenge").Return(testEligibilityChallenge, nil).Once()
+
+	challenge, err := uc.IssueEligibilityChallenge(context.Background(), "p-1")
+	require.NoError(t, err)
+	assert.Equal(t, testEligibilityRoot, challenge.Root)
+	assert.Equal(t, 4, challenge.Depth)
+
+	// 领取校验：同样按提案绑定的名单域走。
+	material := &EligibilityMaterial{
+		Proof:           []byte("proof"),
+		QualificationID: testQualificationID,
+		Challenge:       testEligibilityChallenge,
+	}
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(scoped, nil).Once()
+	eligibility.On("Enabled").Return(true).Once()
+	eligibility.On("RosterFor", "acme-2026").Return(testEligibilityRoot, 4, nil).Once()
+	eligibility.On("VerifyFor", "acme-2026", []byte("proof"), domaincrypto.EligibilityStatement{
+		Root:            testEligibilityRoot,
+		ProposalID:      "p-1",
+		Challenge:       testEligibilityChallenge,
+		QualificationID: testQualificationID,
+	}).Return(nil).Once()
+	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
+		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
+		Once()
+	eligibilityRepo.On("RecordUse", mock.Anything, mock.Anything).Return(nil).Once()
+	issuer.On("IssuerPublicKey", mock.Anything).Return(testIssuerKey(), nil).Once()
+
+	reservation, err := uc.ReserveCredential(context.Background(), "p-1", material)
+	require.NoError(t, err)
+	assert.Equal(t, "pseudonym-1", reservation.UserID)
+}
+
+// TestRegisterUseCase_EligibilityScopeResolutionFailure 名单域解析失败时领取被拒
+// （fail-closed），且不消耗池槽位。
+func TestRegisterUseCase_EligibilityScopeResolutionFailure(t *testing.T) {
+	proposalRepo := new(proposalRepositoryMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	eligibility := new(eligibilityServiceMock)
+
+	uc := NewRegisterUseCaseWithEligibility(
+		new(credentialRepositoryMock), proposalRepo, new(credentialIssuerMock),
+		claimRepo, new(eligibilityUseRepositoryMock), eligibility, zap.NewNop(),
+	)
+
+	material := &EligibilityMaterial{
+		Proof:           []byte("proof"),
+		QualificationID: testQualificationID,
+		Challenge:       testEligibilityChallenge,
+	}
+	proposalRepo.On("GetByID", mock.Anything, "p-1").
+		Return(&entity.Proposal{ID: "p-1", EligibilityScope: "gone-2026"}, nil).Once()
+	eligibility.On("Enabled").Return(true).Once()
+	eligibility.On("RosterFor", "gone-2026").
+		Return("", 0, errors.New("unknown eligibility roster")).Once()
+
+	reservation, err := uc.ReserveCredential(context.Background(), "p-1", material)
+	require.Error(t, err)
+	assert.Nil(t, reservation)
+	claimRepo.AssertNotCalled(t, "ReserveAvailable", mock.Anything, mock.Anything, mock.Anything)
 }

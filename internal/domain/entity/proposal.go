@@ -13,4 +13,10 @@ type Proposal struct {
 	StartsAt    time.Time `json:"starts_at"`
 	EndsAt      time.Time `json:"ends_at"`
 	CreatedAt   time.Time `gorm:"not null" json:"created_at"`
+	// EligibilityScope 是本提案绑定的资格名单域（名字，可空）。
+	//
+	// 一台服务端可以并存多套名单（v0.4.0 起）：挑战签发与证明校验都按这个
+	// 名字解析到对应名单的根、验证密钥与树深。为空表示未显式绑定 —— 取
+	// 名为 default 的名单，只配置了一套名单时取它。
+	EligibilityScope string `gorm:"size:64" json:"eligibility_scope,omitempty"`
 }

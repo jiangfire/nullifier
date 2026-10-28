@@ -87,7 +87,15 @@ async function runProver(message: ProverWorkerMessage): Promise<ProverResult | E
   const provingKey = toBase64(new Uint8Array(await keyResponse.arrayBuffer()));
 
   if (message.type === 'proveEligibility') {
-    const initResult = api.initEligibility(JSON.stringify({ proving_key: provingKey }));
+    // proving key 是按名单树深生成的：深度以**成员包**为准（名单工具生成时
+    // 写入），缺省（老成员包没有深度字段以外的情况）由 WASM 侧取默认值 10。
+    // 深度不匹配会在出证明这一步当场失败 —— 宁可失败也不出注定验不过的证明。
+    const initResult = api.initEligibility(
+      JSON.stringify({
+        proving_key: provingKey,
+        depth: message.request.member_package.depth,
+      }),
+    );
     if (!initResult.ok) {
       throw new Error(initResult.error ?? '加载资格 proving key 失败');
     }

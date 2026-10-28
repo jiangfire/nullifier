@@ -16,6 +16,22 @@ crypto:
   vk_path: ""
   issuer_key_path: "issuer_keys.json"
   issuer_rotate_days: 90
+  # 资格名单（一人一票）。
+  # debug 模式可以什么都不配（资格校验关闭，谁都能反复领票）。
+  # 树深可配（4–24，默认 10）：root / 验证密钥 / 深度必须成套，
+  # 换深度要重新 `nullifier-keygen -circuit eligibility -depth N` 与
+  # `nullifier-eligibility-list -depth N`。
+  eligibility_root: ""
+  eligibility_vk_path: ""
+  eligibility_depth: 10
+  # 多套名单并存（可选，配了它就不能再配上面的单值写法）：
+  # 每套名单一个名字，创建提案时用 eligibility_scope 绑定；
+  # 名为 default 的一套同时充当未绑定提案的默认名单。
+  # eligibility_roots:
+  #   - name: default
+  #     root: "16e575fde58737063900c70ffbe3480860ca3e0c73641281cdc5c7ab79ecafd0"
+  #     vk_path: "./keys/eligibility-verifying.key"
+  #     depth: 10
 
 # 限流。release 模式下默认开启，显式设成 false 会让服务启动失败。
 #

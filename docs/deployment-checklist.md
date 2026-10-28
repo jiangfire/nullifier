@@ -105,8 +105,8 @@
 |---|---|---|
 | 选票证明**验证**密钥 | `go run ./cmd/keygen -dir ./keys` → `keys/verifying.key`，**服务端**要有 | ☐ |
 | 选票证明**证明**密钥 | `keys/proving.key` —— **分发给投票人**（CLI 用它跑 `ballot-prove`），**不要**放进服务端，也别提交仓库 | ☐ |
-| 资格证明**验证**密钥 | `go run ./cmd/keygen -circuit eligibility -dir ./keys` → `keys/eligibility-verifying.key`，**服务端**要有 | ☐ |
-| 资格证明**证明**密钥 | `keys/eligibility-proving.key` —— **只给客户端**（CLI 用它出资格证明；门户用 `make web-eligibility-key` 放进静态目录），**不要**放进服务端，也别提交仓库 | ☐ |
+| 资格证明**验证**密钥 | `go run ./cmd/keygen -circuit eligibility -dir ./keys` → `keys/eligibility-verifying.key`，**服务端**要有。名单超过 1024 人时换 `-depth N`（4–24；**每深度一套密钥**，root / 验证密钥 / 树深必须成套换） | ☐ |
+| 资格证明**证明**密钥 | `keys/eligibility-proving.key` —— **只给客户端**（CLI 用它出资格证明；门户用 `make web-eligibility-key` 放进静态目录），**不要**放进服务端，也别提交仓库。**与验证密钥同一深度** | ☐ |
 | 资格名单树根 | `cmd/eligibility-list` 产出的 `root.json` 里的 `root`（64 位 hex）→ 填进 `crypto.eligibility_root`。**它不是密钥，但它是秘密的一半** | ☐ |
 | 凭证签发密钥 | 由服务端首次启动时生成到 `crypto.issuer_key_path`（默认 `issuer_keys.json`），权限 `0600` | ☐ |
 
@@ -139,12 +139,24 @@
   「张三-01」与「李四-01」都归一成 `eligibility-__-01.json`。共用一个包名意味着
   有一个人拿不到自己的包（或拿到别人的），**一人一票当场失效**。
   → **标识请用只含字母数字与 `-_.` 的形式**（工号 / 选民编号 / 会员号通常如此）。
-- **生成后核对一遍**：目录里 `eligibility-*.json` 的**个数**应当与 `root.json` 里的
-  `count` **相等**。不等就说明产物不完整，**不要把 root 配到服务端**。
+- **生成后核对一遍**：`cmd/eligibility-list -verify <产出目录>` 一条命令核对
+  （v0.4.0 起）—— 逐个成员包重导叶子、沿路径上溯到根、包数与 `count` 一致，
+  退出码非 0 就是不能上线。
+- **⚠️ 重复成员会被拒绝生成**（v0.4.0 起）：名单源里有重复行时工具直接报错并列出
+  重复项 —— 旧行为是**静默丢弃**，那会让一个成员悄悄失去资格。名单被拒后先清洗
+  名单再重跑。
+- **名单源支持 CSV**（v0.4.0 起）：`.csv` 文件走表头解析（成员 ID 默认取第一列，
+  `-id-column` 指定列名；带 UTF-8 BOM 的 Excel 导出可以直接用）。
 - **名单工具的运行机器不要与投票服务放在同一台机器上**：`cmd/eligibility-list` 是
   离线工具，跑在运营方（或独立登记处）的机器上，不联网、不连服务端。
 - **名单可以换**：root 一换，服务端配置跟着换即可，**密钥不用重生成** ——
-  前提是树深不变（`TreeDepth=10` 是编译期常量）。改树深就要重新编译并重生成密钥。
+  前提是树深不变。**树深是部署参数**（v0.4.0 起，4–24，默认 10）：改树深 =
+  每深度一套密钥 —— `keygen -depth N` 重出密钥、`eligibility-list -depth N`
+  重出名单，**root / 验证密钥 / 树深三项成套**配进服务端，门户静态目录换对应
+  深度的 eligibility proving key。三项不成套 = 资格证明必败。
+- **多场投票并存**（v0.4.0 起）：`crypto.eligibility_roots` 配多套命名名单，
+  提案创建时用 `eligibility_scope` 绑定其中一套（不绑走名为 `default` 的那套）。
+  名单名重复、或与旧单值写法混配，服务**启动失败**。
 - **换名单后旧成员包失效**（root 对不上了），但**已经用掉的资格不会自动释放** ——
   `eligibility_uses` 里的记录不会因为换名单而清空。真要重新投票，开新提案。
 
@@ -159,14 +171,20 @@
    选票那套另起一次：`go run ./cmd/keygen -dir keys` → `keys/verifying.key` +
    `keys/proving.key`。
 2. **生成资格名单**（在名单机上，离线，与投票服务**不同机**）：
-   `go run ./cmd/eligibility-list -members <权威名单.txt> -out <目录>`
+   `go run ./cmd/eligibility-list -members <权威名单> -out <目录> [-depth N] [-label "<来源>"]`
+   （名单源支持 `.txt` 与 `.csv`；超过 2^depth 人时换 `-depth`）
    → `<目录>/root.json`（**给服务端配置**）与每成员一份
    `<目录>/eligibility-<成员>.json`（权限 0600，**走安全渠道发给本人**）。
+   发完后 `cmd/eligibility-list -verify <目录>` 核对成套。
 3. **配服务端**：填 `crypto.eligibility_root`（`root.json` 里的 `root`）与
    `crypto.eligibility_vk_path`（步骤 1 的 `keys/eligibility-verifying.key`）。
-   两项**必须成对** —— 只配一个，服务**启动失败**。
-4. **迁移数据库**：`nullifier-server -migrate`（新增 `eligibility_uses` 表）。
-5. **起服务端**：`GET /healthz` 的 `eligibility` 字段必须是 `true`。
+   两项**必须成对** —— 只配一个，服务**启动失败**。非默认树深时**三件成套**：
+   `crypto.eligibility_depth` 也要配成步骤 1/2 用的那个深度。
+   多套名单用 `crypto.eligibility_roots` 列表（配置文件，见模板注释）。
+4. **迁移数据库**：`nullifier-server -migrate`（新增 `eligibility_uses` 表；
+   v0.4.0 起还有 `proposals.eligibility_scope` 列）。
+5. **起服务端**：`GET /healthz` 的 `eligibility` 字段必须是 `true`
+   （多名单部署核一眼 `eligibility_rosters` 等于配置的套数）。
 6. **发布门户静态资源**：`make web-wasm` →
    `make web-proving-key PK=keys/proving.key` →
    `make web-eligibility-key PK=keys/eligibility-proving.key` →
@@ -199,11 +217,12 @@
 | 变量 | 要求 | 缺失后果 |
 |---|---|---|
 | `SERVER_MODE=release` | 必须是 `release` / `prod` / `production` | 不设就按开发模式跑，debug 入口可达 |
-| `SERVER_ADMIN_BEARER_TOKEN` | 长期稳定的强随机值 | release 模式下**直接启动失败** |
+| `SERVER_ADMIN_BEARER_TOKEN` | 长期稳定的强随机值（或用 `SERVER_ADMIN_TOKENS_ADMIN` / `_OPERATOR` / `_AUDITOR` 分级令牌，任一档即满足；旧单值 = admin 档） | release 模式下一枚令牌都没有**直接启动失败** |
 | `SERVER_CORS_ALLOWED_ORIGINS` | 门户真实源，多个用**空格**分隔（不是逗号） | 门户与后端不同源时浏览器拦掉所有请求 |
 | `CRYPTO_VK_PATH` | `verifying.key` 的路径 | release 模式下**直接启动失败** |
 | `CRYPTO_ELIGIBILITY_ROOT` | 资格名单树根（64 位 hex 的域元素，来自 `root.json`） | release 模式下**直接启动失败** |
 | `CRYPTO_ELIGIBILITY_VK_PATH` | 资格电路 verifying key（`eligibility-verifying.key`）的路径 | release 模式下**直接启动失败** |
+| `CRYPTO_ELIGIBILITY_DEPTH` | 可选，默认 10（范围 4–24）；非默认树深时与 root / 验证密钥**成套**配 | 三项不成套 = 资格证明必败（多套名单用配置文件的 `crypto.eligibility_roots` 列表） |
 | `DB_DRIVER=postgres` | 显式设置 | 落到 SQLite 文件库 |
 | `DB_HOST` `DB_PORT` `DB_NAME` `DB_USER` `DB_PASSWORD` `DB_SSLMODE` | 按环境填 | 连不上库 |
 | `DB_MAX_OPEN_CONNS` | 建议显式设置（默认 25） | 不限制连接数会打爆 PG 的 `max_connections` |

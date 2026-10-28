@@ -135,10 +135,23 @@ func NewCredentialIssuer(cfg *config.Config) domaincrypto.CredentialIssuer {
 
 // NewEligibilityService 造资格校验服务。
 //
-// 没配置名单根与验证密钥时它返回「未开启」的服务（开发环境的降级形态）；
-// 只配一半则直接报错 —— 那等于「不校验」。
+// 配了名单列表（crypto.eligibility_roots）就按列表装配；否则用旧的单值写法
+// （等价于一套名为 default 的名单）。没配置名单根与验证密钥时它返回「未开启」
+// 的服务（开发环境的降级形态）；只配一半则直接报错 —— 那等于「不校验」。
 func NewEligibilityService(cfg *config.Config) (domaincrypto.EligibilityService, error) {
-	return cryptoinfra.NewEligibilityService(cfg.EligibilityRoot, cfg.EligibilityVerifyingKeyPath)
+	if len(cfg.EligibilityRosters) > 0 {
+		specs := make([]cryptoinfra.RosterSpec, len(cfg.EligibilityRosters))
+		for i := range cfg.EligibilityRosters {
+			specs[i] = cryptoinfra.RosterSpec{
+				Name:             cfg.EligibilityRosters[i].Name,
+				Root:             cfg.EligibilityRosters[i].Root,
+				VerifyingKeyPath: cfg.EligibilityRosters[i].VerifyingKeyPath,
+				Depth:            cfg.EligibilityRosters[i].Depth,
+			}
+		}
+		return cryptoinfra.NewEligibilityServiceFromSpecs(specs)
+	}
+	return cryptoinfra.NewEligibilityService(cfg.EligibilityRoot, cfg.EligibilityVerifyingKeyPath, cfg.EligibilityDepth)
 }
 
 func NewVotingUseCase(
@@ -187,9 +200,10 @@ func NewRegisterUseCase(
 
 func NewProposalUseCase(
 	repo repository.ProposalRepository,
+	eligibility domaincrypto.EligibilityService,
 	logger *zap.Logger,
 ) *usecase.ProposalUseCase {
-	return usecase.NewProposalUseCase(repo, logger)
+	return usecase.NewProposalUseCase(repo, eligibility, logger)
 }
 
 func NewParticipationUseCase(

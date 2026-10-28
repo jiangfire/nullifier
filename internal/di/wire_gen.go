@@ -41,7 +41,7 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		return nil, err
 	}
 	registerUseCase := NewRegisterUseCase(credentialRepository, proposalRepository, credentialIssuer, credentialClaimRepository, eligibilityUseRepository, eligibilityService, logger)
-	proposalUseCase := NewProposalUseCase(proposalRepository, logger)
+	proposalUseCase := NewProposalUseCase(proposalRepository, eligibilityService, logger)
 	participationUseCase := NewParticipationUseCase(participationRepository, credentialRepository, logger)
 	tallyResultRepository := NewTallyResultRepository(db)
 	auditAnchorRepository := NewAuditAnchorRepository(db)

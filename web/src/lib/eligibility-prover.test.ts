@@ -102,3 +102,34 @@ describe('资格证明请求体的可克隆性', () => {
     expect(structuredClone(request).member_package.path).toEqual(['a', 'b']);
   });
 });
+
+/**
+ * 默认树深的跨语言锁（TS 半边）。
+ *
+ * v0.4.0 起名单树深是运行期参数（4–24），但**默认值 10** 是 v0.2.0 存量名单
+ * 与密钥的口径：成员包没带深度时（理论上不该有，但门户对旧包要宽容）WASM 侧
+ * 取的就是它。Go 半边的断言在
+ * `internal/infrastructure/crypto/eligibility/depth_test.go` 的
+ * `TestDefaultTreeDepthIsTheLegacyShape` —— 两边各钉一条，单边改动必红。
+ */
+describe('默认树深的跨语言锁', () => {
+  it('深度是数字并原样进入请求体（WASM 以它初始化电路）', () => {
+    const request = buildEligibilityProveRequest({
+      proposalId: 'p1',
+      challenge: 'challenge-hex',
+      root: 'root-hex',
+      memberPackage: {
+        member_id: 'member-1',
+        secret: 'secret',
+        leaf: 'leaf',
+        index: 0,
+        path: ['a', 'b'],
+        root: 'root-hex',
+        depth: 10,
+      },
+    });
+
+    expect(request.member_package.depth).toBe(10);
+    expect(typeof request.member_package.depth).toBe('number');
+  });
+});

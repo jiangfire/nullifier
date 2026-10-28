@@ -76,7 +76,7 @@ func newBlindSignatureServer(
 	registerUC := usecase.NewRegisterUseCaseWithPool(
 		credentialRepo, proposalRepo, issuer, claimRepo, logger,
 	)
-	proposalUC := usecase.NewProposalUseCase(proposalRepo, logger)
+	proposalUC := usecase.NewProposalUseCase(proposalRepo, nil, logger)
 	participationUC := usecase.NewParticipationUseCase(participationRepo, credentialRepo, logger)
 	tallyUC := usecase.NewTallyUseCase(
 		voteRepo, proposalRepo, sessionRepo, resultRepo, anchorRepo,
