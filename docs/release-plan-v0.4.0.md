@@ -8,8 +8,12 @@
 >
 > 分支：`feat/v0.4.0-scale-and-tenancy`（从 `main` 切出）
 > 制定日期：2026-10-28
-> 状态：**已实现，待发版**（2026-10-28 升格为里程碑 M5 并当轮落地 —— 四张任务卡
-> T29 / T30 / T31 / T32 全部完成，出口标准 §5 逐条有证据，落地记录见 §8）
+> 状态：**已发布**（2026-10-28）—— 四张任务卡 T29 / T30 / T31 / T32 当轮落地，
+> 出口标准 §5 逐条有证据（§8）；tag `v0.4.0` 已推，release 流水线 run
+> `40701797909` **8 个 job 全绿**，GitHub Release **12 个产物**已下载核验
+> （门户包含 `ballot-prover.wasm` 与 `wasm_exec.js`，sha256 一致；两把 proving key
+> 按设计不在包里）；**已合并回 `main` @ `4188a09`**（PR #12），分支已删除。
+> 发版点由 tag `v0.4.0` 独立保留。
 
 ---
 
@@ -168,7 +172,7 @@ v0.3.0、v0.4.0）。
 | 6 | `go build` / `go vet` / `gofmt -l` / `go test ./...` 全绿；覆盖率门槛退出码 0 | ✅ **已过**（2026-10-28：24 个包全绿；覆盖率门槛 **81.42%** 达标，`internal/di` 因新增装配分支补了 provider 测试后回绿） |
 | 7 | 前端 lint / tsc / vitest 全绿；`make web-e2e`（真浏览器两条路径）通过 | ✅ **已过**（eslint / tsc 零输出；vitest 19 文件 160 用例全过；`web-e2e` 真浏览器 1 passed（2.2m），release 模式服务端 + 计票还原 + 一人一票拒绝，healthz 已报 `eligibility_rosters`） |
 | 8 | 文档闭合：techspec / deployment-checklist / project-map / roadmap / CHANGELOG 全部更新 | ✅ **已过**（techspec §3.5 / §5.2 / §5.3 / §6.11；部署清单 §2 / §2.1 / §2.2 / §3；project-map 陷阱 46–48；契约文档 §4 加法记录；配置模板与 env 样例；CHANGELOG 0.4.0 段） |
-| 9 | `VERSION` = `0.4.0`，tag `v0.4.0` 已推，release 流水线全绿，产物已核验 | ⬜ 发布步骤见 §7 |
+| 9 | `VERSION` = `0.4.0`，tag `v0.4.0` 已推，release 流水线全绿，产物已核验 | ✅ **已过**（run `40701797909` 8 个 job 全绿：verify / build×5 平台 / web / release；12 个产物在 [GitHub Release](https://github.com/jiangfire/nullifier/releases/tag/v0.4.0)；门户包与 windows 包 sha256 下载核验一致，门户包内 `ballot-prover.wasm` magic 合法、`wasm_exec.js` 在、两把 proving key 不在；发布的 windows 服务端二进制本机冒烟：debug 模式起服务 `/healthz` 带 `eligibility_rosters`、无令牌 POST /proposals 401、旧投票路径 404；release 模式缺密钥正确拒绝启动） |
 
 ---
 
@@ -187,13 +191,13 @@ v0.3.0、v0.4.0）。
 
 ## 7. 发布步骤
 
-1. `VERSION` → `0.4.0`；`CHANGELOG.md` 写 0.4.0 条目（含部署动作清单）。✅
-2. 分支 `feat/v0.4.0-scale-and-tenancy` 推送 → PR → 合并回 `main`。
-3. 打**注解 tag** `v0.4.0`（release workflow 用 tag 说明当 release 正文）并推送。
-4. 监控 release 流水线（verify / build×5 平台 / web / release 八个 job）全绿。
+1. `VERSION` → `0.4.0`；`CHANGELOG.md` 写 0.4.0 条目（含部署动作清单）。✅（`e5356ed` / CHANGELOG 随文档提交 `0af326a` 落在分支上）
+2. 分支 `feat/v0.4.0-scale-and-tenancy` 推送 → PR → 合并回 `main`。✅（PR #12，CI 三个 job 全绿：go 4m56s / web 37s / web-e2e 4m20s；合并 commit `4188a09`，分支已删除）
+3. 打**注解 tag** `v0.4.0`（release workflow 用 tag 说明当 release 正文）并推送。✅
+4. 监控 release 流水线（verify / build×5 平台 / web / release 八个 job）全绿。✅（run `40701797909`：verify 3m25s / 五平台 build 1m16s–4m08s / web 38s / release 12s）
 5. `gh release view v0.4.0` 核验 12 个产物（5 平台二进制 + 门户包，各带 sha256），
-   门户包含 `ballot-prover.wasm` 与 `wasm_exec.js`（两把 proving key 按设计不在包里）。
-6. 回填本文件 §8 落地记录与路线图 M5 进展表。
+   门户包含 `ballot-prover.wasm` 与 `wasm_exec.js`（两把 proving key 按设计不在包里）。✅（门户包与 windows 包已下载核验；另对发布的 windows 服务端二进制做了本机冒烟）
+6. 回填本文件 §8 落地记录与路线图 M5 进展表。✅（本提交）
 
 ---
 
