@@ -68,11 +68,17 @@ func NewServer(cfg *config.Config, handler *Handler, logger *zap.Logger) *Server
 		// 两种模式的行为完全一致 —— 服务端没有「替用户选票」的调试能力。
 		//
 		// eligibility 报出服务端**是否在强制一人一票**：没开的话任何人都能
-		// 反复领票，这是运营必须能一眼看到的运行状态。
+		// 反复领票，这是运营必须能一眼看到的运行状态。eligibility_rosters
+		// 报出并存名单的套数（多名单是 v0.4.0 起的能力，单名单部署是 1）。
+		rosters := len(cfg.EligibilityRosters)
+		if rosters == 0 && cfg.EligibilityRoot != "" {
+			rosters = 1
+		}
 		c.JSON(200, gin.H{
-			"status":      "ok",
-			"debug":       cfg.DebugMode,
-			"eligibility": cfg.EligibilityRoot != "",
+			"status":              "ok",
+			"debug":               cfg.DebugMode,
+			"eligibility":         cfg.EligibilityRoot != "" || rosters > 0,
+			"eligibility_rosters": rosters,
 		})
 	})
 

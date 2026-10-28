@@ -21,15 +21,32 @@ type EligibilityStatement struct {
 //
 // 服务端只拿到名单的**根**，看不到名单本身：它能验证「这个人的资格在树里」，
 // 却无法把资格对应到任何成员。
+//
+// 一台服务端可以并存**多套**名单（v0.4.0 起）：每个名单是一个命名的作用域，
+// 提案创建时绑定其中之一。服务端能验证「这个资格在这个名单的树里」，仍然
+// 无法把资格对应到任何成员 —— 多名单不改变这条底线。
 type EligibilityService interface {
 	// Enabled 报告资格校验是否开启。
 	//
 	// 没开启时服务端**不强制**一人一票：任何人都能反复领取凭证。
 	Enabled() bool
-	// Root 返回名单树根（十六进制域元素）与树深。
-	Root() (root string, depth int, err error)
+	// RosterFor 返回某个名单域的树根（十六进制域元素）与树深。
+	//
+	// scope 为空表示「未指定」：取默认名单 —— 名为 default 的名单；只配置了
+	// 一个名单时取它。两者都不满足时返回错误（fail-closed）：多名单并存且
+	// 没有默认名单时，提案必须显式绑定名单域。
+	RosterFor(scope string) (root string, depth int, err error)
+	// ScopeKnown 报告某个名单域是否存在。
+	//
+	// 用于提案创建时的前置校验（绑定了不存在的名单域当场 400，不留到领取时
+	// 才失败）。空 scope 恒返回 true —— 它的解析在 RosterFor，且是否可用
+	// 取决于届时服务器的名单配置。
+	ScopeKnown(scope string) bool
 	// NewChallenge 生成一个一次性的领取挑战（十六进制域元素）。
 	NewChallenge() (string, error)
-	// Verify 校验一份资格证明是否与公开输入一致。
-	Verify(proof []byte, statement EligibilityStatement) error
+	// VerifyFor 校验一份资格证明是否与公开输入一致。
+	//
+	// root 用**该名单域**配置的那个，不接受调用方塞进来的：资格证明的意义
+	// 就在于「服务端认的是自己那份名单」。
+	VerifyFor(scope string, proof []byte, statement EligibilityStatement) error
 }

@@ -17,7 +17,7 @@ import (
 func TestConstructors_DefaultLogger(t *testing.T) {
 	require.NotNil(t, NewVotingUseCase(nil, nil, nil, nil, nil, nil, nil, nil, nil))
 	require.NotNil(t, NewRegisterUseCase(nil, nil, nil, nil))
-	require.NotNil(t, NewProposalUseCase(nil, nil))
+	require.NotNil(t, NewProposalUseCase(nil, nil, nil))
 	require.NotNil(t, NewParticipationUseCase(nil, nil, nil))
 	require.NotNil(t, NewTallyUseCase(nil, nil, nil, nil, nil, nil, nil, nil))
 }
@@ -95,7 +95,7 @@ func TestRegisterUseCase_ReserveCredentialForUser_CheckExistingError(t *testing.
 }
 
 func TestProposalUseCase_ListOpen_RepoNil(t *testing.T) {
-	uc := NewProposalUseCase(nil, nil)
+	uc := NewProposalUseCase(nil, nil, nil)
 	_, err := uc.ListOpen(context.Background())
 	require.Error(t, err)
 }

@@ -194,6 +194,8 @@ func (uc *RegisterUseCase) ReserveCredentialForUser(
 //
 // 服务端**不记账**：挑战的价值在于把证明钉在本次会话上，重放由去重键
 // （唯一索引）挡住 —— 见 docs/t22-eligibility-design.md §3.5。
+// root 与树深按**提案绑定的名单域**解析（未绑定时取默认名单）—— 一台
+// 服务端并存多套名单时，每个提案只认自己那套名单。
 func (uc *RegisterUseCase) IssueEligibilityChallenge(
 	ctx context.Context,
 	proposalID string,
@@ -207,13 +209,14 @@ func (uc *RegisterUseCase) IssueEligibilityChallenge(
 	if proposalID == "" {
 		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
 	}
-	if _, err := uc.proposalRepo.GetByID(ctx, proposalID); err != nil {
+	proposal, err := uc.proposalRepo.GetByID(ctx, proposalID)
+	if err != nil {
 		return nil, fmt.Errorf("load proposal: %w", err)
 	}
 
-	root, depth, err := uc.eligibility.Root()
+	root, depth, err := uc.eligibility.RosterFor(proposal.EligibilityScope)
 	if err != nil {
-		return nil, fmt.Errorf("load eligibility root: %w", err)
+		return nil, fmt.Errorf("load eligibility roster: %w", err)
 	}
 	challenge, err := uc.eligibility.NewChallenge()
 	if err != nil {
@@ -229,9 +232,10 @@ func (uc *RegisterUseCase) IssueEligibilityChallenge(
 
 // verifyEligibility 校验一份资格材料。
 //
-// root 用服务端自己配置的那个；statement 的五个公开输入全部由服务端拼装，
+// root 用提案绑定名单域的那一个；statement 的五个公开输入全部由服务端拼装，
 // 客户端只能提供「证明 + 去重键 + 挑战」三样。
 func (uc *RegisterUseCase) verifyEligibility(
+	scope string,
 	proposalID string,
 	material *EligibilityMaterial,
 ) error {
@@ -239,7 +243,7 @@ func (uc *RegisterUseCase) verifyEligibility(
 		material.QualificationID == "" || material.Challenge == "" {
 		return fmt.Errorf("%w: proof, qualification_id and challenge are required", ErrEligibilityRequired)
 	}
-	root, _, err := uc.eligibility.Root()
+	root, _, err := uc.eligibility.RosterFor(scope)
 	if err != nil {
 		return fmt.Errorf("load eligibility root: %w", err)
 	}
@@ -249,7 +253,7 @@ func (uc *RegisterUseCase) verifyEligibility(
 		Challenge:       material.Challenge,
 		QualificationID: material.QualificationID,
 	}
-	if err := uc.eligibility.Verify(material.Proof, statement); err != nil {
+	if err := uc.eligibility.VerifyFor(scope, material.Proof, statement); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidEligibilityProof, err)
 	}
 	return nil
@@ -291,15 +295,17 @@ func (uc *RegisterUseCase) ReserveCredential(
 	if proposalID == "" {
 		return nil, fmt.Errorf("%w: proposal_id is required", ErrInvalidRequest)
 	}
-	if _, err := uc.proposalRepo.GetByID(ctx, proposalID); err != nil {
+	proposal, err := uc.proposalRepo.GetByID(ctx, proposalID)
+	if err != nil {
 		return nil, fmt.Errorf("load proposal: %w", err)
 	}
 
 	// 资格校验放在取槽位之前：不合格的人拿不到槽位，池子也不会被浪费。
+	// 名单域按提案绑定解析（未绑定时取默认名单）。
 	eligibilityEnabled := uc.eligibility != nil && uc.eligibility.Enabled()
 	switch {
 	case eligibilityEnabled:
-		if err := uc.verifyEligibility(proposalID, material); err != nil {
+		if err := uc.verifyEligibility(proposal.EligibilityScope, proposalID, material); err != nil {
 			return nil, err
 		}
 	case material != nil:

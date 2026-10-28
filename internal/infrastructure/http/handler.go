@@ -656,6 +656,12 @@ type createProposalPayload struct {
 	Options     []string `json:"options" validate:"required,min=2,dive,required"`
 	StartsAt    string   `json:"starts_at" validate:"required"`
 	EndsAt      string   `json:"ends_at" validate:"required"`
+	// EligibilityScope 是要绑定的资格名单域（可选）。
+	//
+	// 服务端并存多套名单时用它把提案绑到其中一个；绑定了不存在的名单域会
+	// 在创建时被拒（400）。缺省取默认名单（名为 default 的那套；只配了一套
+	// 名单时取它）。
+	EligibilityScope string `json:"eligibility_scope"`
 }
 
 func (h *Handler) CreateProposal(c *gin.Context) {
@@ -686,11 +692,12 @@ func (h *Handler) CreateProposal(c *gin.Context) {
 	}
 
 	req := &usecase.CreateProposalRequest{
-		Title:       payload.Title,
-		Description: payload.Description,
-		Options:     payload.Options,
-		StartsAt:    startsAt,
-		EndsAt:      endsAt,
+		Title:            payload.Title,
+		Description:      payload.Description,
+		Options:          payload.Options,
+		StartsAt:         startsAt,
+		EndsAt:           endsAt,
+		EligibilityScope: payload.EligibilityScope,
 	}
 	proposal, err := h.proposalUC.Create(c.Request.Context(), req)
 	if err != nil {
@@ -702,7 +709,7 @@ func (h *Handler) CreateProposal(c *gin.Context) {
 }
 
 func proposalResponse(proposal *entity.Proposal) gin.H {
-	return gin.H{
+	body := gin.H{
 		"id":          proposal.ID,
 		"title":       proposal.Title,
 		"description": proposal.Description,
@@ -712,6 +719,12 @@ func proposalResponse(proposal *entity.Proposal) gin.H {
 		"ends_at":     proposal.EndsAt.Format(time.RFC3339),
 		"created_at":  proposal.CreatedAt.Format(time.RFC3339),
 	}
+	// 冻结契约允许响应加字段：绑定了名单域时带出来，运营侧才能核对
+	// 「这场投票认的是哪份名单」。
+	if proposal.EligibilityScope != "" {
+		body["eligibility_scope"] = proposal.EligibilityScope
+	}
+	return body
 }
 
 func (h *Handler) ListProposals(c *gin.Context) {
