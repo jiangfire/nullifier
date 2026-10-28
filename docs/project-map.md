@@ -420,17 +420,18 @@ merkle 根 → 锚点哈希」在 **`internal/tally`**（见 §1.11）。这么�
   `cmd/loadtest/main_test.go` 的假服务端按当前协议实现，协议漂移会让那条用例红。
 - **计时有分辨率**：一轮比计时器还快（本机约 1ms）时，耗时与吞吐测不准 ——
   报告会标 `timing_resolution_limited`，而不是写一个假的「0 req/s」。
-- **只能在 debug 模式跑**：**压测工具自己没有 prover**（门户与 CLI 都有），release 模式下
-  所有投票请求都会因验签失败被拒
-  （工具发的是 `ZGV2LXByb29m`，即 `"dev-proof"` 的 base64）。工具不会替你伪造真证明。
+- **不给 `-proving-key` 就只能在 debug 模式跑**：工具**自己有 prover**（复用 CLI 的
+  `ballot-prove`，把选票那把 proving key 传进来），release 模式下才会出真证明；不给的话
+  发出去的是 `ZGV2LXByb29m`（`"dev-proof"` 的 base64），会被验签拒绝。工具不会替你伪造
+  真证明 —— 证明只能由那把 key 出。
 - **解密会话必须在投票窗口打开之前初始化**（服务端的硬性约束），所以工具先建「窗口稍后开」
   的提案再初始化会话，最后才等到窗口开始。
 - **服务端没有 `GET /api/v1/proposals/:id` 端点** —— 工具靠 `GET /api/v1/proposals` 列表定位提案。
 - **SQLite 并发写会撞 `database is locked`**：服务端要用带 `_busy_timeout` 的 DSN
   （如 `anonvote.db?_busy_timeout=10000&_journal_mode=WAL`），否则压测结果里全是 500 ——
   那是存储层的问题，不是投票逻辑的问题。
-- **工具不支持资格证明**：它不会去取领取挑战、也不会出资格证明，因此在开启了资格
-  校验的服务端上，领取环节会被 400 `ELIGIBILITY_REQUIRED` 拒绝。
+- **不给 `-eligibility-dir` 就不支持资格证明**：它不会去取领取挑战、也不会出资格证明，因此
+  在开启了资格校验的服务端上，领取环节会被 400 `ELIGIBILITY_REQUIRED` 拒绝。
 - **吞吐按墙钟算，不按延迟求和** —— 并发请求的延迟总和不是总耗时。
 
 ### 1.10 浏览器端 prover —— `cmd/ballot-wasm/main.go`
@@ -852,8 +853,9 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
     浏览器本地生成选票 → 提交 201 → 计票还原出所选选项；✅ **2026-10-26 起也有自动化回归**
     （T28，见上）。⚠️ **部署形态**（真域名、反代）仍要人工点一遍
     （步骤见 `docs/deployment-checklist.md` §8.1）。
-  - **`cmd/loadtest` 不支持资格证明**（它不会取挑战、也不会出资格证明），因此压测仍然
-    只能在 debug 模式跑。
+  - **`cmd/loadtest` 支持资格证明**（T27 补齐：`-eligibility-dir` +
+    `-eligibility-proving-key` —— 它会取挑战、出资格证明，走的是与门户 / CLI 同一条链路）；
+    不给这两个参数时它不会取挑战，也就跑不了开启了资格校验的服务端。
   - **资格包丢了无法恢复**（服务端不存秘密与叶子），补发要重新生成整份名单。
   实现口径与设计稿的偏离见 `docs/techspec.md` §6.11；设计稿原文见
   [`docs/t22-eligibility-design.md`](./t22-eligibility-design.md)。
@@ -875,9 +877,14 @@ Windows 注意：仓库根的 `Makefile` 需要在 **Git for Windows 的 bash** 
     规模调高（部署清单 §3.1 有推导过程）。
   - `cmd/loadtest` 会被限流挡住 —— 测容量前先调高额度或关掉限流。
   设计稿见 [`docs/t25-ratelimit-design.md`](./t25-ratelimit-design.md)。
-- **容量数字只有 SQLite 一份，且不是规划。** `cmd/loadtest` 能跑出可复现的吞吐与防重投结论，
-  但 SQLite 的单写者模型会把并发写串行化，数字反映的是存储层；**压测工具自己没有 prover**
-  （门户与 CLI 都有），所以它只能在 debug 模式跑。按路线图 §2.2，真正的容量规划
-  （PG 基准、资源配置建议）属 v0.3.0 的 T27，**尚未做**。
+- ~~**容量数字只有 SQLite 一份，且不是规划。**~~ —— ✅ **已解除**（2026-10-26，T27）：
+  `cmd/loadtest` 支持真 prover（`-proving-key`）与资格领取（`-eligibility-dir` /
+  `-eligibility-proving-key`），在**真 PostgreSQL + release 模式**下跑出了容量数字 ——
+  单机实测约 **2300 票/秒**（并发 50 时到顶，并发 100～200 持平在 2150～2170；按这个
+  数字，一台 4 核 8G 能扛住十万级选民在 2 小时内投完）。报告见
+  [`docs/capacity-report-v0.3.0.md`](./capacity-report-v0.3.0.md)，按投票规模的资源配置
+  建议见部署清单 §4.1。
+  ⚠️ **复现时每轮至少 500 票、每轮之前先热身一轮** —— 否则量到的是预热而不是容量
+  （实测吞吐会从 2300/s 掉到 127/s）。
 
 > 完整的问题清单、证据与修复顺序见 `docs/release-review-2026-10-20.md`；v0.2.0 的能力矩阵与任务状态见 [`docs/roadmap.md`](./roadmap.md) §4.1。

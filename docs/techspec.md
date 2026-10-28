@@ -1266,15 +1266,17 @@ go run ./cmd/audit-recompute -proposal <提案ID> -shares-file <份额文件> -j
 
 **已知边界**：
 
-- **只能在 debug 模式跑。** **压测工具自己没有 prover**（门户与 CLI 都有），release 模式下
-  所有投票请求都会因验签失败被拒
-  （工具发的是 `ZGV2LXByb29m`，即 `"dev-proof"` 的 base64）。release 模式下报告的状态分布会
-  如实反映这一点（全 400），那不是服务端的真实容量。
-- **工具不支持资格证明**：它不会去取领取挑战、也不会出资格证明，因此在开启了
-  资格校验的服务端上，领取环节会被 400 `ELIGIBILITY_REQUIRED` 拒绝。
-- **压测数字反映的是存储层，不是投票逻辑。** SQLite 的单写者模型会把并发写串行化；按路线图
-  §2.2，真正的**容量规划**（阈值、限流、PostgreSQL 基准）属 v0.3.0，这个工具提供的是
-  **可复现脚本 + 一份实测输出**。
+- **压测数字反映的是存储层，不是投票逻辑。** SQLite 的单写者模型会把并发写串行化 ——
+  **容量数字要在真 PostgreSQL 上量**：给 `-proving-key`（真 prover）、
+  `-eligibility-dir` + `-eligibility-proving-key`（真资格），在 release 模式的真 PG 上跑，
+  且**每轮至少 500 票、每轮之前先热身一轮**（否则量到的是预热：实测吞吐从 2300/s 掉到
+  127/s）。报告见 [`docs/capacity-report-v0.3.0.md`](./capacity-report-v0.3.0.md)。
+- **不给 `-proving-key` 就只能在 debug 模式跑。** 工具**自己有 prover**（复用 CLI 的
+  `ballot-prove`），给了它才能在 release 模式出真证明；不给的话发出去的是
+  `ZGV2LXByb29m`（`"dev-proof"` 的 base64），release 模式下会被验签拒绝 —— 报告的状态分布
+  会如实反映这一点（全 400），**那不是服务端的真实容量**。
+- **不给 `-eligibility-dir` 就不支持资格证明**：它不会去取领取挑战、也不会出资格证明，
+  因此在开启了资格校验的服务端上，领取环节会被 400 `ELIGIBILITY_REQUIRED` 拒绝。
 
 工具自身有单元测试（`cmd/loadtest/main_test.go`）：用 `httptest` 模拟最小 API 面，覆盖
 「正常压测 → 防重投守住」「防重投失守 → 非 0 退出」「令牌不对」「参数非法」与报告计算。
@@ -1382,13 +1384,15 @@ make pg-test        # 起库 → 跑集成测试 → 关库
     导入资格文件 → 领取 201 → 重复领取 409 → 本地生成选票 → 提交 201 → 计票还原出所选
     选项）。✅ **2026-10-26 起自动化只到真浏览器**（`web/e2e/portal.spec.ts` + Playwright：
     同样的路径，还多断言「重复领取被拒」）—— **部署形态**（真域名、反代）仍要人工点一遍。
-  - **`cmd/loadtest` 不支持资格证明**（见 §8.1）：它不会取挑战、也不会出资格证明。
+  - **`cmd/loadtest` 支持资格证明**（T27 补齐，见 §8.1）：给 `-eligibility-dir` +
+    `-eligibility-proving-key`，它会取挑战、出资格证明；不给就只支持未开启资格校验的服务。
   - **资格表不许与凭证、票据关联**：`eligibility_uses` 只存去重键。一旦能把资格
     连到票，「分发不泄露身份」这条底线就破了。
 - **服务端没有「替用户选票」的联调接口**：`ballot-draft` 已删除，不要把它写成生产能力。
-- **压测工具只能在 debug 模式跑，且数字不是容量规划。** `cmd/loadtest` 提供的是
-  「可复现脚本 + 实测输出」（见 §8.1）；SQLite 的单写者会把并发写串行化。真正的容量
-  规划属 v0.3.0。
+- **压测工具的容量数字在真 PG 上量才有意义。** `cmd/loadtest` 提供的是「可复现脚本 +
+  实测输出」（见 §8.1）；SQLite 的单写者会把并发写串行化。**容量规划已落地（T27）**：
+  给 `-proving-key` / `-eligibility-dir` / `-eligibility-proving-key`，在 release 模式的
+  真 PostgreSQL 上跑，报告见 [`docs/capacity-report-v0.3.0.md`](./capacity-report-v0.3.0.md)。
 - **v3 密文与 v0.1.0 的 v2 密文不兼容**，旧的加密选票解不开（见 §6.1）。
 - 解密会话的初始化时机是当前系统最容易被文档写错的点：
   - 服务端禁止在投票开放中 setup
