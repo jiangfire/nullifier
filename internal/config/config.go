@@ -93,15 +93,15 @@ type Config struct {
 	//
 	// 它的另一个作用：gin 的默认行为是**信任所有代理**，那会让
 	// `c.ClientIP()` 完全可伪造 —— 限流与日志里的来源地址都会失真。
-	TrustedProxies          []string
-	AdminBearerToken        string
+	TrustedProxies   []string
+	AdminBearerToken string
 	// AdminTokens 是管理面的分级令牌（v0.4.0 起可选）。
 	//
 	// 与旧单值并存：单值 = admin 档。两者都配置了 admin 档且**值不同**时
 	// 启动失败 —— 「哪枚是管理员令牌」不该有两份答案。
-	AdminTokens              AdminTokensConfig
-	VerifyingKeyPath         string
-	CredentialIssuerKeyPath  string
+	AdminTokens             AdminTokensConfig
+	VerifyingKeyPath        string
+	CredentialIssuerKeyPath string
 	// CredentialIssuerRotateAfter 是签发方密钥的轮换周期。
 	CredentialIssuerRotateAfter time.Duration
 	// RateLimit 是限流配置。
@@ -245,11 +245,11 @@ func load(forMigration bool) (*Config, error) {
 
 	ginMode := v.GetString("server.mode")
 	cfg := &Config{
-		ServerAddress:               v.GetString("server.address"),
-		GinMode:                     ginMode,
-		DebugMode:                   isDebugMode(ginMode),
-		CORSAllowedOrigins:          v.GetStringSlice("server.cors_allowed_origins"),
-		AdminBearerToken:            strings.TrimSpace(v.GetString("server.admin_bearer_token")),
+		ServerAddress:      v.GetString("server.address"),
+		GinMode:            ginMode,
+		DebugMode:          isDebugMode(ginMode),
+		CORSAllowedOrigins: v.GetStringSlice("server.cors_allowed_origins"),
+		AdminBearerToken:   strings.TrimSpace(v.GetString("server.admin_bearer_token")),
 		AdminTokens: AdminTokensConfig{
 			Admin:    strings.TrimSpace(v.GetString("server.admin_tokens.admin")),
 			Operator: strings.TrimSpace(v.GetString("server.admin_tokens.operator")),

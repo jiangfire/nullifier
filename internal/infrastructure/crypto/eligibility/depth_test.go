@@ -159,3 +159,27 @@ func TestConstraintsGrowWithDepth(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, deeper, shallow, "每加一层 Merkle 上溯约束必须变多")
 }
+
+// TestWalkPathMatchesBuildTree 钉住路径上溯与建树的一致性：
+// 用建树时记下的路径走回去，必须得到同一个根 —— 离线校验（-verify）靠它。
+func TestWalkPathMatchesBuildTree(t *testing.T) {
+	leaves := make([]fr.Element, 5)
+	for i := range leaves {
+		leaves[i] = fr.NewElement(uint64(i + 1))
+	}
+	root, paths, err := BuildTree(leaves, 4)
+	require.NoError(t, err)
+
+	for i := range leaves {
+		walked, err := WalkPath(leaves[i], uint64(i), paths[i])
+		require.NoError(t, err)
+		require.True(t, walked.Equal(&root), "叶子 %d 的路径必须通到根", i)
+	}
+
+	// 换一个兄弟节点：走不到同一个根。
+	tampered := append([]fr.Element(nil), paths[2]...)
+	tampered[0] = fr.NewElement(999)
+	walked, err := WalkPath(leaves[2], 2, tampered)
+	require.NoError(t, err)
+	require.False(t, walked.Equal(&root), "被改过的路径不能通到根")
+}

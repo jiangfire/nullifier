@@ -136,7 +136,7 @@ func NewCredentialIssuer(cfg *config.Config) domaincrypto.CredentialIssuer {
 // NewEligibilityService 造资格校验服务。
 //
 // 配了名单列表（crypto.eligibility_roots）就按列表装配；否则用旧的单值写法
-//（等价于一套名为 default 的名单）。没配置名单根与验证密钥时它返回「未开启」
+// （等价于一套名为 default 的名单）。没配置名单根与验证密钥时它返回「未开启」
 // 的服务（开发环境的降级形态）；只配一半则直接报错 —— 那等于「不校验」。
 func NewEligibilityService(cfg *config.Config) (domaincrypto.EligibilityService, error) {
 	if len(cfg.EligibilityRosters) > 0 {

@@ -372,3 +372,93 @@ func TestRejectsDepthOutsideRange(t *testing.T) {
 	require.Equal(t, 2, run([]string{"-members", membersPath, "-out", filepath.Join(dir, "o1"), "-depth", "3"}))
 	require.Equal(t, 2, run([]string{"-members", membersPath, "-out", filepath.Join(dir, "o2"), "-depth", "25"}))
 }
+
+// TestReadMembersCSVWithBOM 钉住身份源的真实形态：Excel 导出的 CSV 带 UTF-8
+// BOM，第一个列表名会粘上 BOM —— 解析必须容错，且默认取第一列。
+func TestReadMembersCSVWithBOM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "members.csv")
+	// 显式带上 BOM（Excel 导出常态）。
+	content := "\ufeffmember_id,department\nE-003,销售部\nE-001,研发部\nE-002,财务部\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	members, err := readMembers(path, "")
+	require.NoError(t, err)
+	require.Equal(t, []string{"E-001", "E-002", "E-003"}, members,
+		"成员按标识排序（树的位置因此确定）")
+}
+
+// TestReadMembersCSVWithIDColumn 覆盖 -id-column：指定列存在时取该列。
+func TestReadMembersCSVWithIDColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "members.csv")
+	content := "name,member_id,department\n张三,E-102,销售部\n李四,E-101,研发部\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	members, err := readMembers(path, "member_id")
+	require.NoError(t, err)
+	require.Equal(t, []string{"E-101", "E-102"}, members)
+
+	// 指定了不存在的列 → 明确报错并列出可用的列。
+	_, err = readMembers(path, "工号")
+	require.ErrorContains(t, err, `column "工号" not found`)
+}
+
+// TestReadMembersRejectsDuplicates 钉住重复成员的收紧：
+// 从「静默丢弃」改为「拒绝生成」—— 名单少一个人，那个人永远投不了票且
+// 无人知道。报错要指出重复的标识。
+func TestReadMembersRejectsDuplicates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "members.txt")
+	require.NoError(t, os.WriteFile(path, []byte("E-001\nE-002\nE-001\n"), 0o600))
+
+	_, err := readMembers(path, "")
+	require.ErrorContains(t, err, "重复成员")
+	require.ErrorContains(t, err, "E-001")
+
+	// CSV 同样拒绝。
+	csvPath := filepath.Join(t.TempDir(), "members.csv")
+	require.NoError(t, os.WriteFile(csvPath,
+		[]byte("member_id\nE-001\nE-001\n"), 0o600))
+	_, err = readMembers(csvPath, "")
+	require.ErrorContains(t, err, "重复成员")
+}
+
+// TestVerifyList 钉住离线校验：完整目录通过；改动包内容 / 丢包 / 换根
+// 任一情形都失败（退出码非 0 可当门禁用）。
+func TestVerifyList(t *testing.T) {
+	dir := t.TempDir()
+	membersPath := filepath.Join(dir, "members.txt")
+	require.NoError(t, os.WriteFile(membersPath, []byte("V-1\nV-2\nV-3\n"), 0o600))
+	outDir := filepath.Join(dir, "out")
+	require.Equal(t, 0, run([]string{"-members", membersPath, "-out", outDir, "-label", "年度大会"}))
+
+	// ① 完整目录：通过。
+	require.Equal(t, 0, run([]string{"-verify", outDir}))
+
+	// ② root.json 带上了 -label 的标注。
+	raw, err := os.ReadFile(filepath.Join(outDir, "root.json"))
+	require.NoError(t, err)
+	var list eligibility.ListPackage
+	require.NoError(t, json.Unmarshal(raw, &list))
+	require.Equal(t, "年度大会", list.Label)
+	require.NotEmpty(t, list.GeneratedAt)
+
+	// ③ 改一个字节的成员包（叶子与秘密对不上）→ 失败。
+	packPath := filepath.Join(outDir, "eligibility-V-2.json")
+	packRaw, err := os.ReadFile(packPath)
+	require.NoError(t, err)
+	var pack eligibility.MemberPackage
+	require.NoError(t, json.Unmarshal(packRaw, &pack))
+	tampered := pack
+	tampered.Leaf = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	tamperedRaw, err := json.Marshal(tampered)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(packPath, tamperedRaw, 0o600))
+	require.Equal(t, 1, run([]string{"-verify", outDir}), "改过的包必须被校验拦下")
+	require.NoError(t, os.WriteFile(packPath, packRaw, 0o600)) // 还原
+
+	// ④ 丢一个包 → 数量对不上，不能上线。
+	require.NoError(t, os.Remove(filepath.Join(outDir, "eligibility-V-1.json")))
+	require.Equal(t, 1, run([]string{"-verify", outDir}))
+
+	// ⑤ 没有 root.json 的目录 → 失败。
+	require.Equal(t, 1, run([]string{"-verify", t.TempDir()}))
+}

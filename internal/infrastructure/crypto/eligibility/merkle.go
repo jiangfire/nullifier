@@ -46,6 +46,11 @@ type ListPackage struct {
 	Depth int `json:"depth"`
 	// Count 是名单里的成员数（不含补齐的空叶子）。
 	Count int `json:"count"`
+	// Label 是运营方给名单标注的来源说明（可选，v0.4.0 起随 -label 写入）。
+	// 服务端不读它 —— 这是给「管名单的人」看的。
+	Label string `json:"label,omitempty"`
+	// GeneratedAt 是名单生成时间（RFC3339，UTC）。
+	GeneratedAt string `json:"generated_at,omitempty"`
 }
 
 // DeriveLeaf 由资格秘密推出叶子：leaf = MiMC(secret)。
@@ -94,8 +99,8 @@ func DeriveQualificationID(leaf fr.Element, proposalField fr.Element) fr.Element
 // 叶子数不足 2^depth 时用零叶子补齐 —— 补齐的叶子不对应任何成员，
 // 也没有人能证明自己持有它们的秘密（除非拿到那个零秘密）。
 func BuildTree(leaves []fr.Element, depth int) (fr.Element, [][]fr.Element, error) {
-	if depth <= 0 || depth > 20 {
-		return fr.Element{}, nil, fmt.Errorf("invalid tree depth: %d", depth)
+	if err := ValidateTreeDepth(depth); err != nil {
+		return fr.Element{}, nil, err
 	}
 	size := 1 << depth
 	if len(leaves) > size {
@@ -132,6 +137,24 @@ func BuildTree(leaves []fr.Element, depth int) (fr.Element, [][]fr.Element, erro
 		paths[i] = path
 	}
 	return root, paths, nil
+}
+
+// WalkPath 由叶子沿 Merkle 路径上溯，返回推导出的根。
+//
+// 走法与电路一致：第 i 层的左右由 index 第 i 位决定（0 = 当前节点是左孩子，
+// 1 = 右孩子），父节点 = MiMC(左, 右)。它给离线校验用 —— 成员或运营方可以
+// 不跑电路就核对「这条路径真的通到这个根」。
+func WalkPath(leaf fr.Element, index uint64, path []fr.Element) (fr.Element, error) {
+	node := leaf
+	for i, sibling := range path {
+		bit := (index >> uint(i)) & 1
+		if bit == 0 {
+			node = mimc.Hash(node, sibling)
+		} else {
+			node = mimc.Hash(sibling, node)
+		}
+	}
+	return node, nil
 }
 
 // EncodeField 把域元素编码成十六进制（规范形式）。
