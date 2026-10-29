@@ -315,6 +315,14 @@ func (uc *RegisterUseCase) ReserveCredential(
 		)
 	}
 
+	// 取签发方公钥放在一切消耗之前：公钥加载可能触发密钥轮换并写盘（磁盘、
+	// 权限等故障会让它失败）。放在槽位预留与资格烧毁之后的话，一次服务端
+	// 故障就会永久烧掉一名投票人的资格 —— eligibility_uses 没有恢复路径。
+	issuerKey, err := uc.issuer.IssuerPublicKey(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load issuer public key: %w", err)
+	}
+
 	claim, err := uc.claimRepo.ReserveAvailable(ctx, proposalID, CredentialReservationTTL)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
@@ -345,10 +353,6 @@ func (uc *RegisterUseCase) ReserveCredential(
 		}
 	}
 
-	issuerKey, err := uc.issuer.IssuerPublicKey(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("load issuer public key: %w", err)
-	}
 	return &CredentialReservation{
 		ProposalID: proposalID,
 		UserID:     claim.UserID,
