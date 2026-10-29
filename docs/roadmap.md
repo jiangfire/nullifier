@@ -21,6 +21,7 @@
 | **v0.2.0** | **已发布** —— 有真实零知识证明链的实验版。匿名性在密码学上**成立**，而不是被声称；但接口仍会变，**不承诺稳定** | ✅ **已发布（2026-10-25）** —— tag `v0.2.0` @ `abc86ca`，[GitHub Release](https://github.com/jiangfire/nullifier/releases/tag/v0.2.0) 12 个产物；M2 全部完成 · M3 的 T22 已落地（T19 / T20 部分落地） | **27–39 人天 ≈ 6–8 周** |
 | **v0.3.0** | **已发布** —— 接口冻结档。凭证领取 / 投票提交 / 密文格式三处接口收敛成文并由门禁守住，密文格式定版 v3；另加审计离线复算、监控指标、公开端点限流、真正的容量规划与门户浏览器 UI 自动化。**这一档之后接口只增不改** | ✅ **已发布（2026-10-26）** —— tag `v0.3.0` @ `6dd3ed4`（指向 `47a3925`），[GitHub Release](https://github.com/jiangfire/nullifier/releases/tag/v0.3.0) 12 个产物（门户包带 prover，sha256 已下载核验）；M4 全部完成（六张任务卡 T23 / T24 / T25 / T26 / T27 / T28）；**已合并回 `main` @ `4d3bac3`**（PR #5） | **15–20 人天**（推演值） |
 | **v0.4.0** | **已发布** —— 「能用于有规模的真实投票」。四张任务卡：名单规模化（树深可配，1024 上限解除）、多套资格名单并存（多租户）、管理面三级令牌（权限分级）、名单的安全摄入（真实身份源）。**冻结契约零变更**（密文格式 v3 连续第二个 minor 未变） | ✅ **已发布（2026-10-28）** —— tag `v0.4.0`，[GitHub Release](https://github.com/jiangfire/nullifier/releases/tag/v0.4.0) 12 个产物；release 流水线 8 个 job 全绿（run `40701797909`）；**已合并回 `main` @ `4188a09`**（PR #12）；M5 全部完成（四张任务卡 T29 / T30 / T31 / T32） | **8–12 人天**（按任务卡重估） |
+| **v0.4.1** | **已发布** —— 评审修复档（patch）：进入测试前对 v0.4.0 的整体评审修掉五个缺陷（分级令牌部署下临时令牌覆盖配置值【Critical】、签发方取钥失败烧资格、匿名领取链路 IP 日志豁免不全、计票读票排序不确定、门户领取重试重烧证明与误导文案）。**冻结契约零变更**，无新增配置项，升级无需迁移 | ✅ **已发布（2026-10-29）** —— 修复明细见 CHANGELOG 0.4.1；遗留待办（P1·P2）迁入[附录 A.6](#a6--进入测试前的评审遗留2026-10-29) | — |
 
 **预期** —— 推演，**未承诺**，随里程碑进展重估（详见 [§1.2](#12-v020-之后还有几个-0x0)）：
 
@@ -1035,6 +1036,35 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | 依赖 | 无 |
 | 备注 | ⚠️ **「Playwright 离线装不了」这个前提已不成立**（2026-10-25 实测：`pnpm exec playwright install chromium` 可成功下载浏览器，118.1 MiB）—— 之前记的结论要改 |
 | **落地核对** | ✅ **全部完成**（2026-10-26）。① **引入 Playwright**（`@playwright/test@1.64.1` + `@types/node`，都只是 devDependency；运行时依赖一个没动）+ 配置（`web/playwright.config.ts`）。② **用例**（`web/e2e/portal.spec.ts`）在**真浏览器**里把两条路径走完：配置后端 → 导入资格文件 → 匿名领取（真两段式盲签名）→ **重复领取被拒**（一人一票）→ 大厅选提案 → 浏览器本地出票（真 WASM prover）→ 提交 → 查状态（已投过）→ 等窗口关闭 → 发布结果 → **核对计票还原出所选的选项**。③ **环境脚本**（`scripts/web-e2e.sh`）自己备好一切：两套密钥、资格名单、release 模式服务端（真 verifying key + 强制一人一票）、凭证池、门限解密会话、门户 dev server；`make web-e2e` 一条龙跑完并收尾。④ **CI 接入**：新增 `web-e2e` job（`pnpm exec playwright install --with-deps chromium` + `bash ./scripts/web-e2e.sh run`）。<br>⚠️ **闭合的是「接线没断」，不是「部署形态验过了」** —— 真域名、反向代理、真实浏览器版本仍要人工点一遍（`scripts/browser-acceptance.sh`）。<br>⚠️ **用例的时长被投票窗口框住**：门户的「计票」要求提案**已关闭**（服务端只认 `ends_at` 过去了），「投票」要求窗口**开着** —— 所以窗口必须先开后关，中间那段要装得下浏览器端出证明（十几秒）。窗口 90 秒是在本机实测过的稳妥值；窗口太短会偶发失败，太长则整轮变慢。<br>⚠️ **限流额度要在脚本里拉高**：一整轮 e2e 的请求全来自 `127.0.0.1`，共享一个来源额度 —— 用默认额度（凭证 10 rps / 40 burst）时领取链路会被自己挡下，测到的就成了限流器。 |
+
+---
+
+### A.6 · 进入测试前的评审遗留（2026-10-29）
+
+> 2026-10-29 对 v0.4.0 的 `main` 做了整体评审（全量门禁实测 + 三个独立深审），
+> P0 五项已随 **v0.4.1** 修复（明细见 CHANGELOG 0.4.1，原始决策口径：D1 整条匿名领取
+> 链路的请求日志不落 `client_ip`；D2 计票排序以 `votes.id` 为确定性次级键、锚点公式不变；
+> D3「claim 即烧资格」保持不变，运营恢复口径在部署清单 §7；D4 刻意只配 operator/auditor
+> 合法且 fail-closed）。跟踪文档已删，**其余待办迁到这里**。
+
+**P1 —— 与测试并行修（每项独立提交）**：
+
+| # | 问题 | 位置 |
+|---|---|---|
+| F6 | `SchemaReady` 只做 `HasTable`，不查 `eligibility_uses` 表与 `eligibility_scope` 列 —— v0.3.0 库忘跑 `-migrate` 时启动照常通过，运行期领取链路全断。加 `HasTable(EligibilityUse)` 与 `HasColumn(proposals.eligibility_scope)` | `internal/infrastructure/persistence/migration.go` |
+| F7 | `crypto.eligibility_roots` 与显式 `crypto.eligibility_depth` 混配不报错，depth 被静默忽略 —— 用 `v.IsSet("crypto.eligibility_depth")` 识别显式配置，命中即启动失败 | `internal/config/config.go` |
+| F8 | 三档令牌不校验互不相同：operator 与 admin 同值 = 白送 admin 权 —— release 校验段对去空格后的四枚令牌两两去重断言 | `internal/config/config.go` |
+| F9 | 多名单且无 default 时空 scope 提案创建成功但首个领取者吃 500（`ScopeKnown("")` 恒真、错误不是领域错误）—— `CreateProposal` 在资格开启、scope 为空且无 default 可解析时 400 拒绝 | `internal/domain/crypto/eligibility.go` + `internal/usecase/proposal.go` |
+| F10 | 签发方 keystore 加载失败被推迟成运行期 initErr，与资格密钥 fail-fast 口径不一致 —— 构造时返回错误，或启动时显式 `IssuerPublicKey` 预检 | `internal/infrastructure/crypto/kryptology_credential_issuer.go` |
+| F11 | `PublishResult` 落 result 与落 audit anchor 不在同一事务，anchor 写失败即永久缺失（唯一索引挡住重试）—— 两笔写入包进一个事务，或允许对已发布提案补偿写 anchor | `internal/usecase/tally.go` |
+| F12 | 门户 blind-sign 409 `CREDENTIAL_EXISTS` 不重试（attest 分支有 `retryable`，与服务端/CLI 契约不一致）；`cmd/cli/main.go` 的「预留不占位」注释也已过时 —— 补 `retryable` + 对称单测 + 修注释 | `web/src/composables/useVotePortal.ts` |
+| F13 | 运营端创建提案无 `eligibility_scope` 入口，多名单特性从 UI 不可达 —— OpsPanel 创建表单加可选「资格名单」下拉（数据源 `/healthz` 的 `eligibility_rosters`），或文档注明走 API/CLI | `web/src/components/panels/` |
+
+**P2 —— Nit（排期，不阻塞）**：启动日志 `eligibility_enforced` 不认多名单配置恒 false（`cmd/server/main.go`）·
+`eligibility-list` 的 `.txt` 分支不剥 UTF-8 BOM（与注释不符）· `CreateProposal` 不拒绝过去的 `starts_at`
+（造出无法备解密会话的死提案）· 并发双建会话/双发布回 500 而非 409 · roster 名/scope 无 64 长度上限
+（PG 上超长炸 500）· Worker 内 fetch 无超时（网络停滞按钮永久卡死）· 门户丢弃挑战响应里的 `depth`
+（深度不匹配白烧 7 秒证明）· SQLite `_busy_timeout` 未显式写进 DSN · 每次出证明重下 11.9 MB WASM（设计取舍，记录在案）。
 
 ---
 
