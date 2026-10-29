@@ -1147,7 +1147,8 @@ export function useVotePortal() {
     if (!reserve.ok) {
       // 资格已占用分两种情形：真·重复领取（本会话在这个提案上领到过凭证）与
       // 上一次领取没有走完（claim 成功烧了资格、attest 没成 —— 领取是匿名的，
-      // 服务端无法区分两者，见 docs/review-fixes-2026-10-29.md 决策 D3）。
+      // 服务端无法区分两者；claim 即烧资格是有意取舍，运营恢复口径见
+      // docs/deployment-checklist.md §7）。
       // 前者按「一人一票」提示；后者给准确的恢复指引，别让没投过票的人
       // 以为自己投过。
       const claimedHere = wallet.signature !== '' && wallet.proposalId === proposalId;
