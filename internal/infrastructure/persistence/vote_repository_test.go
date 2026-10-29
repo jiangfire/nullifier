@@ -205,3 +205,39 @@ func TestVoteRepository_SaveWithParticipation_RollsBackOnParticipationError(t *t
 	require.NoError(t, err)
 	require.False(t, exists)
 }
+
+// created_at 并列时必须按 id 稳定排序（F4）：merkle 叶子顺序决定计票锚点，
+// 读票顺序必须完全确定 —— 否则服务端发布与审计复算在并列票上可能算出
+// 不同的根，合法选举被误报为审计不一致。
+func TestVoteRepository_GetByProposal_TieBrokenByID(t *testing.T) {
+	db, err := NewDB(&DBConfig{
+		Driver:   "sqlite",
+		Database: ":memory:",
+	})
+	require.NoError(t, err)
+	require.NoError(t, AutoMigrate(db))
+
+	repo := NewVoteRepository(db)
+	sameTime := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	// 插入顺序故意与 id 顺序不同：并列的 created_at 不许按插入顺序漂移。
+	for _, id := range []string{"v-3", "v-1", "v-2"} {
+		require.NoError(t, repo.Save(context.Background(), &entity.Vote{
+			ID:         id,
+			ProposalID: "p-tie",
+			Nullifier:  "n-" + id,
+			Cipher:     []byte("cipher"),
+			CreatedAt:  sameTime,
+		}))
+	}
+
+	first, err := repo.GetByProposal(context.Background(), "p-tie")
+	require.NoError(t, err)
+	second, err := repo.GetByProposal(context.Background(), "p-tie")
+	require.NoError(t, err)
+
+	require.Len(t, first, 3)
+	require.Len(t, second, 3)
+	got := []string{first[0].ID, first[1].ID, first[2].ID}
+	assert.Equal(t, []string{"v-1", "v-2", "v-3"}, got)
+	assert.Equal(t, got, []string{second[0].ID, second[1].ID, second[2].ID})
+}

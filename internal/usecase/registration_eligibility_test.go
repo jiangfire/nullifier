@@ -242,6 +242,8 @@ func TestRegisterUseCase_ReserveCredential_EligibilityAlreadyUsed(t *testing.T) 
 	eligibility.On("Enabled").Return(true).Once()
 	eligibility.On("RosterFor", mock.Anything).Return(testEligibilityRoot, 10, nil).Once()
 	eligibility.On("VerifyFor", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+	// 公钥加载在任何消耗之前发生（F2）：即使资格重复，取钥也已经被调过。
+	issuer.On("IssuerPublicKey", mock.Anything).Return(testIssuerKey(), nil).Once()
 	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
 		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
 		Once()
@@ -254,6 +256,41 @@ func TestRegisterUseCase_ReserveCredential_EligibilityAlreadyUsed(t *testing.T) 
 	assert.ErrorIs(t, err, ErrEligibilityAlreadyUsed)
 	assert.Nil(t, reservation)
 	claimRepo.AssertExpectations(t)
+}
+
+// TestRegisterUseCase_ReserveCredential_IssuerKeyFailureBurnsNothing 验证取
+// 签发方公钥失败（如密钥轮换写盘失败）发生在任何消耗之前：资格不烧、槽位不占。
+// 否则一次服务端故障就永久锁死一名投票人（eligibility_uses 没有恢复路径）。
+func TestRegisterUseCase_ReserveCredential_IssuerKeyFailureBurnsNothing(t *testing.T) {
+	repo := new(credentialRepositoryMock)
+	proposalRepo := new(proposalRepositoryMock)
+	issuer := new(credentialIssuerMock)
+	claimRepo := new(credentialClaimRepositoryMock)
+	eligibilityRepo := new(eligibilityUseRepositoryMock)
+	eligibility := new(eligibilityServiceMock)
+
+	uc := NewRegisterUseCaseWithEligibility(
+		repo, proposalRepo, issuer, claimRepo, eligibilityRepo, eligibility, zap.NewNop(),
+	)
+
+	material := &EligibilityMaterial{
+		Proof:           []byte("proof"),
+		QualificationID: testQualificationID,
+		Challenge:       testEligibilityChallenge,
+	}
+	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	eligibility.On("Enabled").Return(true).Once()
+	eligibility.On("RosterFor", mock.Anything).Return(testEligibilityRoot, 10, nil).Once()
+	eligibility.On("VerifyFor", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+	issuer.On("IssuerPublicKey", mock.Anything).Return(nil, errors.New("keystore write failed")).Once()
+
+	reservation, err := uc.ReserveCredential(context.Background(), "p-1", material)
+
+	assert.Error(t, err)
+	assert.Nil(t, reservation)
+	// 公钥取不到时什么都不许被消耗：不占槽位、不烧资格。
+	claimRepo.AssertNotCalled(t, "ReserveAvailable", mock.Anything, mock.Anything, mock.Anything)
+	eligibilityRepo.AssertNotCalled(t, "RecordUse", mock.Anything, mock.Anything)
 }
 
 // TestRegisterUseCase_ReserveCredential_RejectsMaterialWhenDisabled 验证服务端
@@ -305,6 +342,8 @@ func TestRegisterUseCase_ReserveCredential_RequiresUseRepository(t *testing.T) {
 	eligibility.On("Enabled").Return(true).Once()
 	eligibility.On("RosterFor", mock.Anything).Return(testEligibilityRoot, 10, nil).Once()
 	eligibility.On("VerifyFor", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+	// 公钥加载在任何消耗之前发生（F2）。
+	issuer.On("IssuerPublicKey", mock.Anything).Return(testIssuerKey(), nil).Once()
 	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
 		Return(&entity.CredentialClaim{ID: "slot-1", ProposalID: "p-1", UserID: "pseudonym-1"}, nil).
 		Once()

@@ -102,9 +102,12 @@ func (r *VoteRepository) ExistsByNullifier(ctx context.Context, nullifier string
 
 func (r *VoteRepository) GetByProposal(ctx context.Context, proposalID string) ([]*entity.Vote, error) {
 	var votes []*entity.Vote
+	// 次级键 id 保证全序确定（F4）：merkle 叶子顺序决定计票锚点，服务端发布
+	// 与审计复算（cmd/audit-recompute 调同一个方法）必须读到完全相同的顺序 ——
+	// PostgreSQL 的微秒时间戳在高票速下会并列，并列行的相对顺序不保证稳定。
 	err := r.db.WithContext(ctx).
 		Where("proposal_id = ?", proposalID).
-		Order("created_at asc").
+		Order("created_at asc, id asc").
 		Find(&votes).Error
 	if err != nil {
 		return nil, err

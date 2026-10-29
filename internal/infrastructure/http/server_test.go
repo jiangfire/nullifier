@@ -742,3 +742,32 @@ func rawRequest(method string, path string, raw string) *http.Request {
 	req.Header.Set("Content-Type", "application/json")
 	return req
 }
+
+// adminTokens 的档位映射契约（配合 config.EnsureAdminBearerToken 的修复）：
+// 分级令牌已配置时不再生成临时 admin 令牌，admin 档只来自 admin_tokens.admin。
+func TestAdminTokens_TieredConfigKeepsConfiguredAdmin(t *testing.T) {
+	cfg := &config.Config{
+		AdminTokens: config.AdminTokensConfig{
+			Admin:    "tiered-admin",
+			Operator: "tiered-operator",
+		},
+	}
+
+	tokens := adminTokens(cfg)
+
+	require.Equal(t, "tiered-admin", tokens.Admin)
+	require.Equal(t, "tiered-operator", tokens.Operator)
+	require.Empty(t, tokens.Auditor)
+}
+
+func TestAdminTokens_LegacySingleTokenMapsToAdmin(t *testing.T) {
+	cfg := &config.Config{
+		AdminBearerToken: "legacy-admin",
+		AdminTokens:      config.AdminTokensConfig{Operator: "op-token"},
+	}
+
+	tokens := adminTokens(cfg)
+
+	require.Equal(t, "legacy-admin", tokens.Admin)
+	require.Equal(t, "op-token", tokens.Operator)
+}

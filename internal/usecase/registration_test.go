@@ -168,6 +168,8 @@ func TestRegisterUseCase_ReserveCredential_PoolEmpty(t *testing.T) {
 	uc := NewRegisterUseCaseWithPool(repo, proposalRepo, issuer, claimRepo, zap.NewNop())
 
 	proposalRepo.On("GetByID", mock.Anything, "p-1").Return(&entity.Proposal{ID: "p-1"}, nil).Once()
+	// 公钥加载在任何消耗之前发生（F2）：池空的判定在其后。
+	issuer.On("IssuerPublicKey", mock.Anything).Return(testIssuerKey(), nil).Once()
 	claimRepo.On("ReserveAvailable", mock.Anything, "p-1", mock.Anything).
 		Return((*entity.CredentialClaim)(nil), repository.ErrNotFound).
 		Once()

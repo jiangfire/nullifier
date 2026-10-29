@@ -147,9 +147,10 @@ function describeError(error: unknown): string {
 /**
  * 匿名领取的重试次数。
  *
- * 服务端取槽位时**不占位**（占位会变成「只预留不 attest 就能耗尽池」的 DoS），
- * 所以并发领取会抢到同一个槽位。抢输的那个换一个槽位重来 —— 但重试要重新
- * 盲化（新的 user_id 意味着新的消息），所以重试只能在客户端做。
+ * 服务端预留有 TTL 占位（v0.3.0 起）：并发领取各拿各的槽位，409
+ * `CREDENTIAL_EXISTS` 只在预留过期或被顶掉时出现。撞输的那个换一个槽位
+ * 重来 —— 但重试要重新盲化（新的 user_id 意味着新的消息），所以重试只能在
+ * 客户端做。资格材料与槽位无关，在重试循环外只备一次。
  */
 const claimMaxAttempts = 5;
 
@@ -1080,9 +1081,24 @@ export function useVotePortal() {
 
     const userPubKey = regenerateBase64Key();
     credentialLoading.value = true;
+
+    // 资格材料只与提案绑定（挑战 + 证明都不含槽位）：在重试循环外只备一次，
+    // 撞槽重试不再重烧一次 7~10 秒的零知识证明。
+    let claimBody: Record<string, string> = {};
+    try {
+      const eligibility = await buildEligibilityBody(proposalId);
+      if (eligibility !== null) {
+        claimBody = eligibility;
+      }
+    } catch (error) {
+      credentialLoading.value = false;
+      addNotice('error', '资格证明失败', describeError(error));
+      return false;
+    }
+
     let failure: CredentialFlowResult | null = null;
     for (let attempt = 0; attempt < claimMaxAttempts; attempt += 1) {
-      const result = await claimCredentialOnce(proposalId, userPubKey);
+      const result = await claimCredentialOnce(proposalId, userPubKey, claimBody);
       if (result.ok) {
         credentialLoading.value = false;
         const credential = result.credential;
@@ -1120,18 +1136,8 @@ export function useVotePortal() {
   async function claimCredentialOnce(
     proposalId: string,
     userPubKey: string,
+    claimBody: Record<string, string>,
   ): Promise<CredentialFlowResult> {
-    // 资格材料在**领取之前**备好：证明不过就不该消耗池槽位。
-    let claimBody: Record<string, string> = {};
-    try {
-      const eligibility = await buildEligibilityBody(proposalId);
-      if (eligibility !== null) {
-        claimBody = eligibility;
-      }
-    } catch (error) {
-      return { ok: false, title: '资格证明失败', message: describeError(error) };
-    }
-
     const reserve = await apiCall({
       baseUrl: apiBaseUrl.value,
       path: apiPaths.credentialClaim(proposalId),
@@ -1139,6 +1145,20 @@ export function useVotePortal() {
       body: claimBody,
     });
     if (!reserve.ok) {
+      // 资格已占用分两种情形：真·重复领取（本会话在这个提案上领到过凭证）与
+      // 上一次领取没有走完（claim 成功烧了资格、attest 没成 —— 领取是匿名的，
+      // 服务端无法区分两者，见 docs/review-fixes-2026-10-29.md 决策 D3）。
+      // 前者按「一人一票」提示；后者给准确的恢复指引，别让没投过票的人
+      // 以为自己投过。
+      const claimedHere = wallet.signature !== '' && wallet.proposalId === proposalId;
+      if (reserve.code === 'ELIGIBILITY_ALREADY_USED' && !claimedHere) {
+        return {
+          ok: false,
+          title: '领取没有完成',
+          message:
+            '这份资格在上一次领取时没有走完领取流程（例如中途关闭了页面），资格已被占用。同一提案无法再次领取：请改投其他提案，或联系运营方重新生成资格文件。',
+        };
+      }
       return {
         ok: false,
         title: '领取失败',
