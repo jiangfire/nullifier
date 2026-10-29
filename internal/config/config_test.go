@@ -176,6 +176,28 @@ func TestEnsureAdminBearerToken_KeepsConfiguredValue(t *testing.T) {
 	require.Equal(t, "fixed-token", cfg.AdminBearerToken)
 }
 
+func TestEnsureAdminBearerToken_SkipsGenerationWhenTieredTokensConfigured(t *testing.T) {
+	// 分级令牌任一档已配置就算「显式配置」：admin 档由 server.admin_tokens.admin
+	// 提供，这里再生成临时令牌会把它顶掉（server.go 的 adminTokens()），
+	// 还会把活令牌打进日志。刻意只配 operator/auditor 的分权部署同样适用。
+	for name, tokens := range map[string]AdminTokensConfig{
+		"admin tier only":  {Admin: "admin-token"},
+		"operator only":    {Operator: "operator-token"},
+		"auditor only":     {Auditor: "auditor-token"},
+		"operator+auditor": {Operator: "operator-token", Auditor: "auditor-token"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &Config{AdminTokens: tokens}
+
+			generated, err := EnsureAdminBearerToken(cfg)
+
+			require.NoError(t, err)
+			require.False(t, generated)
+			require.Empty(t, cfg.AdminBearerToken)
+		})
+	}
+}
+
 func TestLoad_FromConfigFile(t *testing.T) {
 	oldWD, err := os.Getwd()
 	require.NoError(t, err)
