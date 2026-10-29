@@ -573,6 +573,137 @@ describe('匿名领取凭证', () => {
     const errors = portal.notices.value.filter((item) => item.level === 'error');
     expect(errors.length).toBeGreaterThan(0);
   });
+
+  it('撞槽重试时资格材料只备一次（证明不重烧）', async () => {
+    generateEligibilityProofMock.mockClear();
+    let attestAttempts = 0;
+    let challengeCount = 0;
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('/eligibility-challenge'),
+        payload: () => {
+          challengeCount += 1;
+          return { proposal_id: 'p1', root: 'root-hex', depth: 10, challenge: 'challenge-hex' };
+        },
+      },
+      { match: (url) => url.includes('/credentials/claim'), payload: reservationPayload() },
+      { match: (url) => url.includes('/credentials/blind-sign'), payload: blindSignaturePayload() },
+      {
+        match: (url) => url.includes('/credentials/attest'),
+        status: () => {
+          attestAttempts += 1;
+          return attestAttempts <= 2 ? 409 : 200;
+        },
+        payload: () =>
+          attestAttempts <= 2
+            ? { code: 'CREDENTIAL_EXISTS', error: '凭证已存在' }
+            : attestedCredential(),
+      },
+    ]);
+    generateEligibilityProofMock.mockResolvedValue({
+      proof: 'eligibility-proof',
+      qualificationId: 'qualification-hex',
+      initMs: 100,
+      proveMs: 200,
+    });
+    const portal = setupPortal();
+    portal.eligibilityPackage.value = {
+      member_id: 'member-1',
+      secret: 'secret',
+      leaf: 'leaf',
+      index: 0,
+      path: ['sibling'],
+      root: 'root-hex',
+      depth: 10,
+    };
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(true);
+    // 资格材料只与提案绑定、与槽位无关：三次尝试只取一次挑战、出一次证明。
+    expect(challengeCount).toBe(1);
+    expect(generateEligibilityProofMock).toHaveBeenCalledTimes(1);
+    expect(calls.filter((item) => item.url.includes('/credentials/attest')).length).toBe(3);
+  });
+
+  it('资格已被占用且本会话没领到过凭证时：按「领取没有完成」提示，不重试', async () => {
+    const calls = stubFetch([
+      {
+        match: (url) => url.includes('/eligibility-challenge'),
+        payload: { proposal_id: 'p1', root: 'root-hex', depth: 10, challenge: 'challenge-hex' },
+      },
+      {
+        match: (url) => url.includes('/credentials/claim'),
+        status: 409,
+        payload: { code: 'ELIGIBILITY_ALREADY_USED', error: '资格已使用' },
+      },
+    ]);
+    generateEligibilityProofMock.mockResolvedValue({
+      proof: 'eligibility-proof',
+      qualificationId: 'qualification-hex',
+      initMs: 100,
+      proveMs: 200,
+    });
+    const portal = setupPortal();
+    portal.wallet.signature = ''; // 本会话没有领到过凭证
+    portal.eligibilityPackage.value = {
+      member_id: 'member-1',
+      secret: 'secret',
+      leaf: 'leaf',
+      index: 0,
+      path: ['sibling'],
+      root: 'root-hex',
+      depth: 10,
+    };
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(false);
+    // 资格已烧，重试没有意义：只发一次领取请求。
+    expect(calls.filter((item) => item.url.includes('/credentials/claim')).length).toBe(1);
+    const errors = portal.notices.value.filter((item) => item.level === 'error');
+    expect(errors[0]?.title).toBe('领取没有完成');
+    expect(errors[0]?.detail).toContain('没有走完');
+    // 不能再对没投过票的人说「一人一票」。
+    expect(errors[0]?.detail).not.toContain('一人一票');
+  });
+
+  it('资格已被占用且本会话已领到凭证时：维持「一人一票」文案', async () => {
+    stubFetch([
+      {
+        match: (url) => url.includes('/eligibility-challenge'),
+        payload: { proposal_id: 'p1', root: 'root-hex', depth: 10, challenge: 'challenge-hex' },
+      },
+      {
+        match: (url) => url.includes('/credentials/claim'),
+        status: 409,
+        payload: { code: 'ELIGIBILITY_ALREADY_USED', error: '资格已使用' },
+      },
+    ]);
+    generateEligibilityProofMock.mockResolvedValue({
+      proof: 'eligibility-proof',
+      qualificationId: 'qualification-hex',
+      initMs: 100,
+      proveMs: 200,
+    });
+    // setupPortal 默认带 signature —— 等价于「本会话已经领到过凭证」。
+    const portal = setupPortal();
+    portal.eligibilityPackage.value = {
+      member_id: 'member-1',
+      secret: 'secret',
+      leaf: 'leaf',
+      index: 0,
+      path: ['sibling'],
+      root: 'root-hex',
+      depth: 10,
+    };
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(false);
+    const errors = portal.notices.value.filter((item) => item.level === 'error');
+    expect(errors[0]?.detail).toContain('一人一票');
+  });
 });
 
 describe('查询投票状态', () => {
