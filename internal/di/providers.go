@@ -126,11 +126,16 @@ func NewMetrics() *metrics.Metrics {
 	return metrics.New()
 }
 
-func NewCredentialIssuer(cfg *config.Config) domaincrypto.CredentialIssuer {
-	return cryptoinfra.NewKryptologyCredentialIssuerWithFile(
+func NewCredentialIssuer(cfg *config.Config) (domaincrypto.CredentialIssuer, error) {
+	issuer := cryptoinfra.NewKryptologyCredentialIssuerWithFile(
 		cfg.CredentialIssuerKeyPath,
 		cfg.CredentialIssuerRotateAfter,
 	)
+	// keystore 文件损坏在这里暴露：启动失败，而不是每次凭证签发都 500（F10）。
+	if err := issuer.InitError(); err != nil {
+		return nil, fmt.Errorf("load credential issuer key: %w", err)
+	}
+	return issuer, nil
 }
 
 // NewEligibilityService 造资格校验服务。
