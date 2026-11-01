@@ -17,8 +17,8 @@
 import type {
   ProverResult,
   ProverWorkerMessage,
-  ProverWorkerReply,
 } from './wasm-prover-protocol';
+import { callProverWorker } from './prover-client';
 
 /** 出票所需的参数。 */
 export interface LocalBallotRequest {
@@ -77,31 +77,20 @@ export function toLocalBallotResult(result: ProverResult): LocalBallotResult {
 export async function generateLocalBallot(
   request: LocalBallotRequest,
 ): Promise<LocalBallotResult> {
-  const worker = new Worker(new URL('../workers/ballot-prover.worker.ts', import.meta.url));
-  try {
-    const message: ProverWorkerMessage = {
-      type: 'prove',
-      glueUrl: assetUrl('wasm_exec.js'),
-      wasmUrl: assetUrl('ballot-prover.wasm'),
-      provingKeyUrl: assetUrl('proving.key'),
-      request: {
-        proposal_id: request.proposalId,
-        election_public_key: request.electionPublicKey,
-        option_index: request.optionIndex,
-        num_options: request.numOptions,
-      },
-    };
-    const result = await new Promise<ProverResult>((resolve, reject) => {
-      worker.onmessage = (event: MessageEvent<ProverWorkerReply>) => {
-        resolve(event.data.result);
-      };
-      worker.onerror = (event: ErrorEvent) => {
-        reject(new Error(event.message || '浏览器端 prover 启动失败'));
-      };
-      worker.postMessage(message);
-    });
-    return toLocalBallotResult(result);
-  } finally {
-    worker.terminate();
-  }
+  const message: ProverWorkerMessage = {
+    type: 'prove',
+    glueUrl: assetUrl('wasm_exec.js'),
+    wasmUrl: assetUrl('ballot-prover.wasm'),
+    provingKeyUrl: assetUrl('proving.key'),
+    request: {
+      proposal_id: request.proposalId,
+      election_public_key: request.electionPublicKey,
+      option_index: request.optionIndex,
+      num_options: request.numOptions,
+    },
+  };
+  // Worker 常驻复用：运行时与电路在 Worker 侧缓存，第二张票不再重付
+  // 下载与编译的全价（见 lib/prover-client.ts）。
+  const result = await callProverWorker<ProverResult>(message);
+  return toLocalBallotResult(result);
 }
