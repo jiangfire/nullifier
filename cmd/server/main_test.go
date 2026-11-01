@@ -158,3 +158,13 @@ func TestWarnIfCORSEmpty(t *testing.T) {
 	warnIfCORSEmpty(logger, &config.Config{GinMode: "debug"})
 	require.Equal(t, 1, logs.Len())
 }
+
+// 启动日志的 eligibility_enforced 不能在多名单部署下撒谎（N1）：
+// 单名单（旧写法）与多名单（列表写法）都算强制开启。
+func TestEligibilityEnforced(t *testing.T) {
+	require.False(t, eligibilityEnforced(&config.Config{}))
+	require.True(t, eligibilityEnforced(&config.Config{EligibilityRoot: "abc"}))
+	require.True(t, eligibilityEnforced(&config.Config{
+		EligibilityRosters: []config.EligibilityRosterConfig{{Name: "acme"}},
+	}))
+}

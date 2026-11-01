@@ -462,3 +462,15 @@ func TestVerifyList(t *testing.T) {
 	// ⑤ 没有 root.json 的目录 → 失败。
 	require.Equal(t, 1, run([]string{"-verify", t.TempDir()}))
 }
+
+// 纯文本名单同样要 BOM 容错（N2）：Windows 记事本另存 UTF-8 默认带 BOM，
+// 不剥的话首个成员标识会粘上不可见的 U+FEFF，本人对不上号。
+func TestReadMembersTxtWithBOM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "members.txt")
+	content := "\ufeffE-002\nE-001\n"
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	members, err := readMembers(path, "")
+	require.NoError(t, err)
+	require.Equal(t, []string{"E-001", "E-002"}, members)
+}

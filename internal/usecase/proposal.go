@@ -98,6 +98,14 @@ func (uc *ProposalUseCase) Create(ctx context.Context, req *CreateProposalReques
 
 	// 名单域绑定：存在性在创建时就核过，领取链路（挑战 / 证明校验）据此解析。
 	scope := strings.TrimSpace(req.EligibilityScope)
+	// 长度先于存在性：列是 size:64，超长值在 PostgreSQL 上是 500 ——
+	// 别让部署形态决定错误的长相。
+	if len(scope) > 64 {
+		return nil, fmt.Errorf(
+			"%w: eligibility_scope must be at most 64 characters",
+			ErrInvalidRequest,
+		)
+	}
 	if scope != "" {
 		if uc.eligibility == nil || !uc.eligibility.Enabled() {
 			return nil, fmt.Errorf(

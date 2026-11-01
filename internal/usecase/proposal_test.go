@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,4 +227,27 @@ func TestProposalUseCase_Create_AllowsAlreadyOpenWindow(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.NotNil(t, proposal)
+}
+
+// eligibility_scope 超过 64 字符 → 创建时拒绝（N5）：列是 size:64，
+// PostgreSQL 上超长值会炸 500，SQLite 不纠察 —— 统一在用例层拦。
+func TestProposalUseCase_Create_RejectsTooLongScope(t *testing.T) {
+	repo := new(proposalRepositoryMock)
+	eligibility := new(eligibilityServiceMock)
+	eligibility.On("Enabled").Return(true).Maybe()
+	// ScopeKnown 不设期望：长度检查必须发生在名单存在性检查**之前**。
+	uc := NewProposalUseCase(repo, eligibility, zap.NewNop())
+
+	_, err := uc.Create(context.Background(), &CreateProposalRequest{
+		Title:            "Board Election",
+		Options:          []string{"A", "B"},
+		StartsAt:         time.Now().UTC().Add(1 * time.Hour),
+		EndsAt:           time.Now().UTC().Add(2 * time.Hour),
+		EligibilityScope: strings.Repeat("a", 65),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "at most 64 characters")
+	eligibility.AssertNotCalled(t, "ScopeKnown", mock.Anything)
+	repo.AssertNotCalled(t, "Save", mock.Anything, mock.Anything)
 }

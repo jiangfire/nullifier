@@ -504,6 +504,11 @@ func validateEligibilityRosters(rosters []EligibilityRosterConfig) error {
 		if roster.Name == "" {
 			return fmt.Errorf("crypto.eligibility_roots[%d]: name is required", i)
 		}
+		// proposals.eligibility_scope 是 64 字符列：超长的名单名会在建提案时
+		// 撞数据库错误（SQLite 不纠察，PostgreSQL 上是 500）—— 配置阶段拦下。
+		if len(roster.Name) > 64 {
+			return fmt.Errorf("crypto.eligibility_roots[%d]: name must be at most 64 characters", i)
+		}
 		if roster.Root == "" {
 			return fmt.Errorf("crypto.eligibility_roots[%d] (%s): root is required", i, roster.Name)
 		}

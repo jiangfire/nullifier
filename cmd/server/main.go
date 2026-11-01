@@ -119,7 +119,7 @@ func serve(migrateOnly bool) error {
 		zap.String("admin_token_source", adminTokenSource),
 		zap.Bool("proof_verification_enabled", strings.TrimSpace(cfg.VerifyingKeyPath) != ""),
 		// 一人一票是不是真的开着：这是运营最需要一眼看到的运行状态。
-		zap.Bool("eligibility_enforced", strings.TrimSpace(cfg.EligibilityRoot) != ""),
+		zap.Bool("eligibility_enforced", eligibilityEnforced(cfg)),
 	)
 
 	// 临时 token 只对当前进程有效，必须让运维看见；
@@ -173,4 +173,10 @@ func warnIfCORSEmpty(logger *zap.Logger, cfg *config.Config) {
 	logger.Warn(
 		"server.cors_allowed_origins is empty: a portal served from another origin will be blocked by the browser",
 	)
+}
+
+// eligibilityEnforced 报告一人一票是否强制开启：单名单（旧写法）与多名单
+// （列表写法）都算 —— 启动日志的这个字段不能在多名单部署下撒谎（N1）。
+func eligibilityEnforced(cfg *config.Config) bool {
+	return strings.TrimSpace(cfg.EligibilityRoot) != "" || len(cfg.EligibilityRosters) > 0
 }

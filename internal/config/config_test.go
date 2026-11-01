@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -951,4 +952,23 @@ crypto:
 	cfg, err = Load()
 	require.NoError(t, err)
 	require.Equal(t, "tok-op", cfg.AdminTokens.Operator)
+}
+
+// 名字超过 64 字符 → 启动失败（N5）：proposals.eligibility_scope 是 64 字符列，
+// PostgreSQL 上超长名单名会在建提案时炸 500 —— 配置阶段就拦下。
+func TestLoad_EligibilityRostersRejectsTooLongName(t *testing.T) {
+	configFile := writeRosterConfigFile(t, `
+server:
+  mode: debug
+crypto:
+  eligibility_roots:
+    - name: `+strings.Repeat("a", 65)+`
+      root: `+testEligibilityRoot+`
+      vk_path: keys/acme.key
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+
+	_, err := Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "at most 64 characters")
 }
