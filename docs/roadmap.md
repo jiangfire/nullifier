@@ -1057,8 +1057,8 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 | F9 | 多名单且无 default 时空 scope 提案创建成功但首个领取者吃 500（`ScopeKnown("")` 恒真、错误不是领域错误）—— `CreateProposal` 在资格开启、scope 为空且无 default 可解析时 400 拒绝 | `internal/domain/crypto/eligibility.go` + `internal/usecase/proposal.go` |
 | F10 | 签发方 keystore 加载失败被推迟成运行期 initErr，与资格密钥 fail-fast 口径不一致 —— 构造时返回错误，或启动时显式 `IssuerPublicKey` 预检 | `internal/infrastructure/crypto/kryptology_credential_issuer.go` |
 | F11 | `PublishResult` 落 result 与落 audit anchor 不在同一事务，anchor 写失败即永久缺失（唯一索引挡住重试）—— 两笔写入包进一个事务，或允许对已发布提案补偿写 anchor | `internal/usecase/tally.go` |
-| F12 | 门户 blind-sign 409 `CREDENTIAL_EXISTS` 不重试（attest 分支有 `retryable`，与服务端/CLI 契约不一致）；`cmd/cli/main.go` 的「预留不占位」注释也已过时 —— 补 `retryable` + 对称单测 + 修注释 | `web/src/composables/useVotePortal.ts` |
-| F13 | 运营端创建提案无 `eligibility_scope` 入口，多名单特性从 UI 不可达 —— OpsPanel 创建表单加可选「资格名单」下拉（数据源 `/healthz` 的 `eligibility_rosters`），或文档注明走 API/CLI | `web/src/components/panels/` |
+| F12 | ✅ **已修（2026-10-29）**：blind-sign 分支补 `retryable` + 单测；CLI 过时注释已改 | `web/src/composables/useVotePortal.ts` |
+| F13 | ✅ **已修（2026-10-29，走备选方案）**：CLI `proposal-create` 补 `-scope` 标志（带请求体单测），部署清单 §7 写明多名单提案走 CLI。**门户下拉不做**：`/healthz` 只报名单套数，做下拉得把名单名字暴露到公开端点 —— 那是产品决策（名单名可能含组织信息），另行拍板；运营期间 CLI 足够 | `cmd/cli/main.go` + 部署清单 |
 
 **P2 —— Nit（排期，不阻塞）**：启动日志 `eligibility_enforced` 不认多名单配置恒 false（`cmd/server/main.go`）·
 `eligibility-list` 的 `.txt` 分支不剥 UTF-8 BOM（与注释不符）· `CreateProposal` 不拒绝过去的 `starts_at`

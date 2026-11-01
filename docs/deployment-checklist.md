@@ -378,7 +378,7 @@
 |---|---|---|---|
 | 1 | 生成资格密钥与名单 | `cmd/keygen -circuit eligibility`（**资格那把**）+ `cmd/eligibility-list -members <名单.txt> -out <目录>`。**详见 §2.2 的顺序** —— 这一步要在起服务端之前做完 | ☐ |
 | 2 | 生成选票证明密钥 | `cmd/keygen`（**选票那把**，与资格那把是两套电路、两把钥匙）。`verifying.key` 部署到服务端；**`proving.key` 分发给投票人**（CLI 用它跑 `ballot-prove`；门户用 `make web-proving-key` 放进静态目录），**不要**进服务端镜像 | ☐ |
-| 3 | 创建提案 | `POST /api/v1/proposals` 或 `cli proposal-create` | ☐ |
+| 3 | 创建提案 | `POST /api/v1/proposals` 或 `cli proposal-create`。⚠️ **多名单部署**：要绑名单域的提案目前**门户没有入口**，走 `cli proposal-create -scope <名单名>`（空 = default 名单）；名单名看服务端配置的 `crypto.eligibility_roots` | ☐ |
 | 4 | 往凭证池投槽位 | `POST /api/v1/proposals/:id/credentials/pool`（管理端） | ☐ |
 | 5 | **初始化门限解密会话** | `POST /api/v1/proposals/:id/decryption/setup`。⚠️ **必须在投票窗口打开之前** —— 服务端会拒绝「投票开放中」的提案 | ☐ |
 | 6 | 开放投票窗口 | 提案的 `starts_at` / `ends_at` | ☐ |

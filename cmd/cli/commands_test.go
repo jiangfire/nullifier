@@ -575,3 +575,52 @@ func TestHelpers_EnvOrDefault(t *testing.T) {
 	t.Setenv("NULLIFIER_CLI_TEST_KEY", "value")
 	require.Equal(t, "value", envOrDefault("NULLIFIER_CLI_TEST_KEY", "fallback"))
 }
+
+// 多名单提案走 CLI 创建（F13）：-scope 进请求体；不带时不发该字段
+// （空 = 默认名单，不发空字符串）。
+func TestProposalCreate_Scope(t *testing.T) {
+	t.Run("带 -scope", func(t *testing.T) {
+		srv, requests := newRecordingServer(t, http.StatusOK, `{"id":"p1"}`)
+		code := 0
+		_, errOut := captureOutput(t, func() {
+			code = run([]string{
+				"-base-url", srv.URL,
+				"-admin-token", "test-token",
+				"proposal-create",
+				"-title", "Board",
+				"-options", "A,B",
+				"-start", "2026-03-18T10:00:00Z",
+				"-end", "2026-03-18T12:00:00Z",
+				"-scope", "acme-2026",
+			})
+		})
+		require.Equal(t, 0, code, "命令失败: %s", errOut)
+
+		req := <-requests
+		var body map[string]any
+		require.NoError(t, json.Unmarshal([]byte(req.Body), &body))
+		require.Equal(t, "acme-2026", body["eligibility_scope"])
+	})
+
+	t.Run("不带 -scope 不发字段", func(t *testing.T) {
+		srv, requests := newRecordingServer(t, http.StatusOK, `{"id":"p1"}`)
+		code := 0
+		_, errOut := captureOutput(t, func() {
+			code = run([]string{
+				"-base-url", srv.URL,
+				"-admin-token", "test-token",
+				"proposal-create",
+				"-title", "Board",
+				"-options", "A,B",
+				"-start", "2026-03-18T10:00:00Z",
+				"-end", "2026-03-18T12:00:00Z",
+			})
+		})
+		require.Equal(t, 0, code, "命令失败: %s", errOut)
+
+		req := <-requests
+		var body map[string]any
+		require.NoError(t, json.Unmarshal([]byte(req.Body), &body))
+		require.NotContains(t, body, "eligibility_scope")
+	})
+}
