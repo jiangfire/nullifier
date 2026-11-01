@@ -28,7 +28,10 @@ func InitializeServer(cfg *config.Config) (*httpapi.Server, error) {
 		return nil, err
 	}
 	encrypter := NewEncrypter()
-	credentialIssuer := NewCredentialIssuer(cfg)
+	credentialIssuer, err := NewCredentialIssuer(cfg)
+	if err != nil {
+		return nil, err
+	}
 	logger, err := NewLogger(cfg)
 	if err != nil {
 		return nil, err

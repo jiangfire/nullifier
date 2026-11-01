@@ -704,6 +704,63 @@ describe('匿名领取凭证', () => {
     const errors = portal.notices.value.filter((item) => item.level === 'error');
     expect(errors[0]?.detail).toContain('一人一票');
   });
+
+  it('盲签名阶段槽位被抢时换一个槽位重来（与服务端/CLI 契约一致，F12）', async () => {
+    generateEligibilityProofMock.mockClear();
+    let blindSignAttempts = 0;
+    const calls = stubFetch([
+      { match: (url) => url.includes('/credentials/claim'), payload: reservationPayload() },
+      {
+        match: (url) => url.includes('/credentials/blind-sign'),
+        status: () => {
+          blindSignAttempts += 1;
+          return blindSignAttempts === 1 ? 409 : 200;
+        },
+        payload: () =>
+          blindSignAttempts === 1
+            ? { code: 'CREDENTIAL_EXISTS', error: '凭证已存在' }
+            : blindSignaturePayload(),
+      },
+      { match: (url) => url.includes('/credentials/attest'), payload: attestedCredential() },
+    ]);
+    const portal = setupPortal();
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(true);
+    expect(calls.filter((item) => item.url.includes('/credentials/blind-sign')).length).toBe(2);
+    expect(portal.wallet.userId).not.toBe('');
+  });
+
+  it('资格文件树深与服务端名单不一致时，出证明前就报精确错误（N7）', async () => {
+    stubFetch([
+      {
+        match: (url) => url.includes('/eligibility-challenge'),
+        payload: { proposal_id: 'p1', root: 'root-hex', depth: 12, challenge: 'challenge-hex' },
+      },
+    ]);
+    generateEligibilityProofMock.mockClear();
+    const portal = setupPortal();
+    portal.eligibilityPackage.value = {
+      member_id: 'member-1',
+      secret: 'secret',
+      leaf: 'leaf',
+      index: 0,
+      path: ['sibling'],
+      root: 'root-hex',
+      depth: 10,
+    };
+
+    const claimed = await portal.claimCredential();
+
+    expect(claimed).toBe(false);
+    // 白烧 7~10 秒之前就拦下：证明根本不该被生成。
+    expect(generateEligibilityProofMock).not.toHaveBeenCalled();
+    const errors = portal.notices.value.filter((item) => item.level === 'error');
+    expect(errors[0]?.detail).toContain('树深不一致');
+    expect(errors[0]?.detail).toContain('10');
+    expect(errors[0]?.detail).toContain('12');
+  });
 });
 
 describe('查询投票状态', () => {

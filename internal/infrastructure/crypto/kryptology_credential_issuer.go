@@ -78,6 +78,15 @@ func NewKryptologyCredentialIssuerWithFile(storePath string, rotateAfter time.Du
 	return issuer
 }
 
+// InitError 返回构造时加载/生成签名密钥的失败（没有则 nil）。
+//
+// 构造函数签名保持不带 error（大量测试调用方），失败推迟到这里暴露；
+// DI 在装配时调用它 —— keystore 文件损坏应当在启动时失败，
+// 而不是带着坏 keystore 上线、每次凭证签发都 500（F10）。
+func (k *KryptologyCredentialIssuer) InitError() error {
+	return k.initErr
+}
+
 func (k *KryptologyCredentialIssuer) bootstrap() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()

@@ -85,7 +85,7 @@ func TestTallyUseCase_SetupAndPublishResult(t *testing.T) {
 	assert.Equal(t, 1, result.Tally["candidate-B"])
 	assert.NotEmpty(t, result.MerkleRoot)
 	assert.NotEmpty(t, result.AnchorHash)
-	require.Len(t, anchorRepo.items[proposal.ID], 1)
+	require.Len(t, resultRepo.anchors[proposal.ID], 1)
 
 	stored, err := uc.GetResult(context.Background(), proposal.ID)
 	require.NoError(t, err)
@@ -133,11 +133,95 @@ func TestTallyUseCase_RejectsRepeatedSetupAndPublish(t *testing.T) {
 
 	_, err = uc.PublishResult(ctx, proposal.ID, setup.Shares[:2])
 	require.NoError(t, err)
-	require.Len(t, anchorRepo.items[proposal.ID], 1)
+	require.Len(t, resultRepo.anchors[proposal.ID], 1)
 
 	_, err = uc.PublishResult(ctx, proposal.ID, setup.Shares[:2])
 	require.ErrorIs(t, err, ErrResultAlreadyPublished)
-	require.Len(t, anchorRepo.items[proposal.ID], 1)
+	require.Len(t, resultRepo.anchors[proposal.ID], 1)
+}
+
+// 并发双发布撞唯一索引（仓储回 ErrDuplicateTallyResult）→ 409 而非 500（N4）。
+func TestTallyUseCase_PublishResult_MapsDuplicateTo409(t *testing.T) {
+	voteRepo := new(inMemoryVoteRepo)
+	proposalRepo := new(inMemoryProposalRepo)
+	proposalRepo.items = map[string]*entity.Proposal{}
+	sessionRepo := new(inMemoryDecryptionSessionRepo)
+	resultRepo := new(inMemoryTallyResultRepo)
+	anchorRepo := new(inMemoryAuditAnchorRepo)
+	cryptoSvc := new(fakeThresholdCrypto)
+
+	now := time.Now().UTC()
+	proposal := &entity.Proposal{
+		ID:       "proposal-dup",
+		Title:    "Election",
+		Options:  []string{"candidate-A", "candidate-B"},
+		Status:   "closed",
+		StartsAt: now.Add(-2 * time.Hour),
+		EndsAt:   now.Add(-1 * time.Hour),
+	}
+	proposalRepo.items[proposal.ID] = proposal
+
+	uc := NewTallyUseCase(
+		voteRepo,
+		proposalRepo,
+		sessionRepo,
+		resultRepo,
+		anchorRepo,
+		cryptoSvc,
+		new(fakeMerkleBuilder),
+		zap.NewNop(),
+	)
+	ctx := context.Background()
+
+	setup, err := uc.SetupThresholdSession(ctx, proposal.ID, 2, 3)
+	require.NoError(t, err)
+
+	pubKeyBytes, err := base64.StdEncoding.DecodeString(setup.PublicKey)
+	require.NoError(t, err)
+	cipherA, err := cryptoSvc.Encrypt(pubKeyBytes, 0)
+	require.NoError(t, err)
+	voteRepo.items = append(voteRepo.items,
+		&entity.Vote{ID: "v1", ProposalID: proposal.ID, Nullifier: "n1", Cipher: cipherA, CreatedAt: time.Now().UTC()},
+	)
+
+	// 对手已经发布成功：仓储层的唯一索引把第二次发布挡成领域错误。
+	resultRepo.forceSaveWithAnchorErr = repository.ErrDuplicateTallyResult
+
+	_, err = uc.PublishResult(ctx, proposal.ID, setup.Shares[:2])
+	require.ErrorIs(t, err, ErrResultAlreadyPublished)
+}
+
+// 会话仓储回 ErrDuplicateDecryptionSession（并发双建撞唯一索引）→ 409（N4）。
+func TestTallyUseCase_SetupSession_MapsDuplicateTo409(t *testing.T) {
+	proposalRepo := new(inMemoryProposalRepo)
+	proposalRepo.items = map[string]*entity.Proposal{}
+	now := time.Now().UTC()
+	proposal := &entity.Proposal{
+		ID:       "proposal-session-dup",
+		Title:    "Election",
+		Options:  []string{"candidate-A", "candidate-B"},
+		Status:   "closed",
+		StartsAt: now.Add(-2 * time.Hour),
+		EndsAt:   now.Add(-1 * time.Hour),
+	}
+	proposalRepo.items[proposal.ID] = proposal
+
+	sessionRepo := new(inMemoryDecryptionSessionRepo)
+	sessionRepo.forceSaveErr = repository.ErrDuplicateDecryptionSession
+
+	uc := NewTallyUseCase(
+		new(inMemoryVoteRepo),
+		proposalRepo,
+		sessionRepo,
+		new(inMemoryTallyResultRepo),
+		new(inMemoryAuditAnchorRepo),
+		new(fakeThresholdCrypto),
+		new(fakeMerkleBuilder),
+		zap.NewNop(),
+	)
+
+	_, err := uc.SetupThresholdSession(context.Background(), proposal.ID, 2, 3)
+	require.ErrorIs(t, err, ErrSessionAlreadyExists)
 }
 
 func TestTallyUseCase_PublishResult_RejectsInsufficientShares(t *testing.T) {
@@ -500,7 +584,7 @@ func TestTallyUseCase_PublishResult_RejectsOutOfRangeOptionIndex(t *testing.T) {
 	_, err = uc.PublishResult(context.Background(), proposal.ID, setup.Shares[:2])
 	require.ErrorIs(t, err, ErrInvalidRequest)
 	require.Empty(t, resultRepo.items)
-	require.Empty(t, anchorRepo.items[proposal.ID])
+	require.Empty(t, resultRepo.anchors)
 }
 
 // ---- in-memory fakes ----
@@ -548,9 +632,14 @@ func (r *inMemoryProposalRepo) ListAll(ctx context.Context) ([]*entity.Proposal,
 
 type inMemoryDecryptionSessionRepo struct {
 	items map[string]*entity.DecryptionSession
+	// forceSaveErr 非空时 Save 直接返回它（并发双建撞唯一索引的用例注入）。
+	forceSaveErr error
 }
 
 func (r *inMemoryDecryptionSessionRepo) Save(ctx context.Context, session *entity.DecryptionSession) error {
+	if r.forceSaveErr != nil {
+		return r.forceSaveErr
+	}
 	if r.items == nil {
 		r.items = map[string]*entity.DecryptionSession{}
 	}
@@ -576,6 +665,11 @@ func (r *inMemoryDecryptionSessionRepo) GetByProposal(
 
 type inMemoryTallyResultRepo struct {
 	items map[string]*entity.TallyResult
+	// anchors 收 SaveWithAnchor 落进来的锚点（发布走原子路径）。
+	anchors map[string][]*entity.AuditAnchor
+	// forceSaveWithAnchorErr 非空时 SaveWithAnchor 直接返回它，
+	// 供「并发发布撞唯一索引」一类的用例注入。
+	forceSaveWithAnchorErr error
 }
 
 func (r *inMemoryTallyResultRepo) Save(ctx context.Context, result *entity.TallyResult) error {
@@ -585,6 +679,20 @@ func (r *inMemoryTallyResultRepo) Save(ctx context.Context, result *entity.Tally
 	cloned := *result
 	cloned.Tally = cloneTally(result.Tally)
 	r.items[result.ProposalID] = &cloned
+	return nil
+}
+
+func (r *inMemoryTallyResultRepo) SaveWithAnchor(ctx context.Context, result *entity.TallyResult, anchor *entity.AuditAnchor) error {
+	if r.forceSaveWithAnchorErr != nil {
+		return r.forceSaveWithAnchorErr
+	}
+	if err := r.Save(ctx, result); err != nil {
+		return err
+	}
+	if r.anchors == nil {
+		r.anchors = map[string][]*entity.AuditAnchor{}
+	}
+	r.anchors[result.ProposalID] = append(r.anchors[result.ProposalID], anchor)
 	return nil
 }
 

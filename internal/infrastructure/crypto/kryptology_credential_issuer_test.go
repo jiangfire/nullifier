@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -44,6 +45,26 @@ func TestKryptologyCredentialIssuer_BlindSignAndVerify(t *testing.T) {
 	version, err := issuer.VerifyCredential("user-1", []byte("user-public-key"), signature)
 	require.NoError(t, err)
 	require.Equal(t, 1, version)
+}
+
+// keystore 文件损坏时构造函数不吞错：InitError 把失败暴露给 DI，
+// 启动即失败，而不是带着坏 keystore 上线、每次签发都 500（F10）。
+func TestKryptologyCredentialIssuer_InitErrorForCorruptedStore(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "issuer_keys.json")
+	require.NoError(t, os.WriteFile(store, []byte("{not json"), 0o600))
+
+	issuer := NewKryptologyCredentialIssuerWithFile(store, 0)
+
+	require.Error(t, issuer.InitError())
+	require.Contains(t, issuer.InitError().Error(), "decode issuer keystore")
+}
+
+// 正常路径：新建 keystore 或加载成功时 InitError 为 nil。
+func TestKryptologyCredentialIssuer_InitErrorNilForHealthyStore(t *testing.T) {
+	issuer := NewKryptologyCredentialIssuerWithFile(filepath.Join(t.TempDir(), "issuer_keys.json"), 0)
+	require.NoError(t, issuer.InitError())
+
+	require.NoError(t, NewKryptologyCredentialIssuer().InitError())
 }
 
 func TestKryptologyCredentialIssuer_VerifyRejectsTamperedSignature(t *testing.T) {

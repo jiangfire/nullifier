@@ -38,6 +38,16 @@ func TestSchemaReady_FalseForNilDB(t *testing.T) {
 	require.False(t, SchemaReady(nil))
 }
 
+// v0.3.0 的库缺 v0.4.0 新列 eligibility_scope：升级忘跑 -migrate 时必须启动
+// 失败，而不是等第一个建提案的请求才报「no such column」（F6）。
+func TestSchemaReady_FalseWhenEligibilityScopeColumnMissing(t *testing.T) {
+	db := newMemoryDB(t)
+	require.NoError(t, AutoMigrate(db))
+	require.NoError(t, db.Exec("ALTER TABLE proposals DROP COLUMN eligibility_scope").Error)
+
+	require.False(t, SchemaReady(db), "缺少 v0.4.0 新列 proposals.eligibility_scope 时不应被视为就绪")
+}
+
 func TestAutoMigrate_CreatesAllTables(t *testing.T) {
 	db := newMemoryDB(t)
 	require.NoError(t, AutoMigrate(db))

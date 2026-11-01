@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,4 +175,79 @@ func TestProposalUseCase_Create_EligibilityScope(t *testing.T) {
 	)).Return(nil).Once()
 	_, err = uc.Create(context.Background(), baseReq(""))
 	require.NoError(t, err)
+}
+
+// 空 scope + 资格已开启 + 默认名单解析不出 → 创建时就拒绝（F9）：
+// 不能等第一个投票人打挑战时才 500。
+func TestProposalUseCase_Create_EmptyScopeRequiresDefaultRoster(t *testing.T) {
+	newUsecase := func(rosterErr error) (*ProposalUseCase, *proposalRepositoryMock) {
+		repo := new(proposalRepositoryMock)
+		eligibility := new(eligibilityServiceMock)
+		eligibility.On("Enabled").Return(true).Maybe()
+		eligibility.On("RosterFor", "").Return("", 0, rosterErr)
+		return NewProposalUseCase(repo, eligibility, zap.NewNop()), repo
+	}
+	req := func() *CreateProposalRequest {
+		return &CreateProposalRequest{
+			Title:    "Board Election",
+			Options:  []string{"A", "B"},
+			StartsAt: time.Now().UTC().Add(1 * time.Hour),
+			EndsAt:   time.Now().UTC().Add(2 * time.Hour),
+		}
+	}
+
+	uc, repo := newUsecase(errors.New("no default roster"))
+	_, err := uc.Create(context.Background(), req())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "default eligibility roster")
+	repo.AssertNotCalled(t, "Save", mock.Anything, mock.Anything)
+
+	// 默认名单解析得出 → 空 scope 正常落库。
+	uc, repo = newUsecase(nil)
+	repo.On("Save", mock.Anything, mock.AnythingOfType("*entity.Proposal")).Return(nil).Once()
+	proposal, err := uc.Create(context.Background(), req())
+	require.NoError(t, err)
+	assert.Equal(t, "", proposal.EligibilityScope)
+}
+
+// 创建时窗口已在投票中 → **允许**：解密会话在关窗后仍可建立（守卫只拦
+// 「开放中」），危害只是这个窗口作废而非提案永久不可用；多名单 e2e 的
+// 领取链路测试也依赖创建开窗提案。这条用例把该行为钉住，防止将来被
+// 「防呆」改动悄悄破坏。
+func TestProposalUseCase_Create_AllowsAlreadyOpenWindow(t *testing.T) {
+	repo := new(proposalRepositoryMock)
+	uc := NewProposalUseCase(repo, nil, zap.NewNop())
+
+	repo.On("Save", mock.Anything, mock.AnythingOfType("*entity.Proposal")).Return(nil).Once()
+	proposal, err := uc.Create(context.Background(), &CreateProposalRequest{
+		Title:    "Board Election",
+		Options:  []string{"A", "B"},
+		StartsAt: time.Now().UTC().Add(-1 * time.Hour),
+		EndsAt:   time.Now().UTC().Add(1 * time.Hour),
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, proposal)
+}
+
+// eligibility_scope 超过 64 字符 → 创建时拒绝（N5）：列是 size:64，
+// PostgreSQL 上超长值会炸 500，SQLite 不纠察 —— 统一在用例层拦。
+func TestProposalUseCase_Create_RejectsTooLongScope(t *testing.T) {
+	repo := new(proposalRepositoryMock)
+	eligibility := new(eligibilityServiceMock)
+	eligibility.On("Enabled").Return(true).Maybe()
+	// ScopeKnown 不设期望：长度检查必须发生在名单存在性检查**之前**。
+	uc := NewProposalUseCase(repo, eligibility, zap.NewNop())
+
+	_, err := uc.Create(context.Background(), &CreateProposalRequest{
+		Title:            "Board Election",
+		Options:          []string{"A", "B"},
+		StartsAt:         time.Now().UTC().Add(1 * time.Hour),
+		EndsAt:           time.Now().UTC().Add(2 * time.Hour),
+		EligibilityScope: strings.Repeat("a", 65),
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidRequest)
+	assert.Contains(t, err.Error(), "at most 64 characters")
+	eligibility.AssertNotCalled(t, "ScopeKnown", mock.Anything)
+	repo.AssertNotCalled(t, "Save", mock.Anything, mock.Anything)
 }

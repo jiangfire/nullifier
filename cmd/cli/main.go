@@ -224,6 +224,9 @@ func (c *cli) cmdCreateProposal(args []string) error {
 	options := fs.String("options", "", "comma separated options")
 	start := fs.String("start", "", "RFC3339 starts_at")
 	end := fs.String("end", "", "RFC3339 ends_at")
+	// eligibility_scope 是 v0.4.0 的多名单绑定（F13）：门户创建表单暂无入口，
+	// 多名单提案从这里创建。空 = 走名为 default 的名单。
+	scope := fs.String("scope", "", "eligibility roster scope (multi-roster deployments)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -237,6 +240,9 @@ func (c *cli) cmdCreateProposal(args []string) error {
 		"options":     splitCSV(*options),
 		"starts_at":   strings.TrimSpace(*start),
 		"ends_at":     strings.TrimSpace(*end),
+	}
+	if trimmed := strings.TrimSpace(*scope); trimmed != "" {
+		body["eligibility_scope"] = trimmed
 	}
 	var out map[string]any
 	if err := c.postJSON("/api/v1/proposals", body, true, &out); err != nil {
@@ -277,9 +283,9 @@ func (r *credentialReservation) issuerPublicKey() (*domaincrypto.IssuerPublicKey
 
 // claimMaxAttempts 是匿名领取的重试次数。
 //
-// 预留**不占位**：服务端取槽位时不改状态，所以并发领取会抢到同一个槽位。抢输的
-// 那个换一个槽位重来 —— 但重试要重新盲化（新的 user_id 意味着新的消息），所以
-// 重试只能在客户端做。
+// 服务端预留有 TTL 占位（v0.3.0 起）：并发领取各拿各的槽位，409 只在预留
+// 过期或被顶掉时出现。撞输的那个换一个槽位重来 —— 但重试要重新盲化（新的
+// user_id 意味着新的消息），所以重试只能在客户端做。
 const claimMaxAttempts = 5
 
 // runBlindSignatureFlow 走完真两段式盲签名的**客户端侧**，并在槽位被抢时重试。
@@ -1229,7 +1235,7 @@ func printRootUsage() {
   health
   version
   proposals-open
-  proposal-create   -title -description -options -start -end
+  proposal-create   -title -description -options -start -end [-scope 名单域]  (多名单提案从这里建,门户暂无入口)
   credential-issue  -proposal -user [-pubkey] [-out]  (需要 admin token)
   credential-claim  -proposal [-pubkey] [-out]         (匿名领取:凭证池随机给一张)
                      [-eligibility 包.json -proving-key 资格.key]  (带资格证明领取:一人一票)

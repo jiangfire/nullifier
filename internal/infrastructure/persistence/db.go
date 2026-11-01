@@ -179,6 +179,11 @@ func registerSQLiteMemTempDriver() {
 	registerSQLiteMemTempDriverOnce.Do(func() {
 		sql.Register(sqliteMemTempDriverName, &sqlite3.SQLiteDriver{
 			ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+				// busy_timeout 在这里显式钉死：并发写等锁的时长此前依赖驱动的
+				// 默认值（5000ms），驱动升级改默认就会悄悄变。
+				if _, err := conn.Exec("PRAGMA busy_timeout=5000", nil); err != nil {
+					return err
+				}
 				_, err := conn.Exec("PRAGMA temp_store=MEMORY", nil)
 				return err
 			},

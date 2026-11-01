@@ -33,7 +33,9 @@ func AutoMigrate(db *gorm.DB) error {
 // SchemaReady 判断数据库结构是否已就绪。
 //
 // 关闭自动迁移时用它做启动前的检查：表不存在就立刻失败，
-// 而不是等第一个请求打进来才报「no such table」。
+// 而不是等第一个请求打进来才报「no such table」。除了表，还要核对
+// v0.4.0 新增的 proposals.eligibility_scope 列 —— v0.3.0 升级忘跑
+// `-migrate` 时缺的是列而不是表，只查表会放过。
 func SchemaReady(db *gorm.DB) bool {
 	if db == nil {
 		return false
@@ -41,6 +43,7 @@ func SchemaReady(db *gorm.DB) bool {
 	migrator := db.Migrator()
 	return migrator.HasTable(&entity.Vote{}) &&
 		migrator.HasTable(&entity.Proposal{}) &&
+		migrator.HasColumn(&entity.Proposal{}, "eligibility_scope") &&
 		migrator.HasTable(&entity.Credential{}) &&
 		migrator.HasTable(&entity.CredentialClaim{}) &&
 		migrator.HasTable(&entity.EligibilityUse{}) &&

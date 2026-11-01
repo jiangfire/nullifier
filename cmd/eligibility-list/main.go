@@ -185,7 +185,9 @@ func readMembers(path string, idColumn string) ([]string, error) {
 	} else {
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
+			// 纯文本名单同样剥 BOM（Windows 记事本另存 UTF-8 默认带），
+			// 否则首个成员标识会粘上不可见的 U+FEFF。
+			line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\ufeff"))
 			if line == "" || strings.HasPrefix(line, "#") {
 				continue
 			}

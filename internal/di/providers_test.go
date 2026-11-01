@@ -62,7 +62,8 @@ func TestProviders_WiringSmoke(t *testing.T) {
 	encrypter := NewEncrypter()
 	thresholdCrypto := NewThresholdCrypto()
 	merkleBuilder := NewMerkleRootBuilder()
-	credentialIssuer := NewCredentialIssuer(cfg)
+	credentialIssuer, err := NewCredentialIssuer(cfg)
+	require.NoError(t, err)
 	require.NotNil(t, encrypter)
 	require.NotNil(t, thresholdCrypto)
 	require.NotNil(t, merkleBuilder)
@@ -117,6 +118,22 @@ func TestNewProofVerifier_InvalidPath(t *testing.T) {
 	}
 	_, err := NewProofVerifier(cfg)
 	require.Error(t, err)
+}
+
+// keystore 损坏 → provider 返回错误（启动失败），而不是带着坏 keystore
+// 上线、每次凭证签发都 500（F10）。
+func TestNewCredentialIssuer_FailsOnCorruptedStore(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "issuer_keys.json")
+	require.NoError(t, os.WriteFile(store, []byte("{not json"), 0o600))
+
+	cfg := &config.Config{
+		CredentialIssuerKeyPath:     store,
+		CredentialIssuerRotateAfter: 24 * time.Hour,
+	}
+
+	_, err := NewCredentialIssuer(cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "issuer key")
 }
 
 func TestNewDB_InvalidConfig(t *testing.T) {

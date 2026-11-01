@@ -98,6 +98,14 @@ func (uc *ProposalUseCase) Create(ctx context.Context, req *CreateProposalReques
 
 	// 名单域绑定：存在性在创建时就核过，领取链路（挑战 / 证明校验）据此解析。
 	scope := strings.TrimSpace(req.EligibilityScope)
+	// 长度先于存在性：列是 size:64，超长值在 PostgreSQL 上是 500 ——
+	// 别让部署形态决定错误的长相。
+	if len(scope) > 64 {
+		return nil, fmt.Errorf(
+			"%w: eligibility_scope must be at most 64 characters",
+			ErrInvalidRequest,
+		)
+	}
 	if scope != "" {
 		if uc.eligibility == nil || !uc.eligibility.Enabled() {
 			return nil, fmt.Errorf(
@@ -107,6 +115,15 @@ func (uc *ProposalUseCase) Create(ctx context.Context, req *CreateProposalReques
 		}
 		if !uc.eligibility.ScopeKnown(scope) {
 			return nil, fmt.Errorf("%w: unknown eligibility scope %q", ErrInvalidRequest, scope)
+		}
+	} else if uc.eligibility != nil && uc.eligibility.Enabled() {
+		// 空 scope = 走默认名单。多套名单且没有名为 default 的那套时，
+		// 领取链路会解析失败 —— 不能等第一个投票人撞上才 500，创建时就拒绝。
+		if _, _, err := uc.eligibility.RosterFor(""); err != nil {
+			return nil, fmt.Errorf(
+				"%w: no default eligibility roster resolves this proposal; set eligibility_scope explicitly",
+				ErrInvalidRequest,
+			)
 		}
 	}
 

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -750,6 +751,103 @@ crypto:
 	require.Contains(t, err.Error(), "mutually exclusive")
 }
 
+// TestLoad_EligibilityRostersRejectsExplicitDepth 列表写法下再显式配顶层
+// crypto.eligibility_depth → 启动失败：装配只吃每个名单自己的 depth，
+// 顶层值会被静默丢弃 —— 部署者以为的深度和实际的深度会不一致（F7）。
+// 非默认值的顶层 depth 在列表模式下只可能来自显式配置，拿它当判据
+// （viper 的 IsSet 对 SetDefault 过的键恒真，用不了）。
+func TestLoad_EligibilityRostersRejectsExplicitDepth(t *testing.T) {
+	configFile := writeRosterConfigFile(t, `
+server:
+  mode: debug
+crypto:
+  eligibility_depth: 12
+  eligibility_roots:
+    - name: acme-2026
+      root: `+testEligibilityRoot+`
+      vk_path: keys/acme.key
+      depth: 12
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+
+	_, err := Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "crypto.eligibility_depth")
+}
+
+// TestLoad_EligibilityRostersToleratesDefaultDepth 列表写法下顶层 depth 保持
+// 默认值（没显式配，或显式配成同一个默认值）→ 正常加载。
+func TestLoad_EligibilityRostersToleratesDefaultDepth(t *testing.T) {
+	configFile := writeRosterConfigFile(t, `
+server:
+  mode: debug
+crypto:
+  eligibility_depth: 10
+  eligibility_roots:
+    - name: acme-2026
+      root: `+testEligibilityRoot+`
+      vk_path: keys/acme.key
+      depth: 10
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Len(t, cfg.EligibilityRosters, 1)
+}
+
+// TestLoad_RejectsDuplicateAdminTokens 三档令牌两两相同 → 启动失败（release）：
+// operator 配成与 admin 同值等于把 admin 权发给运营档（F8）。
+func TestLoad_RejectsDuplicateAdminTokens(t *testing.T) {
+	for name, tokens := range map[string]AdminTokensConfig{
+		"operator equals admin":   {Admin: "same-token", Operator: "same-token"},
+		"auditor equals admin":    {Admin: "same-token", Auditor: "same-token"},
+		"auditor equals operator": {Operator: "same-token", Auditor: "same-token"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			oldWD, err := os.Getwd()
+			require.NoError(t, err)
+			tempDir := t.TempDir()
+			require.NoError(t, os.Chdir(tempDir))
+			t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+			t.Setenv("SERVER_MODE", "release")
+			t.Setenv("CRYPTO_VK_PATH", "vk.bin")
+			t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "")
+			t.Setenv("SERVER_ADMIN_TOKENS_ADMIN", tokens.Admin)
+			t.Setenv("SERVER_ADMIN_TOKENS_OPERATOR", tokens.Operator)
+			t.Setenv("SERVER_ADMIN_TOKENS_AUDITOR", tokens.Auditor)
+			setReleaseEligibilityEnv(t)
+
+			_, err = Load()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "must be distinct")
+		})
+	}
+}
+
+// TestLoad_RejectsLegacyTokenMatchingTier 旧单值与任一分级令牌同值 → 启动失败：
+// 同一枚令牌同时是两档，档位边界就没了。
+func TestLoad_RejectsLegacyTokenMatchingTier(t *testing.T) {
+	oldWD, err := os.Getwd()
+	require.NoError(t, err)
+	tempDir := t.TempDir()
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+
+	t.Setenv("SERVER_MODE", "release")
+	t.Setenv("CRYPTO_VK_PATH", "vk.bin")
+	t.Setenv("SERVER_ADMIN_BEARER_TOKEN", "shared-token")
+	t.Setenv("SERVER_ADMIN_TOKENS_ADMIN", "")
+	t.Setenv("SERVER_ADMIN_TOKENS_OPERATOR", "shared-token")
+	t.Setenv("SERVER_ADMIN_TOKENS_AUDITOR", "")
+	setReleaseEligibilityEnv(t)
+
+	_, err = Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "must be distinct")
+}
+
 // TestLoad_EligibilityRostersRejectsDuplicates 重名的名单 → 启动失败：
 // 「提案绑定的是哪一套」无从回答。
 func TestLoad_EligibilityRostersRejectsDuplicates(t *testing.T) {
@@ -854,4 +952,23 @@ crypto:
 	cfg, err = Load()
 	require.NoError(t, err)
 	require.Equal(t, "tok-op", cfg.AdminTokens.Operator)
+}
+
+// 名字超过 64 字符 → 启动失败（N5）：proposals.eligibility_scope 是 64 字符列，
+// PostgreSQL 上超长名单名会在建提案时炸 500 —— 配置阶段就拦下。
+func TestLoad_EligibilityRostersRejectsTooLongName(t *testing.T) {
+	configFile := writeRosterConfigFile(t, `
+server:
+  mode: debug
+crypto:
+  eligibility_roots:
+    - name: `+strings.Repeat("a", 65)+`
+      root: `+testEligibilityRoot+`
+      vk_path: keys/acme.key
+`)
+	t.Setenv(ConfigFileEnvVar, configFile)
+
+	_, err := Load()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "at most 64 characters")
 }

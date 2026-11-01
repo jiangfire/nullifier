@@ -274,12 +274,23 @@ func load(forMigration bool) (*Config, error) {
 	if err := validateEligibilityRosters(cfg.EligibilityRosters); err != nil {
 		return nil, err
 	}
-	if len(cfg.EligibilityRosters) > 0 &&
-		(cfg.EligibilityRoot != "" || cfg.EligibilityVerifyingKeyPath != "") {
-		return nil, errors.New(
-			"crypto.eligibility_roots and crypto.eligibility_root/vk_path are mutually exclusive: " +
-				"configure either the roster list or the single legacy roster, not both",
-		)
+	if len(cfg.EligibilityRosters) > 0 {
+		if cfg.EligibilityRoot != "" || cfg.EligibilityVerifyingKeyPath != "" {
+			return nil, errors.New(
+				"crypto.eligibility_roots and crypto.eligibility_root/vk_path are mutually exclusive: " +
+					"configure either the roster list or the single legacy roster, not both",
+			)
+		}
+		// 列表模式下顶层 depth 不参与装配（每个名单带自己的 depth），非默认值
+		// 只可能来自显式配置 —— 静默丢弃会让部署者以为的树深与实际不一致。
+		// viper 的 IsSet 对 SetDefault 过的键恒真，所以拿「非默认值」当显式判据。
+		if cfg.EligibilityDepth != eligibility.DefaultTreeDepth {
+			return nil, fmt.Errorf(
+				"crypto.eligibility_depth is ignored when crypto.eligibility_roots is configured: "+
+					"each roster carries its own depth; got %d, default is %d",
+				cfg.EligibilityDepth, eligibility.DefaultTreeDepth,
+			)
+		}
 	}
 	// 显式配置优先于按模式推导的默认值；环境变量优先于配置文件。
 	if raw := strings.TrimSpace(v.GetString("server.auto_migrate")); raw != "" {
@@ -347,6 +358,26 @@ func load(forMigration bool) (*Config, error) {
 				"server.admin_tokens.admin and server.admin_bearer_token are both configured with different values; keep one of them",
 			)
 		}
+		// 三档令牌跨档不同值：低档配成与高档同值等于把高权限发给低档 ——
+		// operator 配成与 admin 同值，admin 路由就对持 operator 令牌者放行。
+		// 旧单值与 admin_tokens.admin 同值不算跨档（等价于配了一处的存量写法，
+		// 上面已放行），但 operator / auditor 不得与任何一枚 admin 档令牌同值。
+		for _, admin := range []string{cfg.AdminBearerToken, cfg.AdminTokens.Admin} {
+			if admin == "" {
+				continue
+			}
+			if (cfg.AdminTokens.Operator != "" && cfg.AdminTokens.Operator == admin) ||
+				(cfg.AdminTokens.Auditor != "" && cfg.AdminTokens.Auditor == admin) {
+				return nil, errors.New(
+					"admin tokens must be distinct across tiers: operator/auditor may not share the admin token value",
+				)
+			}
+		}
+		if !adminTokensDistinct(cfg.AdminTokens.Operator, cfg.AdminTokens.Auditor) {
+			return nil, errors.New(
+				"admin tokens must be distinct across tiers: operator and auditor may not share a value",
+			)
+		}
 		// 限流是 release 模式的硬要求：公开端点上最贵的操作是投票
 		// （每张票都要验一次 Groth16 proof），不设上限时一个脚本就能把
 		// 验签算力打满。默认就是开的 —— 显式关掉则启动失败。
@@ -386,6 +417,22 @@ func IsReleaseMode(mode string) bool {
 	default:
 		return false
 	}
+}
+
+// adminTokensDistinct 检查令牌集合里非空值是否两两不同。
+// 空值跳过（「没配」不参与比对）。
+func adminTokensDistinct(tokens ...string) bool {
+	seen := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		if token == "" {
+			continue
+		}
+		if _, dup := seen[token]; dup {
+			return false
+		}
+		seen[token] = struct{}{}
+	}
+	return true
 }
 
 // loadRateLimitGroup 读一组限流额度。
@@ -456,6 +503,11 @@ func validateEligibilityRosters(rosters []EligibilityRosterConfig) error {
 		roster.VerifyingKeyPath = strings.TrimSpace(roster.VerifyingKeyPath)
 		if roster.Name == "" {
 			return fmt.Errorf("crypto.eligibility_roots[%d]: name is required", i)
+		}
+		// proposals.eligibility_scope 是 64 字符列：超长的名单名会在建提案时
+		// 撞数据库错误（SQLite 不纠察，PostgreSQL 上是 500）—— 配置阶段拦下。
+		if len(roster.Name) > 64 {
+			return fmt.Errorf("crypto.eligibility_roots[%d]: name must be at most 64 characters", i)
 		}
 		if roster.Root == "" {
 			return fmt.Errorf("crypto.eligibility_roots[%d] (%s): root is required", i, roster.Name)

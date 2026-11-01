@@ -27,6 +27,38 @@ func NewTallyResultRepository(db *gorm.DB) *TallyResultRepository {
 }
 
 func (r *TallyResultRepository) Save(ctx context.Context, result *entity.TallyResult) error {
+	if err := r.prepareTallyJSON(result); err != nil {
+		return err
+	}
+	if err := r.db.WithContext(ctx).Save(result).Error; err != nil {
+		if isUniqueConstraintError(err) {
+			return repository.ErrDuplicateTallyResult
+		}
+		return err
+	}
+	return nil
+}
+
+// SaveWithAnchor 原子落库计票结果与审计锚点（F11）：两笔写必须在同一事务里
+// —— 锚点写失败时结果一起回滚。已发布的结果撞唯一索引挡住一切重试，
+// 锚点缺了就永远补不上。
+func (r *TallyResultRepository) SaveWithAnchor(ctx context.Context, result *entity.TallyResult, anchor *entity.AuditAnchor) error {
+	if err := r.prepareTallyJSON(result); err != nil {
+		return err
+	}
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(result).Error; err != nil {
+			return err
+		}
+		return tx.Create(anchor).Error
+	})
+	if isUniqueConstraintError(err) {
+		return repository.ErrDuplicateTallyResult
+	}
+	return err
+}
+
+func (r *TallyResultRepository) prepareTallyJSON(result *entity.TallyResult) error {
 	if result.TallyJSON == "" && result.Tally != nil {
 		raw, err := marshalTallyJSON(result.Tally)
 		if err != nil {
@@ -34,7 +66,7 @@ func (r *TallyResultRepository) Save(ctx context.Context, result *entity.TallyRe
 		}
 		result.TallyJSON = raw
 	}
-	return r.db.WithContext(ctx).Save(result).Error
+	return nil
 }
 
 func (r *TallyResultRepository) GetByProposal(ctx context.Context, proposalID string) (*entity.TallyResult, error) {
