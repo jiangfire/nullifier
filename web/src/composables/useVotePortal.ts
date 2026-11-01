@@ -1209,6 +1209,15 @@ export function useVotePortal() {
     if (root === '' || challengeValue === '') {
       throw new Error('服务端返回的领取挑战不完整');
     }
+    // 树深不一致时证明注定验不过：挑战响应里就有 depth，提前给出精确错误，
+    // 省一次 7~10 秒的白烧证明（N7）。
+    const serverDepth = challenge === null ? undefined : challenge.depth;
+    if (typeof serverDepth === 'number' && pack.depth !== serverDepth) {
+      throw new Error(
+        `资格文件与名单树深不一致：资格文件是 ${pack.depth}，服务端名单是 ${serverDepth}。` +
+          '请向运营方确认名单对应的树深并重新导出资格文件',
+      );
+    }
 
     const proof = await generateEligibilityProof({
       proposalId,
@@ -1360,6 +1369,9 @@ export function useVotePortal() {
           blindSignResult.code,
           '服务端拒绝了这次盲签名',
         ),
+        // 预留被顶掉/过期时服务端回 409 CREDENTIAL_EXISTS：换一个槽位重来
+        // 就能成，与服务端、CLI 的重试契约一致（F12）。
+        retryable: isSlotTaken(blindSignResult.status, blindSignResult.code),
       };
     }
     const blindSignature = textOf(toObject(blindSignResult.data), 'blind_signature');

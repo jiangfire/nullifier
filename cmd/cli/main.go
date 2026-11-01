@@ -277,9 +277,9 @@ func (r *credentialReservation) issuerPublicKey() (*domaincrypto.IssuerPublicKey
 
 // claimMaxAttempts 是匿名领取的重试次数。
 //
-// 预留**不占位**：服务端取槽位时不改状态，所以并发领取会抢到同一个槽位。抢输的
-// 那个换一个槽位重来 —— 但重试要重新盲化（新的 user_id 意味着新的消息），所以
-// 重试只能在客户端做。
+// 服务端预留有 TTL 占位（v0.3.0 起）：并发领取各拿各的槽位，409 只在预留
+// 过期或被顶掉时出现。撞输的那个换一个槽位重来 —— 但重试要重新盲化（新的
+// user_id 意味着新的消息），所以重试只能在客户端做。
 const claimMaxAttempts = 5
 
 // runBlindSignatureFlow 走完真两段式盲签名的**客户端侧**，并在槽位被抢时重试。
