@@ -17,12 +17,12 @@
 
 import type {
   EligibilityMemberPackage,
-  EligibilityProverResult,
   EligibilityProveRequest,
+  EligibilityProverResult,
   ProverWorkerMessage,
-  ProverWorkerReply,
 } from './wasm-prover-protocol';
 import { assetUrl } from './wasm-prover';
+import { callProverWorker } from './prover-client';
 
 /** 出资格证明所需的参数。 */
 export interface EligibilityProofRequest {
@@ -90,37 +90,26 @@ export function buildEligibilityProveRequest(
 export async function generateEligibilityProof(
   request: EligibilityProofRequest,
 ): Promise<EligibilityProofResult> {
-  const worker = new Worker(new URL('../workers/ballot-prover.worker.ts', import.meta.url));
-  try {
-    const message: ProverWorkerMessage = {
-      type: 'proveEligibility',
-      glueUrl: assetUrl('wasm_exec.js'),
-      wasmUrl: assetUrl('ballot-prover.wasm'),
-      provingKeyUrl: assetUrl('eligibility-proving.key'),
-      request: buildEligibilityProveRequest(request),
-    };
-    const result = await new Promise<EligibilityProverResult>((resolve, reject) => {
-      worker.onmessage = (event: MessageEvent<ProverWorkerReply<EligibilityProverResult>>) => {
-        resolve(event.data.result);
-      };
-      worker.onerror = (event: ErrorEvent) => {
-        reject(new Error(event.message || '浏览器端资格 prover 启动失败'));
-      };
-      worker.postMessage(message);
-    });
-    if (!result.ok) {
-      throw new Error(result.error ?? '浏览器端生成资格证明失败');
-    }
-    if (!result.proof || !result.qualification_id) {
-      throw new Error('浏览器端生成资格证明失败：结果不完整');
-    }
-    return {
-      proof: result.proof,
-      qualificationId: result.qualification_id,
-      initMs: result.init_ms ?? 0,
-      proveMs: result.prove_ms ?? 0,
-    };
-  } finally {
-    worker.terminate();
+  const message: ProverWorkerMessage = {
+    type: 'proveEligibility',
+    glueUrl: assetUrl('wasm_exec.js'),
+    wasmUrl: assetUrl('ballot-prover.wasm'),
+    provingKeyUrl: assetUrl('eligibility-proving.key'),
+    request: buildEligibilityProveRequest(request),
+  };
+  // Worker 常驻复用：领取重试（撞槽重来）时第二份证明不再重付下载与
+  // 编译的全价（见 lib/prover-client.ts）。
+  const result = await callProverWorker<EligibilityProverResult>(message);
+  if (!result.ok) {
+    throw new Error(result.error ?? '浏览器端生成资格证明失败');
   }
+  if (!result.proof || !result.qualification_id) {
+    throw new Error('浏览器端生成资格证明失败：结果不完整');
+  }
+  return {
+    proof: result.proof,
+    qualificationId: result.qualification_id,
+    initMs: result.init_ms ?? 0,
+    proveMs: result.prove_ms ?? 0,
+  };
 }
