@@ -147,6 +147,10 @@ func (uc *TallyUseCase) SetupThresholdSession(
 		UpdatedAt:  now,
 	}
 	if err := uc.sessionRepo.Save(ctx, session); err != nil {
+		// 并发双建撞唯一索引 → 409，而不是裸方言错误的 500（N4）。
+		if errors.Is(err, repository.ErrDuplicateDecryptionSession) {
+			return nil, fmt.Errorf("%w: proposal %s", ErrSessionAlreadyExists, proposalID)
+		}
 		return nil, fmt.Errorf("save decryption session: %w", err)
 	}
 
@@ -263,10 +267,6 @@ func (uc *TallyUseCase) PublishResult(
 		UpdatedAt:   now,
 		Tally:       cloneTallyMap(computed.Tally),
 	}
-	if err := uc.resultRepo.Save(ctx, result); err != nil {
-		return nil, fmt.Errorf("save tally result: %w", err)
-	}
-
 	anchor := &entity.AuditAnchor{
 		ID:         uuid.NewString(),
 		ProposalID: proposalID,
@@ -274,8 +274,13 @@ func (uc *TallyUseCase) PublishResult(
 		AnchorHash: computed.AnchorHash,
 		CreatedAt:  now,
 	}
-	if err := uc.anchorRepo.Save(ctx, anchor); err != nil {
-		return nil, fmt.Errorf("save audit anchor: %w", err)
+	// 结果与锚点原子落库（F11）：锚点写失败必须连结果一起回滚 —— 结果一旦
+	// 单独落库，唯一索引挡住一切重试，锚点就永久缺失了。
+	if err := uc.resultRepo.SaveWithAnchor(ctx, result, anchor); err != nil {
+		if errors.Is(err, repository.ErrDuplicateTallyResult) {
+			return nil, fmt.Errorf("%w: proposal %s", ErrResultAlreadyPublished, proposalID)
+		}
+		return nil, fmt.Errorf("save published result: %w", err)
 	}
 
 	uc.logger.Info("tally result published",

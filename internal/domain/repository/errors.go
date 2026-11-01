@@ -13,4 +13,8 @@ var (
 	ErrDuplicateCredential = errors.New("duplicate credential")
 	// ErrDuplicateEligibilityUse 表示命中资格唯一约束（同一提案下的资格已用过）。
 	ErrDuplicateEligibilityUse = errors.New("duplicate eligibility use")
+	// ErrDuplicateTallyResult 表示命中计票结果唯一约束（同一提案已发布过结果）。
+	ErrDuplicateTallyResult = errors.New("duplicate tally result")
+	// ErrDuplicateDecryptionSession 表示命中解密会话唯一约束（同一提案已建会话）。
+	ErrDuplicateDecryptionSession = errors.New("duplicate decryption session")
 )
