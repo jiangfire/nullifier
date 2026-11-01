@@ -1047,24 +1047,28 @@ crypto（`internal/infrastructure/crypto/eligibility/`）、CLI（`cmd/cli/eligi
 > D3「claim 即烧资格」保持不变，运营恢复口径在部署清单 §7；D4 刻意只配 operator/auditor
 > 合法且 fail-closed）。跟踪文档已删，**其余待办迁到这里**。
 
-**P1 —— 与测试并行修（每项独立提交）**：
+**P1 —— 已全部修复（2026-10-29，随测试准备批次落地，每项独立提交）**：
 
-| # | 问题 | 位置 |
+| # | 问题与修法 | 状态 |
 |---|---|---|
-| F6 | `SchemaReady` 只做 `HasTable`，不查 `eligibility_uses` 表与 `eligibility_scope` 列 —— v0.3.0 库忘跑 `-migrate` 时启动照常通过，运行期领取链路全断。加 `HasTable(EligibilityUse)` 与 `HasColumn(proposals.eligibility_scope)` | `internal/infrastructure/persistence/migration.go` |
-| F7 | `crypto.eligibility_roots` 与显式 `crypto.eligibility_depth` 混配不报错，depth 被静默忽略 —— 用 `v.IsSet("crypto.eligibility_depth")` 识别显式配置，命中即启动失败 | `internal/config/config.go` |
-| F8 | 三档令牌不校验互不相同：operator 与 admin 同值 = 白送 admin 权 —— release 校验段对去空格后的四枚令牌两两去重断言 | `internal/config/config.go` |
-| F9 | 多名单且无 default 时空 scope 提案创建成功但首个领取者吃 500（`ScopeKnown("")` 恒真、错误不是领域错误）—— `CreateProposal` 在资格开启、scope 为空且无 default 可解析时 400 拒绝 | `internal/domain/crypto/eligibility.go` + `internal/usecase/proposal.go` |
-| F10 | 签发方 keystore 加载失败被推迟成运行期 initErr，与资格密钥 fail-fast 口径不一致 —— 构造时返回错误，或启动时显式 `IssuerPublicKey` 预检 | `internal/infrastructure/crypto/kryptology_credential_issuer.go` |
-| F11 | `PublishResult` 落 result 与落 audit anchor 不在同一事务，anchor 写失败即永久缺失（唯一索引挡住重试）—— 两笔写入包进一个事务，或允许对已发布提案补偿写 anchor | `internal/usecase/tally.go` |
-| F12 | ✅ **已修（2026-10-29）**：blind-sign 分支补 `retryable` + 单测；CLI 过时注释已改 | `web/src/composables/useVotePortal.ts` |
-| F13 | ✅ **已修（2026-10-29，走备选方案）**：CLI `proposal-create` 补 `-scope` 标志（带请求体单测），部署清单 §7 写明多名单提案走 CLI。**门户下拉不做**：`/healthz` 只报名单套数，做下拉得把名单名字暴露到公开端点 —— 那是产品决策（名单名可能含组织信息），另行拍板；运营期间 CLI 足够 | `cmd/cli/main.go` + 部署清单 |
+| F6 | v0.3.0 库忘跑 `-migrate` 时启动照常通过 —— `SchemaReady` 补 `HasColumn(proposals.eligibility_scope)`（`eligibility_uses` 表原本已查，评审报告这条有误） | ✅ 已修 |
+| F7 | 列表模式顶层 `eligibility_depth` 被静默忽略 —— 非默认值即拒绝（viper `IsSet` 对 SetDefault 过的键恒真，不能用作显式判据），错误指向每名单自己的 depth | ✅ 已修 |
+| F8 | 跨档令牌同值 = 低档拿高权 —— release 校验段拒绝 operator/auditor 与任何 admin 档令牌同值；旧单值与 `admin_tokens.admin` 同值的存量写法保留（同档等价） | ✅ 已修 |
+| F9 | 多名单无 default 时空 scope 提案创建成功但领取 500 —— `CreateProposal` 创建时预检 `RosterFor("")`，解析不出即 400 | ✅ 已修 |
+| F10 | keystore 损坏推迟成运行期 500 —— 构造函数保留签名、暴露 `InitError()`，DI 装配时检查并启动失败（与资格密钥口径一致；wire_gen 已重生成） | ✅ 已修 |
+| F11 | 结果与锚点两笔写不同事务，anchor 失败永久缺失 —— `TallyResultRepository.SaveWithAnchor` 单事务落两笔，发布走它 | ✅ 已修 |
+| F12 | 门户 blind-sign 409 不重试 —— 补 `retryable` + 单测；CLI「预留不占位」过时注释已改 | ✅ 已修 |
+| F13 | 多名单提案运营入口 —— **走备选方案**：CLI `proposal-create` 补 `-scope`（带请求体单测），部署清单 §7 写明。**门户下拉不做**：`/healthz` 只报套数，做下拉要把名单名字暴露到公开端点 —— 产品决策（名单名可能含组织信息），另行拍板 | ✅ 已修（备选方案） |
 
-**P2 —— Nit（排期，不阻塞）**：启动日志 `eligibility_enforced` 不认多名单配置恒 false（`cmd/server/main.go`）·
-`eligibility-list` 的 `.txt` 分支不剥 UTF-8 BOM（与注释不符）· `CreateProposal` 不拒绝过去的 `starts_at`
-（造出无法备解密会话的死提案）· 并发双建会话/双发布回 500 而非 409 · roster 名/scope 无 64 长度上限
-（PG 上超长炸 500）· Worker 内 fetch 无超时（网络停滞按钮永久卡死）· 门户丢弃挑战响应里的 `depth`
-（深度不匹配白烧 7 秒证明）· SQLite `_busy_timeout` 未显式写进 DSN · 每次出证明重下 11.9 MB WASM（设计取舍，记录在案）。
+**P2 —— 处置结果（2026-10-29）**：
+
+- ✅ **已顺手修**：启动日志 `eligibility_enforced` 认多名单 · `.txt` 名单剥 BOM · 并发双建会话/双发布回 409 ·
+  roster 名/scope 64 长度上限 · 门户比对挑战响应 `depth` · SQLite `_busy_timeout` 显式写进 ConnectHook
+- ⚠️ **评估后不采纳（N3）**：「拒绝创建窗口已开的提案」——解密会话守卫只拦**开放中**，关窗后可正常
+  setup + publish，危害是浪费一个窗口而非永久死提案（评审报告夸大了）；多名单 e2e 的领取链路测试
+  也依赖创建开窗提案。已加用例把「允许」钉住。门户侧加提示留排期。
+- ⬜ **仍开放**：Worker 内 fetch 无超时（网络停滞按钮永久卡死）· 每次出证明重下 11.9 MB WASM（设计取舍）·
+  每深度密钥文件名固定靠指纹配对（fail-closed 已有测试兜底）。
 
 ---
 
